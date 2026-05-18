@@ -11,6 +11,7 @@ UI served at: http://localhost:9000
 import base64
 import copy
 import asyncio
+import fnmatch
 import ipaddress
 import hashlib
 import io
@@ -26,9 +27,13 @@ import pty
 import shutil
 import signal
 import subprocess
+import sys
 import threading
+import time
 import socket
 import uuid
+import textwrap
+import traceback
 from functools import partial
 from collections import deque
 from pathlib import Path
@@ -44,7 +49,7 @@ import uvicorn
 from html import escape as xml_escape
 from fastapi import FastAPI, File, HTTPException, Query, Request, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import Response, StreamingResponse
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.routing import APIRouter
 from pydantic import BaseModel
@@ -69,7 +74,681 @@ def _now() -> str:
 def _now_http() -> str:
     return datetime.now(timezone.utc).strftime("%a, %d %b %Y %H:%M:%S GMT")
 
-STATE_VERSION = 3
+
+def _iam_root_principal() -> str:
+    return f"arn:aws:iam::{AWS_ACCOUNT_ID}:root"
+
+
+def _iam_user_arn(user_name: str) -> str:
+    return f"arn:aws:iam::{AWS_ACCOUNT_ID}:user/{user_name}"
+
+
+def _iam_role_arn(role_name: str) -> str:
+    return f"arn:aws:iam::{AWS_ACCOUNT_ID}:role/{role_name}"
+
+
+def _iam_group_arn(group_name: str) -> str:
+    return f"arn:aws:iam::{AWS_ACCOUNT_ID}:group/{group_name}"
+
+
+def _iam_s3_bucket_arn(bucket: str) -> str:
+    return f"arn:aws:s3:::{bucket}"
+
+
+def _iam_s3_object_arn(bucket: str, key: str) -> str:
+    return f"arn:aws:s3:::{bucket}/{key}"
+
+
+def _iam_ec2_instance_arn(instance_id: str) -> str:
+    return f"arn:aws:ec2:us-east-1:{AWS_ACCOUNT_ID}:instance/{instance_id}"
+
+
+def _iam_ec2_vpc_arn(vpc_id: str) -> str:
+    return f"arn:aws:ec2:us-east-1:{AWS_ACCOUNT_ID}:vpc/{vpc_id}"
+
+
+def _iam_ec2_subnet_arn(subnet_id: str) -> str:
+    return f"arn:aws:ec2:us-east-1:{AWS_ACCOUNT_ID}:subnet/{subnet_id}"
+
+
+def _iam_ec2_security_group_arn(group_id: str) -> str:
+    return f"arn:aws:ec2:us-east-1:{AWS_ACCOUNT_ID}:security-group/{group_id}"
+
+
+def _iam_ec2_route_table_arn(route_table_id: str) -> str:
+    return f"arn:aws:ec2:us-east-1:{AWS_ACCOUNT_ID}:route-table/{route_table_id}"
+
+
+def _iam_ec2_internet_gateway_arn(gateway_id: str) -> str:
+    return f"arn:aws:ec2:us-east-1:{AWS_ACCOUNT_ID}:internet-gateway/{gateway_id}"
+
+
+def _iam_apigw_api_arn(api_id: str) -> str:
+    return f"arn:aws:apigateway:us-east-1::/restapis/{api_id}"
+
+
+def _iam_apigw_stage_arn(api_id: str, stage_name: str) -> str:
+    return f"arn:aws:apigateway:us-east-1::/restapis/{api_id}/stages/{stage_name}"
+
+
+def _iam_rds_db_arn(db_instance_identifier: str) -> str:
+    return f"arn:aws:rds:us-east-1:{AWS_ACCOUNT_ID}:db:{db_instance_identifier}"
+
+
+def _iam_rds_subnet_group_arn(db_subnet_group_name: str) -> str:
+    return f"arn:aws:rds:us-east-1:{AWS_ACCOUNT_ID}:subgrp:{db_subnet_group_name}"
+
+
+def _iam_rds_parameter_group_arn(db_parameter_group_name: str) -> str:
+    return f"arn:aws:rds:us-east-1:{AWS_ACCOUNT_ID}:pg:{db_parameter_group_name}"
+
+
+def _iam_rds_snapshot_arn(db_snapshot_identifier: str) -> str:
+    return f"arn:aws:rds:us-east-1:{AWS_ACCOUNT_ID}:snapshot:{db_snapshot_identifier}"
+
+
+def _iam_sqs_queue_arn(queue_name: str) -> str:
+    return f"arn:aws:sqs:us-east-1:{AWS_ACCOUNT_ID}:{queue_name}"
+
+
+def _iam_lambda_function_arn(function_name: str) -> str:
+    return f"arn:aws:lambda:us-east-1:{AWS_ACCOUNT_ID}:function:{function_name}"
+
+
+def _iam_state() -> dict:
+    return STATE.setdefault("iam", {"users": {}, "groups": {}, "roles": {}, "policies": {}, "attachments": [], "identity_providers": {}, "account_settings": {"password_policy": {"minimum_length": 8, "require_symbols": True, "require_numbers": True, "require_uppercase": True, "require_lowercase": True}}})
+
+
+def _iam_is_root_principal(principal: str) -> bool:
+    principal = (principal or "").strip().lower()
+    return principal in {"root", "admin", _iam_root_principal().lower()}
+
+
+def _iam_principal_from_request(request: Request) -> str:
+    headers = request.headers
+    principal = (
+        headers.get("x-cloudlearn-principal")
+        or headers.get("x-cloudlearn-user")
+        or headers.get("x-cloudlearn-role")
+        or headers.get("x-principal")
+        or ""
+    ).strip()
+    return principal or _iam_root_principal()
+
+
+def _iam_resolve_identity(principal: str) -> dict:
+    principal = (principal or "").strip() or _iam_root_principal()
+    state = _iam_state()
+    if _iam_is_root_principal(principal):
+        return {
+            "principal": principal,
+            "type": "root",
+            "name": "root",
+            "arn": _iam_root_principal(),
+            "policy_ids": [],
+            "policies": [],
+            "is_root": True,
+        }
+
+    users = list(state.get("users", {}).values())
+    roles = list(state.get("roles", {}).values())
+    groups = list(state.get("groups", {}).values())
+    for user in users:
+        if principal in {user.get("user_id", ""), user.get("user_name", ""), _iam_user_arn(user.get("user_name", ""))}:
+            policy_ids = list(user.get("policies", []))
+            group_ids = list(user.get("groups", []))
+            for group in groups:
+                if group.get("group_id") in group_ids or group.get("group_name") in group_ids or _iam_group_arn(group.get("group_name", "")) in group_ids:
+                    policy_ids.extend(list(group.get("policies", [])))
+            policy_ids = list(dict.fromkeys(policy_ids))
+            policies = [state.get("policies", {}).get(pid) for pid in policy_ids if state.get("policies", {}).get(pid)]
+            return {
+                "principal": principal,
+                "type": "user",
+                "name": user.get("user_name", ""),
+                "arn": _iam_user_arn(user.get("user_name", "")),
+                "policy_ids": policy_ids,
+                "policies": policies,
+                "is_root": False,
+                "user_id": user.get("user_id", ""),
+                "groups": group_ids,
+            }
+    for role in roles:
+        if principal in {role.get("role_id", ""), role.get("role_name", ""), _iam_role_arn(role.get("role_name", ""))}:
+            policy_ids = list(role.get("policies", []))
+            policies = [state.get("policies", {}).get(pid) for pid in policy_ids if state.get("policies", {}).get(pid)]
+            return {
+                "principal": principal,
+                "type": "role",
+                "name": role.get("role_name", ""),
+                "arn": _iam_role_arn(role.get("role_name", "")),
+                "policy_ids": policy_ids,
+                "policies": policies,
+                "is_root": False,
+                "role_id": role.get("role_id", ""),
+            }
+    return {
+        "principal": principal,
+        "type": "unknown",
+        "name": principal,
+        "arn": principal,
+        "policy_ids": [],
+        "policies": [],
+        "is_root": False,
+    }
+
+
+def _iam_find_group(group_id_or_name: str) -> dict | None:
+    key = (group_id_or_name or "").strip()
+    if not key:
+        return None
+    state = _iam_state()
+    groups = state.get("groups", {})
+    for group in groups.values():
+        if key in {group.get("group_id", ""), group.get("group_name", ""), _iam_group_arn(group.get("group_name", ""))}:
+            return group
+    return None
+
+
+def _iam_find_user(user_id_or_name: str) -> dict | None:
+    key = (user_id_or_name or "").strip()
+    if not key:
+        return None
+    state = _iam_state()
+    users = state.get("users", {})
+    for user in users.values():
+        if key in {user.get("user_id", ""), user.get("user_name", ""), _iam_user_arn(user.get("user_name", ""))}:
+            return user
+    return None
+
+
+def _iam_target_keys(target_type: str, target: dict) -> set[str]:
+    target_type = (target_type or "").strip().lower()
+    if target_type == "user":
+        return {
+            target.get("user_id", ""),
+            target.get("user_name", ""),
+            _iam_user_arn(target.get("user_name", "")),
+        }
+    if target_type == "group":
+        return {
+            target.get("group_id", ""),
+            target.get("group_name", ""),
+            _iam_group_arn(target.get("group_name", "")),
+        }
+    if target_type == "role":
+        return {
+            target.get("role_id", ""),
+            target.get("role_name", ""),
+            _iam_role_arn(target.get("role_name", "")),
+        }
+    return {target.get("id", ""), target.get("name", "")}
+
+
+def _iam_detach_policy_records(target_type: str, target_id: str, policy_id: str | None = None) -> int:
+    target_type = (target_type or "").strip().lower()
+    target_id = (target_id or "").strip()
+    attachments = iam_state.setdefault("attachments", [])
+    if not target_type or not target_id:
+        return 0
+    next_attachments = []
+    removed = 0
+    for attachment in attachments:
+        if attachment.get("target_type") != target_type:
+            next_attachments.append(attachment)
+            continue
+        if attachment.get("target_id") != target_id and attachment.get("target_id") not in _iam_target_keys(target_type, {"user_id": target_id, "group_id": target_id, "role_id": target_id, "user_name": target_id, "group_name": target_id, "role_name": target_id}):
+            next_attachments.append(attachment)
+            continue
+        if policy_id and attachment.get("policy_id") != policy_id:
+            next_attachments.append(attachment)
+            continue
+        removed += 1
+        principal = None
+        if target_type == "user":
+            principal = _iam_find_user(target_id)
+        elif target_type == "group":
+            principal = _iam_find_group(target_id)
+        elif target_type == "role":
+            principal = iam_state.get("roles", {}).get(target_id)
+            if not principal:
+                for role in iam_state.get("roles", {}).values():
+                    if target_id in {role.get("role_id", ""), role.get("role_name", ""), _iam_role_arn(role.get("role_name", ""))}:
+                        principal = role
+                        break
+        if principal is not None:
+            principal["policies"] = [pid for pid in principal.get("policies", []) if pid != attachment.get("policy_id")]
+    iam_state["attachments"] = next_attachments
+    return removed
+
+
+def _iam_remove_policy_from_all_principals(policy_id: str) -> int:
+    removed = 0
+    for target_type, principals in (("user", iam_state.get("users", {})), ("group", iam_state.get("groups", {})), ("role", iam_state.get("roles", {}))):
+        for principal in principals.values():
+            policies = list(principal.get("policies", []))
+            if policy_id in policies:
+                principal["policies"] = [pid for pid in policies if pid != policy_id]
+                removed += 1
+    iam_state["attachments"] = [a for a in iam_state.get("attachments", []) if a.get("policy_id") != policy_id]
+    return removed
+
+
+def _iam_value_matches(pattern: Any, value: str) -> bool:
+    if isinstance(pattern, list):
+        return any(_iam_value_matches(item, value) for item in pattern)
+    if pattern is None:
+        return False
+    pattern = str(pattern).strip()
+    value = str(value or "")
+    if not pattern:
+        return False
+    return fnmatch.fnmatchcase(value.lower(), pattern.lower())
+
+
+def _iam_condition_matches(condition: dict[str, Any], context: dict[str, str]) -> bool:
+    if not condition:
+        return True
+    for operator, operands in condition.items():
+        if not isinstance(operands, dict):
+            return False
+        for key, expected in operands.items():
+            actual = context.get(key, "")
+            operator_name = operator.lower()
+            if operator_name in {"stringequals", "arnequals"}:
+                if isinstance(expected, list):
+                    if actual not in [str(item) for item in expected]:
+                        return False
+                elif actual != str(expected):
+                    return False
+            elif operator_name in {"stringlike", "arnlike"}:
+                if not _iam_value_matches(expected, actual):
+                    return False
+            else:
+                return False
+    return True
+
+
+def _iam_statement_matches(statement: dict[str, Any], action: str, resource: str, context: dict[str, str]) -> bool:
+    if not isinstance(statement, dict):
+        return False
+    effect = str(statement.get("Effect", "Allow")).strip().lower()
+    if effect not in {"allow", "deny"}:
+        return False
+    if "Action" in statement:
+        actions = statement.get("Action")
+        if not _iam_value_matches(actions, action):
+            return False
+    elif "NotAction" in statement:
+        if _iam_value_matches(statement.get("NotAction"), action):
+            return False
+    else:
+        return False
+    if "Resource" in statement:
+        resources = statement.get("Resource")
+        if not _iam_value_matches(resources, resource):
+            return False
+    elif "NotResource" in statement:
+        if _iam_value_matches(statement.get("NotResource"), resource):
+            return False
+    if not _iam_condition_matches(statement.get("Condition", {}) or {}, context):
+        return False
+    return True
+
+
+def _iam_authorize(principal: str, action: str, resource: str, context: dict[str, str] | None = None) -> tuple[bool, str]:
+    identity = _iam_resolve_identity(principal)
+    if identity.get("is_root"):
+        return True, ""
+    ctx = {
+        "aws:PrincipalArn": identity.get("arn", ""),
+        "aws:PrincipalType": identity.get("type", ""),
+        "aws:username": identity.get("name", ""),
+        "aws:RequestedRegion": "us-east-1",
+        "aws:ResourceArn": resource,
+    }
+    if context:
+        ctx.update({k: str(v) for k, v in context.items()})
+    policies = identity.get("policies", [])
+    if not policies:
+        return False, f"AccessDenied: principal '{principal}' has no attached policies for {action}."
+    for policy in policies:
+        for statement in (policy or {}).get("document", {}).get("Statement", []):
+            if not _iam_statement_matches(statement, action, resource, ctx):
+                continue
+            if str(statement.get("Effect", "")).strip().lower() == "deny":
+                return False, f"AccessDenied: explicit deny for {action} on {resource}."
+            if str(statement.get("Effect", "")).strip().lower() == "allow":
+                return True, ""
+    return False, f"AccessDenied: principal '{principal}' is not authorized for {action} on {resource}."
+
+
+def _iam_deny_response(request: Request, action: str, resource: str, detail: str) -> Response:
+    path = request.url.path
+    if path == "/" or path.startswith("/api/s3/") or (path.count("/") <= 2 and path not in {"/", "/ui", "/product", "/api", "/healthz"} and not path.startswith("/api/")):
+        return _error_xml("AccessDenied", detail, path, 403)
+    return JSONResponse(status_code=403, content={"detail": detail, "action": action, "resource": resource})
+
+
+def _iam_route_action_resource(request: Request) -> tuple[str, str] | None:
+    path = request.url.path
+    method = request.method.upper()
+    query = dict(request.query_params)
+
+    if path in {"/healthz", "/docs", "/redoc", "/openapi.json"} or path.startswith(("/ui", "/product", "/assets/", "/static/", "/favicon.ico")):
+        return None
+    if path.startswith("/api/catalog") or path.startswith("/api/packs") or path.startswith("/api/license") or path.startswith("/api/runtime/bundles") or path.startswith("/api/deployments") or path.startswith("/api/actions"):
+        return None
+    if path.startswith("/api/iam/"):
+        action_map = {
+            ("GET", "/api/iam/users"): ("iam:ListUsers", "*"),
+            ("POST", "/api/iam/users"): ("iam:CreateUser", "*"),
+            ("GET", "/api/iam/groups"): ("iam:ListGroups", "*"),
+            ("POST", "/api/iam/groups"): ("iam:CreateGroup", "*"),
+            ("GET", "/api/iam/roles"): ("iam:ListRoles", "*"),
+            ("POST", "/api/iam/roles"): ("iam:CreateRole", "*"),
+            ("GET", "/api/iam/policies"): ("iam:ListPolicies", "*"),
+            ("POST", "/api/iam/policies"): ("iam:CreatePolicy", "*"),
+            ("POST", "/api/iam/attach-policy"): ("iam:AttachPolicy", "*"),
+            ("GET", "/api/iam/attachments"): ("iam:ListAttachments", "*"),
+            ("GET", "/api/iam/identity-providers"): ("iam:ListIdentityProviders", "*"),
+            ("POST", "/api/iam/identity-providers"): ("iam:CreateIdentityProvider", "*"),
+            ("GET", "/api/iam/account-settings"): ("iam:GetAccountSettings", "*"),
+            ("PUT", "/api/iam/account-settings"): ("iam:UpdateAccountSettings", "*"),
+        }
+        if path.startswith("/api/iam/groups/"):
+            parts = [p for p in path.split("/") if p]
+            if len(parts) == 5 and parts[4] == "users" and method == "POST":
+                return ("iam:AddUserToGroup", "*")
+            if len(parts) == 6 and parts[4] == "users" and method == "DELETE":
+                return ("iam:RemoveUserFromGroup", "*")
+            if len(parts) == 4 and method == "DELETE":
+                return ("iam:DeleteGroup", "*")
+        if path.startswith("/api/iam/users/") and method == "DELETE":
+            return ("iam:DeleteUser", "*")
+        if path.startswith("/api/iam/roles/") and method == "DELETE":
+            return ("iam:DeleteRole", "*")
+        if path.startswith("/api/iam/policies/") and method == "DELETE":
+            return ("iam:DeletePolicy", "*")
+        if path.startswith("/api/iam/attachments") and method == "DELETE":
+            return ("iam:DetachPolicy", "*")
+        if path.startswith("/api/iam/identity-providers/"):
+            if method == "DELETE":
+                return ("iam:DeleteIdentityProvider", "*")
+        if path.startswith("/api/iam/users/") and path.endswith("/policies") and method == "GET":
+            return ("iam:ListUserPolicies", "*")
+        if path.startswith("/api/iam/roles/") and path.endswith("/policies") and method == "GET":
+            return ("iam:ListRolePolicies", "*")
+        if path.startswith("/api/iam/policies/") and path.endswith("/usage") and method == "GET":
+            return ("iam:ListPolicyUsage", "*")
+        return action_map.get((method, path))
+    if path.startswith("/api/s3/"):
+        parts = [p for p in path.split("/") if p]
+        if path == "/api/s3/buckets":
+            return ({"GET": "s3:ListAllMyBuckets"}.get(method), "*") if method == "GET" else None
+        if len(parts) >= 4 and parts[2] == "buckets":
+            bucket = parts[3]
+            bucket_arn = _iam_s3_bucket_arn(bucket)
+            tail = parts[4:] if len(parts) > 4 else []
+            if not tail:
+                return ({"GET": "s3:GetBucket", "POST": "s3:CreateBucket", "DELETE": "s3:DeleteBucket"}.get(method), bucket_arn) if method in {"GET", "POST", "DELETE"} else None
+            if tail == ["versioning"]:
+                return ({"GET": "s3:GetBucketVersioning", "PUT": "s3:PutBucketVersioning"}.get(method), bucket_arn) if method in {"GET", "PUT"} else None
+            if tail == ["notifications"]:
+                return ({"GET": "s3:GetBucketNotificationConfiguration", "PUT": "s3:PutBucketNotificationConfiguration", "DELETE": "s3:DeleteBucketNotificationConfiguration"}.get(method), bucket_arn) if method in {"GET", "PUT", "DELETE"} else None
+            if tail == ["notifications", "events"] and method == "GET":
+                return ("s3:GetBucketNotificationConfiguration", bucket_arn)
+            if tail == ["objects"]:
+                return ({"GET": "s3:ListBucket", "POST": "s3:PutObject"}.get(method), bucket_arn) if method in {"GET", "POST"} else None
+            if tail == ["versions"] and method == "GET":
+                return ("s3:ListBucketVersions", bucket_arn)
+            if len(tail) >= 2 and tail[0] == "objects":
+                if len(tail) == 2:
+                    key = tail[1]
+                    object_arn = _iam_s3_object_arn(bucket, key)
+                    if method in {"GET", "DELETE"}:
+                        return ({"GET": "s3:GetObject", "DELETE": "s3:DeleteObject"}.get(method), object_arn)
+                    if method == "POST":
+                        return ("s3:PutObject", object_arn)
+                if len(tail) == 3:
+                    key = tail[1]
+                    object_arn = _iam_s3_object_arn(bucket, key)
+                    if tail[2] == "meta" and method == "GET":
+                        return ("s3:GetObject", object_arn)
+                    if tail[2] == "download" and method == "GET":
+                        return ("s3:GetObject", object_arn)
+                    if tail[2] == "versions" and method == "GET":
+                        return ("s3:ListObjectVersions", object_arn)
+                    if tail[2] == "tags" and method in {"GET", "POST", "DELETE"}:
+                        return ({"GET": "s3:GetObjectTagging", "POST": "s3:PutObjectTagging", "DELETE": "s3:DeleteObjectTagging"}.get(method), object_arn)
+        return None
+    if path.startswith("/api/ec2/runtime/docker/bootstrap"):
+        return ("ec2:DescribeInstances", "*")
+    if path.startswith("/api/ec2/instances"):
+        parts = [p for p in path.split("/") if p]
+        if len(parts) == 3:
+            if method == "GET":
+                return ("ec2:DescribeInstances", "*")
+            if method == "POST":
+                return ("ec2:RunInstances", "*")
+        if len(parts) >= 4:
+            instance_id = parts[3]
+            resource = _iam_ec2_instance_arn(instance_id)
+            tail = parts[4:] if len(parts) > 4 else []
+            if not tail:
+                if method == "GET":
+                    return ("ec2:DescribeInstances", resource)
+            elif tail == ["start"] and method == "POST":
+                return ("ec2:StartInstances", resource)
+            elif tail == ["stop"] and method == "POST":
+                return ("ec2:StopInstances", resource)
+            elif tail == ["reboot"] and method == "POST":
+                return ("ec2:RebootInstances", resource)
+            elif tail == ["terminate"] and method == "POST":
+                return ("ec2:TerminateInstances", resource)
+            elif tail[:1] == ["sample-apps"] and method == "POST":
+                return ("ec2:RunInstances", resource)
+        return None
+    if path.startswith("/api/ec2/"):
+        action_map = {
+            ("GET", "/api/ec2/amis"): ("ec2:DescribeImages", "*"),
+            ("GET", "/api/ec2/sample-apps"): ("ec2:DescribeImages", "*"),
+            ("GET", "/api/ec2/runtime/docker"): ("ec2:DescribeInstances", "*"),
+            ("POST", "/api/ec2/runtime/docker/bootstrap"): ("ec2:CreateServiceLinkedRole", "*"),
+        }
+        return action_map.get((method, path))
+    if path.startswith("/api/vpc/"):
+        parts = [p for p in path.split("/") if p]
+        if path == "/api/vpc/vpcs":
+            return ({"GET": "vpc:DescribeVpcs", "POST": "vpc:CreateVpc"}.get(method), "*") if method in {"GET", "POST"} else None
+        if len(parts) >= 4 and parts[2] == "vpcs":
+            vpc_id = parts[3]
+            resource = _iam_ec2_vpc_arn(vpc_id)
+            if len(parts) == 4 and method == "GET":
+                return ("vpc:DescribeVpcs", resource)
+            if len(parts) == 4 and method == "DELETE":
+                return ("vpc:DeleteVpc", resource)
+            if len(parts) >= 5 and parts[4] == "resources" and method == "GET":
+                return ("vpc:DescribeVpcs", resource)
+        if path == "/api/vpc/subnets" and method == "POST":
+            return ("vpc:CreateSubnet", "*")
+        if path == "/api/vpc/security-groups" and method == "POST":
+            return ("vpc:CreateSecurityGroup", "*")
+        if len(parts) >= 5 and parts[2] == "security-groups" and parts[4] == "ingress" and method == "POST":
+            return ("ec2:AuthorizeSecurityGroupIngress", _iam_ec2_security_group_arn(parts[3]))
+        if path == "/api/vpc/route-tables" and method == "POST":
+            return ("vpc:CreateRouteTable", "*")
+        if path == "/api/vpc/internet-gateways":
+            return ({"GET": "vpc:DescribeInternetGateways", "POST": "vpc:CreateInternetGateway"}.get(method), "*") if method in {"GET", "POST"} else None
+        if len(parts) >= 5 and parts[2] == "internet-gateways" and parts[4] == "attach" and method == "POST":
+            return ("vpc:AttachInternetGateway", _iam_ec2_internet_gateway_arn(parts[3]))
+        if len(parts) >= 5 and parts[2] == "route-tables" and parts[4] == "routes" and method == "POST":
+            return ("vpc:CreateRoute", _iam_ec2_route_table_arn(parts[3]))
+        if len(parts) >= 5 and parts[2] == "route-tables" and parts[4] == "associate-subnet" and method == "POST":
+            return ("vpc:AssociateRouteTable", _iam_ec2_route_table_arn(parts[3]))
+    if path.startswith("/api/rds/"):
+        parts = [p for p in path.split("/") if p]
+        if path == "/api/rds/databases":
+            return ({"GET": "rds:DescribeDBInstances", "POST": "rds:CreateDBInstance"}.get(method), "*") if method in {"GET", "POST"} else None
+        if len(parts) >= 4 and parts[2] == "databases":
+            db_id = parts[3]
+            resource = _iam_rds_db_arn(db_id)
+            if len(parts) == 4:
+                return ({"GET": "rds:DescribeDBInstances", "PUT": "rds:ModifyDBInstance", "DELETE": "rds:DeleteDBInstance"}.get(method), resource) if method in {"GET", "PUT", "DELETE"} else None
+            if len(parts) >= 5:
+                tail = parts[4:]
+                if tail == ["start"] and method == "POST":
+                    return ("rds:StartDBInstance", resource)
+                if tail == ["stop"] and method == "POST":
+                    return ("rds:StopDBInstance", resource)
+                if tail == ["reboot"] and method == "POST":
+                    return ("rds:RebootDBInstance", resource)
+                if tail == ["snapshots"] and method == "POST":
+                    return ("rds:CreateDBSnapshot", resource)
+                if tail == ["tags"] and method == "GET":
+                    return ("rds:ListTagsForResource", resource)
+                if tail == ["tags"] and method == "POST":
+                    return ("rds:AddTagsToResource", resource)
+        if path == "/api/rds/subnet-groups":
+            return ({"GET": "rds:DescribeDBSubnetGroups", "POST": "rds:CreateDBSubnetGroup"}.get(method), "*") if method in {"GET", "POST"} else None
+        if path == "/api/rds/parameter-groups":
+            return ({"GET": "rds:DescribeDBParameterGroups", "POST": "rds:CreateDBParameterGroup"}.get(method), "*") if method in {"GET", "POST"} else None
+        if path == "/api/rds/snapshots" and method == "GET":
+            return ("rds:DescribeDBSnapshots", "*")
+        if len(parts) >= 4 and parts[2] == "snapshots" and len(parts) >= 5 and parts[4] == "restore" and method == "POST":
+            return ("rds:RestoreDBInstanceFromDBSnapshot", _iam_rds_snapshot_arn(parts[3]))
+    if path.startswith("/api/lambda/") or path.startswith("/2015-03-31/functions"):
+        parts = [p for p in path.split("/") if p]
+        if path in {"/api/lambda/functions", "/2015-03-31/functions"}:
+            return ({"GET": "lambda:ListFunctions", "POST": "lambda:CreateFunction"}.get(method), "*") if method in {"GET", "POST"} else None
+        if len(parts) >= 4 and parts[2] == "functions":
+            fn_name = parts[3]
+            resource = _iam_lambda_function_arn(fn_name)
+            tail = parts[4:] if len(parts) > 4 else []
+            if not tail:
+                return ({"GET": "lambda:GetFunction", "DELETE": "lambda:DeleteFunction"}.get(method), resource) if method in {"GET", "DELETE"} else None
+            if tail == ["code"] and method == "PUT":
+                return ("lambda:UpdateFunctionCode", resource)
+            if tail == ["configuration"] and method == "PUT":
+                return ("lambda:UpdateFunctionConfiguration", resource)
+            if tail == ["invoke"] and method == "POST":
+                return ("lambda:InvokeFunction", resource)
+            if tail == ["versions"]:
+                return ({"GET": "lambda:ListVersionsByFunction", "POST": "lambda:PublishVersion"}.get(method), resource) if method in {"GET", "POST"} else None
+            if tail == ["policy"]:
+                return ({"GET": "lambda:GetPolicy", "POST": "lambda:AddPermission"}.get(method), resource) if method in {"GET", "POST"} else None
+            if len(tail) == 2 and tail[0] == "policy" and method == "DELETE":
+                return ("lambda:RemovePermission", resource)
+            if tail == ["invocations"] and method == "GET":
+                return ("lambda:GetFunction", resource)
+    if path.startswith("/api/sqs/") or path == "/sqs":
+        parts = [p for p in path.split("/") if p]
+        if path in {"/api/sqs/queues"}:
+            return ({"GET": "sqs:ListQueues", "POST": "sqs:CreateQueue"}.get(method), "*") if method in {"GET", "POST"} else None
+        if len(parts) >= 4 and parts[2] == "queues":
+            queue_name = parts[3]
+            resource = _iam_sqs_queue_arn(queue_name)
+            tail = parts[4:] if len(parts) > 4 else []
+            if not tail:
+                return ({"GET": "sqs:GetQueueAttributes", "PUT": "sqs:SetQueueAttributes", "DELETE": "sqs:DeleteQueue"}.get(method), resource) if method in {"GET", "PUT", "DELETE"} else None
+            if tail == ["messages"]:
+                return ({"GET": "sqs:ReceiveMessage", "POST": "sqs:SendMessage"}.get(method), resource) if method in {"GET", "POST"} else None
+            if len(tail) == 2 and tail[0] == "messages" and method == "DELETE":
+                return ("sqs:DeleteMessage", resource)
+            if len(tail) == 3 and tail[0] == "messages" and tail[2] == "visibility" and method == "POST":
+                return ("sqs:ChangeMessageVisibility", resource)
+            if tail == ["purge"] and method == "POST":
+                return ("sqs:PurgeQueue", resource)
+            if tail == ["tags"]:
+                return ({"GET": "sqs:ListQueueTags", "POST": "sqs:TagQueue", "DELETE": "sqs:UntagQueue"}.get(method), resource) if method in {"GET", "POST", "DELETE"} else None
+    if path.startswith("/api/apigateway/"):
+        parts = [p for p in path.split("/") if p]
+        if path == "/api/apigateway/apis":
+            return ({"GET": "apigateway:GetRestApis", "POST": "apigateway:CreateRestApi"}.get(method), "*") if method in {"GET", "POST"} else None
+        if len(parts) >= 4 and parts[2] == "apis":
+            api_id = parts[3]
+            resource = _iam_apigw_api_arn(api_id)
+            tail = parts[4:] if len(parts) > 4 else []
+            if not tail:
+                return ({"GET": "apigateway:GetRestApi", "DELETE": "apigateway:DeleteRestApi"}.get(method), resource) if method in {"GET", "DELETE"} else None
+            if tail == ["resources"]:
+                return ({"GET": "apigateway:GetResources", "POST": "apigateway:CreateResource"}.get(method), resource) if method in {"GET", "POST"} else None
+            if tail == ["methods"] and method == "POST":
+                return ("apigateway:PutMethod", resource)
+            if tail == ["integrations"] and method == "POST":
+                return ("apigateway:PutIntegration", resource)
+            if tail == ["deployments"]:
+                return ({"GET": "apigateway:GetDeployments", "POST": "apigateway:CreateDeployment"}.get(method), resource) if method in {"GET", "POST"} else None
+            if tail == ["stages"]:
+                return ({"GET": "apigateway:GetStages", "POST": "apigateway:CreateStage"}.get(method), resource) if method in {"GET", "POST"} else None
+            if tail == ["logs"] and method == "GET":
+                return ("apigateway:GetLogs", resource)
+        if len(parts) >= 4 and parts[2] == "invoke":
+            api_id = parts[3]
+            stage_name = parts[4] if len(parts) > 4 else ""
+            return ("execute-api:Invoke", _iam_apigw_stage_arn(api_id, stage_name or "*"))
+
+    # Root-level S3 paths
+    if path == "/" or (path not in {"/ui", "/product", "/api", "/healthz"} and not path.startswith("/api/")):
+        if path == "/":
+            return ("s3:ListAllMyBuckets", "*")
+        segs = [s for s in path.split("/") if s]
+        if len(segs) == 1:
+            bucket = segs[0]
+            resource = _iam_s3_bucket_arn(bucket)
+            if method == "GET":
+                if "versions" in query:
+                    return ("s3:ListBucketVersions", resource)
+                return ("s3:ListBucket", resource)
+            if method == "PUT":
+                if "versioning" in query:
+                    return ("s3:PutBucketVersioning", resource)
+                if "notification" in query:
+                    return ("s3:PutBucketNotificationConfiguration", resource)
+                if "tagging" in query:
+                    return ("s3:PutBucketTagging", resource)
+                if "acl" in query:
+                    return ("s3:PutBucketAcl", resource)
+                if "cors" in query:
+                    return ("s3:PutBucketCors", resource)
+                if "lifecycle" in query:
+                    return ("s3:PutBucketLifecycleConfiguration", resource)
+                if "encryption" in query:
+                    return ("s3:PutBucketEncryption", resource)
+                return ("s3:CreateBucket", resource)
+            if method == "HEAD":
+                return ("s3:HeadBucket", resource)
+            if method == "DELETE":
+                return ("s3:DeleteBucket", resource)
+            if method == "POST":
+                return ("s3:DeleteObjects", resource) if "delete" in query else ("s3:CreateMultipartUpload", resource)
+        if len(segs) >= 2:
+            bucket = segs[0]
+            key = "/".join(segs[1:])
+            resource = _iam_s3_object_arn(bucket, key)
+            if method in {"GET", "HEAD", "PUT", "DELETE", "POST"}:
+                if method == "GET":
+                    if "tagging" in query:
+                        return ("s3:GetObjectTagging", resource)
+                    if "acl" in query:
+                        return ("s3:GetObjectAcl", resource)
+                    return ("s3:GetObject", resource)
+                if method == "PUT":
+                    if "tagging" in query:
+                        return ("s3:PutObjectTagging", resource)
+                    return ("s3:PutObject", resource)
+                if method == "DELETE":
+                    if "tagging" in query:
+                        return ("s3:DeleteObjectTagging", resource)
+                    return ("s3:DeleteObject", resource)
+                if method == "POST":
+                    if "uploads" in query:
+                        return ("s3:CreateMultipartUpload", resource)
+                    if "uploadId" in query:
+                        return ("s3:CompleteMultipartUpload", resource)
+    return None
+
+STATE_VERSION = 7
 STATE_FILE = Path(os.environ.get("CLOUDLEARN_STATE_FILE", Path(__file__).with_name(".cloudlearn_state.sqlite3")))
 LEGACY_STATE_FILE = Path(os.environ.get("CLOUDLEARN_LEGACY_STATE_FILE", STATE_FILE.with_suffix(".pkl")))
 STATE_LOCK = threading.RLock()
@@ -80,9 +759,11 @@ INSTANCE_WORK_ROOT = Path(os.environ.get("CLOUDLEARN_DEPLOY_DIR", Path(__file__)
 SAMPLE_APP_ROOT = Path(__file__).with_name("sample_apps")
 EC2_XML_NS = "http://ec2.amazonaws.com/doc/2016-11-15/"
 RDS_XML_NS = "http://rds.amazonaws.com/doc/2014-10-31/"
+SQS_XML_NS = "http://queue.amazonaws.com/doc/2012-11-05/"
 AWS_ACCOUNT_ID = "123456789012"
 ET.register_namespace("", EC2_XML_NS)
 ET.register_namespace("rds", RDS_XML_NS)
+ET.register_namespace("sqs", SQS_XML_NS)
 
 
 def _default_packs() -> Dict[str, dict]:
@@ -195,6 +876,42 @@ def _default_packs() -> Dict[str, dict]:
                 "regionAware": False,
             },
         },
+        "cloudlearn.lambda.basic": {
+            "id": "cloudlearn.lambda.basic",
+            "type": "service",
+            "version": "1.0.0",
+            "provider": "agnostic",
+            "coreProviderNeutral": True,
+            "state": "available",
+            "active": False,
+            "api": {
+                "protocol": "aws-like",
+                "actions": ["CreateFunction", "ListFunctions", "Invoke", "UpdateFunctionCode", "UpdateFunctionConfiguration", "PublishVersion", "AddPermission", "RemovePermission", "GetPolicy"],
+                "requestSchemas": True,
+                "responseSchemas": True,
+                "errors": True,
+                "pagination": True,
+                "regionAware": True,
+            },
+        },
+        "cloudlearn.sqs.basic": {
+            "id": "cloudlearn.sqs.basic",
+            "type": "service",
+            "version": "1.0.0",
+            "provider": "agnostic",
+            "coreProviderNeutral": True,
+            "state": "available",
+            "active": False,
+            "api": {
+                "protocol": "aws-like",
+                "actions": ["CreateQueue", "ListQueues", "GetQueueUrl", "GetQueueAttributes", "SetQueueAttributes", "SendMessage", "ReceiveMessage", "DeleteMessage", "ChangeMessageVisibility", "PurgeQueue", "TagQueue", "UntagQueue", "ListQueueTags"],
+                "requestSchemas": True,
+                "responseSchemas": True,
+                "errors": True,
+                "pagination": True,
+                "regionAware": True,
+            },
+        },
     }
 
 
@@ -213,10 +930,12 @@ def _default_state() -> dict:
         },
         "packs": _default_packs(),
         "deployments": {},
-        "iam": {"users": {}, "roles": {}, "policies": {}, "attachments": []},
+        "iam": {"users": {}, "groups": {}, "roles": {}, "policies": {}, "attachments": [], "identity_providers": {}, "account_settings": {"password_policy": {"minimum_length": 8, "require_symbols": True, "require_numbers": True, "require_uppercase": True, "require_lowercase": True}}},
         "ec2": {"instances": {}},
         "vpc": {"vpcs": {}, "subnets": {}, "security_groups": {}, "route_tables": {}},
         "apigateway": {"apis": {}, "logs": []},
+        "lambda": {"functions": {}, "events": [], "invocations": []},
+        "sqs": {"queues": {}, "events": []},
         "rds": {
             "db_instances": {},
             "db_subnet_groups": {},
@@ -285,6 +1004,47 @@ def _migrate_state(state: dict) -> dict:
     apigw = state.setdefault("apigateway", {"apis": {}, "logs": []})
     apigw.setdefault("apis", {})
     apigw.setdefault("logs", [])
+    state.setdefault("lambda", {"functions": {}, "events": [], "invocations": []})
+    lambda_state = state.setdefault("lambda", {"functions": {}, "events": [], "invocations": []})
+    for function_name, function in lambda_state.setdefault("functions", {}).items():
+        if not isinstance(function, dict):
+            continue
+        function.setdefault("function_name", function_name)
+        function.setdefault("permissions", [])
+    sqs_state = state.setdefault("sqs", {"queues": {}, "events": []})
+    sqs_state.setdefault("queues", {})
+    sqs_state.setdefault("events", [])
+    for queue_name, queue in sqs_state["queues"].items():
+        if not isinstance(queue, dict):
+            continue
+        queue.setdefault("queue_name", queue_name)
+        queue.setdefault("queue_type", "standard")
+        queue.setdefault("fifo_queue", queue_name.endswith(".fifo"))
+        queue.setdefault("content_based_deduplication", False)
+        queue.setdefault("visibility_timeout", 30)
+        queue.setdefault("receive_wait_time_seconds", 0)
+        queue.setdefault("message_retention_period", 345600)
+        queue.setdefault("max_message_size", 262144)
+        queue.setdefault("delay_seconds", 0)
+        queue.setdefault("redrive_policy", {})
+        queue.setdefault("tags", {})
+        queue.setdefault("attributes", {})
+        queue.setdefault("messages", [])
+        queue.setdefault("created", _now())
+        queue.setdefault("last_modified", _now())
+    buckets_state = state.setdefault("buckets", {})
+    if isinstance(buckets_state, dict):
+        for bucket_name, bucket_meta in buckets_state.items():
+            if not isinstance(bucket_meta, dict):
+                continue
+            bucket_meta.setdefault("notifications", {
+                "eventBridgeEnabled": False,
+                "topicConfigurations": [],
+                "queueConfigurations": [],
+                "cloudFunctionConfigurations": [],
+                "deliveries": [],
+                "updatedAt": _now(),
+            })
     return state
 
 
@@ -387,9 +1147,25 @@ class IAMRoleRequest(BaseModel):
     description: str = ""
 
 
+class IAMGroupRequest(BaseModel):
+    group_name: str
+    path: str = "/"
+
+
 class IAMPolicyRequest(BaseModel):
     policy_name: str
     document: dict[str, Any] = {}
+
+
+class IAMIdentityProviderRequest(BaseModel):
+    provider_name: str
+    provider_type: str = "SAML"
+    url: str = ""
+    tags: list[dict[str, str]] | None = None
+
+
+class IAMAccountSettingsRequest(BaseModel):
+    password_policy: dict[str, Any] = {}
 
 
 class EC2InstanceRequest(BaseModel):
@@ -573,6 +1349,92 @@ class APIGatewayStageRequest(BaseModel):
     deployment_id: str = ""
     description: str = ""
     variables: list[dict[str, str]] | None = None
+
+
+class LambdaFunctionRequest(BaseModel):
+    function_name: str
+    runtime: str = "python3.12"
+    handler: str = "lambda_function.lambda_handler"
+    role: str = "arn:aws:iam::123456789012:role/service-role/cloudlearn-lambda-basic-execution"
+    description: str = ""
+    code: str = ""
+    timeout: int = 3
+    memory_size: int = 128
+    environment: dict[str, str] = {}
+    tags: list[dict[str, str]] | None = None
+
+
+class LambdaFunctionUpdateRequest(BaseModel):
+    runtime: str | None = None
+    handler: str | None = None
+    role: str | None = None
+    description: str | None = None
+    timeout: int | None = None
+    memory_size: int | None = None
+    code: str | None = None
+    environment: dict[str, str] | None = None
+    tags: list[dict[str, str]] | None = None
+
+
+class LambdaInvokeRequest(BaseModel):
+    payload: Any = {}
+    invocation_type: str = "RequestResponse"
+    log_type: str = "None"
+
+
+class LambdaVersionRequest(BaseModel):
+    description: str = ""
+
+
+class LambdaPermissionRequest(BaseModel):
+    statement_id: str = ""
+    action: str = "lambda:InvokeFunction"
+    principal: str = ""
+    source_arn: str = ""
+    source_account: str = ""
+    revision_id: str = ""
+
+
+class SQSQueueCreateRequest(BaseModel):
+    queue_name: str
+    fifo_queue: bool = False
+    content_based_deduplication: bool = False
+    visibility_timeout: int = 30
+    receive_wait_time_seconds: int = 0
+    message_retention_period: int = 345600
+    max_message_size: int = 262144
+    delay_seconds: int = 0
+    redrive_policy: dict[str, Any] | None = None
+    tags: dict[str, str] | None = None
+
+
+class SQSQueueUpdateRequest(BaseModel):
+    visibility_timeout: int | None = None
+    receive_wait_time_seconds: int | None = None
+    message_retention_period: int | None = None
+    max_message_size: int | None = None
+    delay_seconds: int | None = None
+    content_based_deduplication: bool | None = None
+    redrive_policy: dict[str, Any] | None = None
+    tags: dict[str, str] | None = None
+
+
+class SQSMessageSendRequest(BaseModel):
+    message_body: str = ""
+    message_attributes: dict[str, Any] | None = None
+    message_attributes_map: dict[str, Any] | None = None
+    message_group_id: str = ""
+    message_deduplication_id: str = ""
+
+
+class SQSReceiveRequest(BaseModel):
+    max_number_of_messages: int = 1
+    wait_time_seconds: int = 0
+    visibility_timeout: int | None = None
+
+
+class SQSVisibilityRequest(BaseModel):
+    visibility_timeout: int = 30
 
 
 class DeploymentRequest(BaseModel):
@@ -963,6 +1825,1043 @@ def _apigw_summary(api: dict) -> dict:
     return view
 
 
+def _lambda_state() -> dict:
+    return STATE.setdefault("lambda", {"functions": {}, "events": [], "invocations": []})
+
+
+def _lambda_function_key(function_name: str) -> str:
+    return (function_name or "").strip()
+
+
+def _lambda_validate_function_name(function_name: str) -> None:
+    if not function_name:
+        raise HTTPException(400, detail="MissingParameter: function_name is required.")
+    if not re.fullmatch(r"[A-Za-z0-9-_]{1,64}", function_name):
+        raise HTTPException(400, detail="InvalidParameterValue: function_name must be 1-64 characters and use letters, numbers, hyphens, or underscores.")
+
+
+def _lambda_function_arn(function_name: str) -> str:
+    return f"arn:aws:lambda:us-east-1:{AWS_ACCOUNT_ID}:function:{function_name}"
+
+
+def _lambda_function_dir(function_name: str) -> Path:
+    return Path(__file__).with_name("lambda_functions") / function_name
+
+
+def _lambda_handler_module(handler: str) -> str:
+    handler = (handler or "").strip()
+    return handler.rsplit(".", 1)[0] if "." in handler else "lambda_function"
+
+
+def _lambda_handler_name(handler: str) -> str:
+    handler = (handler or "").strip()
+    return handler.rsplit(".", 1)[1] if "." in handler else "lambda_handler"
+
+
+def _lambda_default_code(function_name: str = "my-function") -> str:
+    return textwrap.dedent(
+        f"""
+        def lambda_handler(event, context):
+            return {{
+                "message": "Hello from Lambda",
+                "function_name": "{function_name}",
+                "received_event": event,
+            }}
+        """
+    ).strip() + "\n"
+
+
+def _lambda_find_function(function_name: str) -> dict | None:
+    key = _lambda_function_key(function_name)
+    if not key:
+        return None
+    functions = _lambda_state().setdefault("functions", {})
+    if key in functions:
+        return functions[key]
+    lowered = key.lower()
+    for existing_name, function in functions.items():
+        if existing_name.lower() == lowered:
+            return function
+    return None
+
+
+def _lambda_resolve_function(target: str) -> dict | None:
+    target = (target or "").strip()
+    if not target:
+        return None
+    if ":function:" in target:
+        candidate = target.rsplit(":function:", 1)[-1]
+        if ":" in candidate:
+            candidate = candidate.split(":", 1)[0]
+        function = _lambda_find_function(candidate)
+        if function:
+            return function
+    return _lambda_find_function(target)
+
+
+def _lambda_set_function(function: dict) -> dict:
+    _lambda_state().setdefault("functions", {})[function["function_name"]] = function
+    return function
+
+
+def _lambda_list_functions() -> list[dict]:
+    functions = list(_lambda_state().setdefault("functions", {}).values())
+    functions.sort(key=lambda item: (item.get("created", ""), item.get("function_name", "")))
+    return functions
+
+
+def _lambda_sync_code_artifact(function: dict) -> None:
+    function_dir = _lambda_function_dir(function["function_name"])
+    function_dir.mkdir(parents=True, exist_ok=True)
+    module_name = _lambda_handler_module(function.get("handler", "lambda_function.lambda_handler")) or "lambda_function"
+    code_path = function_dir / f"{module_name}.py"
+    code = function.get("code") or _lambda_default_code(function["function_name"])
+    code_path.write_text(code, encoding="utf-8")
+    function["code_path"] = str(code_path)
+    function["workdir"] = str(function_dir)
+
+
+def _lambda_invocations_view(function: dict) -> list[dict]:
+    invocations = list(function.get("invocations", []))
+    invocations.sort(key=lambda item: item.get("at", ""), reverse=True)
+    return invocations
+
+
+def _lambda_versions_view(function: dict) -> list[dict]:
+    versions = list(function.get("versions", []))
+    versions.sort(key=lambda item: item.get("created", ""), reverse=True)
+    return versions
+
+
+def _lambda_permissions_view(function: dict) -> list[dict]:
+    permissions = list(function.get("permissions", []))
+    permissions.sort(key=lambda item: (item.get("created", ""), item.get("statement_id", "")))
+    return permissions
+
+
+def _lambda_permission_statement_doc(function: dict, permission: dict) -> dict:
+    principal = (permission.get("principal") or "").strip()
+    if not principal or principal == "*":
+        principal_doc: Any = "*"
+    elif principal.startswith("arn:"):
+        principal_doc = {"AWS": principal}
+    else:
+        principal_doc = {"Service": principal}
+    statement = {
+        "Sid": permission.get("statement_id", ""),
+        "Effect": "Allow",
+        "Principal": principal_doc,
+        "Action": permission.get("action", "lambda:InvokeFunction"),
+        "Resource": function.get("function_arn") or _lambda_function_arn(function.get("function_name", "")),
+    }
+    condition: dict[str, Any] = {}
+    source_arn = (permission.get("source_arn") or "").strip()
+    source_account = (permission.get("source_account") or "").strip()
+    if source_arn:
+        condition.setdefault("ArnLike", {})["AWS:SourceArn"] = source_arn
+    if source_account:
+        condition.setdefault("StringEquals", {})["AWS:SourceAccount"] = source_account
+    if condition:
+        statement["Condition"] = condition
+    return statement
+
+
+def _lambda_policy_document(function: dict) -> dict:
+    statements = [_lambda_permission_statement_doc(function, permission) for permission in _lambda_permissions_view(function)]
+    return {
+        "Version": "2012-10-17",
+        "Id": f"{function.get('function_name', 'function')}/policy",
+        "Statement": statements,
+    }
+
+
+def _lambda_policy_revision_id(function: dict) -> str:
+    policy = json.dumps(_lambda_policy_document(function), sort_keys=True, separators=(",", ":"), default=str)
+    return base64.urlsafe_b64encode(hashlib.sha256(policy.encode("utf-8")).digest()).decode("ascii").rstrip("=")
+
+
+def _lambda_permission_matches(permission: dict, action: str, principal: str, source_arn: str, source_account: str) -> bool:
+    perm_action = (permission.get("action") or "lambda:InvokeFunction").strip()
+    if perm_action not in {"*", "lambda:*"} and action not in {perm_action, "*"}:
+        return False
+    perm_principal = (permission.get("principal") or "").strip()
+    if perm_principal and perm_principal != "*":
+        if not principal:
+            return False
+        if not fnmatch.fnmatchcase(principal, perm_principal):
+            return False
+    perm_source_arn = (permission.get("source_arn") or "").strip()
+    if perm_source_arn:
+        if not source_arn or not fnmatch.fnmatchcase(source_arn, perm_source_arn):
+            return False
+    perm_source_account = (permission.get("source_account") or "").strip()
+    if perm_source_account:
+        if not source_account or perm_source_account != source_account:
+            return False
+    return True
+
+
+def _lambda_can_invoke_from_source(function: dict, principal: str = "", source_arn: str = "", source_account: str = "", action: str = "lambda:InvokeFunction") -> tuple[bool, str]:
+    principal = (principal or "").strip()
+    source_arn = (source_arn or "").strip()
+    source_account = (source_account or "").strip()
+    if not principal and not source_arn and not source_account:
+        return True, ""
+    permissions = _lambda_permissions_view(function)
+    if not permissions:
+        return False, "AccessDeniedException: Lambda policy does not allow this invocation source."
+    for permission in permissions:
+        if _lambda_permission_matches(permission, action, principal, source_arn, source_account):
+            return True, ""
+    return False, "AccessDeniedException: Lambda policy does not allow this invocation source."
+
+
+def _lambda_triggers_for_function(function: dict) -> list[dict]:
+    triggers: list[dict] = []
+    target_names = {function.get("function_name", ""), function.get("function_arn", "")}
+    for bucket_name, bucket_meta in buckets.items():
+        if not isinstance(bucket_meta, dict):
+            continue
+        notifications = bucket_meta.get("notifications", {})
+        for rule in notifications.get("cloudFunctionConfigurations", []):
+            destination = (rule.get("cloudFunction") or "").strip()
+            if destination and destination not in target_names:
+                continue
+            triggers.append({
+                "source": "Amazon S3",
+                "bucket": bucket_name,
+                "event_types": list(rule.get("events", [])),
+                "prefix": rule.get("prefix", ""),
+                "suffix": rule.get("suffix", ""),
+                "rule_id": rule.get("id", ""),
+                "destination": destination or function.get("function_arn", ""),
+            })
+    return triggers
+
+
+def _lambda_function_view(function: dict) -> dict:
+    view = copy.deepcopy(function)
+    view["trigger_count"] = len(_lambda_triggers_for_function(function))
+    view["invocation_count"] = len(function.get("invocations", []))
+    view["version_count"] = len(function.get("versions", []))
+    view["policy_statement_count"] = len(_lambda_permissions_view(function))
+    view["triggers"] = _lambda_triggers_for_function(function)
+    view["invocations"] = _lambda_invocations_view(function)
+    view["versions"] = _lambda_versions_view(function)
+    view["permissions"] = _lambda_permissions_view(function)
+    view["policy"] = _lambda_policy_document(function)
+    view["policy_revision_id"] = _lambda_policy_revision_id(function)
+    view["function_arn"] = function.get("function_arn") or _lambda_function_arn(function.get("function_name", ""))
+    view.setdefault("state", "Active")
+    return view
+
+
+def _lambda_create_function_record(req: LambdaFunctionRequest) -> dict:
+    function_name = _lambda_function_key(req.function_name)
+    _lambda_validate_function_name(function_name)
+    if _lambda_find_function(function_name):
+        raise HTTPException(409, detail="ResourceConflictException: Function already exists.")
+    runtime = (req.runtime or "python3.12").strip()
+    handler = (req.handler or "lambda_function.lambda_handler").strip()
+    function = {
+        "function_name": function_name,
+        "function_arn": _lambda_function_arn(function_name),
+        "description": req.description or "",
+        "runtime": runtime,
+        "handler": handler,
+        "role": req.role or f"arn:aws:iam::{AWS_ACCOUNT_ID}:role/service-role/cloudlearn-lambda-basic-execution",
+        "timeout": int(req.timeout or 3),
+        "memory_size": int(req.memory_size or 128),
+        "environment": copy.deepcopy(req.environment or {}),
+        "package_type": "Zip",
+        "state": "Active",
+        "created": _now(),
+        "last_modified": _now(),
+        "code": req.code.strip() if req.code and req.code.strip() else _lambda_default_code(function_name),
+        "code_sha256": "",
+        "versions": [],
+        "invocations": [],
+        "permissions": [],
+        "tags": copy.deepcopy(req.tags or []),
+    }
+    function["code_sha256"] = base64.b64encode(hashlib.sha256(function["code"].encode("utf-8")).digest()).decode("ascii")
+    _lambda_sync_code_artifact(function)
+    function["versions"].append({
+        "version": "$LATEST",
+        "description": function["description"],
+        "created": function["created"],
+        "code_sha256": function["code_sha256"],
+        "runtime": function["runtime"],
+        "handler": function["handler"],
+        "state": "Active",
+        "is_latest": True,
+    })
+    _lambda_set_function(function)
+    _record_usage("lambda.create_function", {"function_name": function_name})
+    return function
+
+
+def _lambda_update_function_code(function: dict, code: str) -> dict:
+    code = (code or "").strip()
+    if not code:
+        raise HTTPException(400, detail="MissingParameter: code is required.")
+    function["code"] = code + ("\n" if not code.endswith("\n") else "")
+    function["code_sha256"] = base64.b64encode(hashlib.sha256(function["code"].encode("utf-8")).digest()).decode("ascii")
+    function["last_modified"] = _now()
+    _lambda_sync_code_artifact(function)
+    latest = next((v for v in function.get("versions", []) if v.get("version") == "$LATEST"), None)
+    if latest:
+        latest.update({
+            "description": function.get("description", ""),
+            "created": function.get("last_modified", _now()),
+            "code_sha256": function["code_sha256"],
+            "runtime": function.get("runtime", "python3.12"),
+            "handler": function.get("handler", "lambda_function.lambda_handler"),
+            "state": "Active",
+            "is_latest": True,
+        })
+    else:
+        function.setdefault("versions", []).append({
+            "version": "$LATEST",
+            "description": function.get("description", ""),
+            "created": function.get("last_modified", _now()),
+            "code_sha256": function["code_sha256"],
+            "runtime": function.get("runtime", "python3.12"),
+            "handler": function.get("handler", "lambda_function.lambda_handler"),
+            "state": "Active",
+            "is_latest": True,
+        })
+    _record_usage("lambda.update_function_code", {"function_name": function["function_name"]})
+    return function
+
+
+def _lambda_update_function_configuration(function: dict, req: LambdaFunctionUpdateRequest) -> dict:
+    if req.runtime is not None:
+        function["runtime"] = req.runtime.strip() or function.get("runtime", "python3.12")
+    if req.handler is not None:
+        function["handler"] = req.handler.strip() or function.get("handler", "lambda_function.lambda_handler")
+    if req.role is not None:
+        function["role"] = req.role.strip() or function.get("role", "")
+    if req.description is not None:
+        function["description"] = req.description
+    if req.timeout is not None:
+        function["timeout"] = max(1, int(req.timeout))
+    if req.memory_size is not None:
+        function["memory_size"] = max(128, int(req.memory_size))
+    if req.environment is not None:
+        function["environment"] = copy.deepcopy(req.environment)
+    if req.tags is not None:
+        function["tags"] = copy.deepcopy(req.tags)
+    function["last_modified"] = _now()
+    _lambda_sync_code_artifact(function)
+    for version in function.get("versions", []):
+        if version.get("version") == "$LATEST":
+            version.update({
+                "description": function.get("description", ""),
+                "created": function.get("last_modified", _now()),
+                "runtime": function.get("runtime", "python3.12"),
+                "handler": function.get("handler", "lambda_function.lambda_handler"),
+                "is_latest": True,
+            })
+    _record_usage("lambda.update_function_configuration", {"function_name": function["function_name"]})
+    return function
+
+
+def _lambda_publish_version(function: dict, description: str = "") -> dict:
+    existing = [v for v in function.get("versions", []) if isinstance(v, dict) and v.get("version") != "$LATEST"]
+    numeric_versions = [int(v.get("version", "0")) for v in existing if str(v.get("version", "")).isdigit()]
+    next_version = str((max(numeric_versions) if numeric_versions else 0) + 1)
+    for version in function.get("versions", []):
+        version["is_latest"] = False
+    published = {
+        "version": next_version,
+        "description": description or function.get("description", ""),
+        "created": _now(),
+        "code_sha256": function.get("code_sha256", ""),
+        "runtime": function.get("runtime", "python3.12"),
+        "handler": function.get("handler", "lambda_function.lambda_handler"),
+        "state": "Active",
+        "is_latest": True,
+    }
+    function.setdefault("versions", []).append(published)
+    function["last_modified"] = _now()
+    _record_usage("lambda.publish_version", {"function_name": function["function_name"], "version": next_version})
+    return published
+
+
+def _lambda_delete_function(function_name: str) -> None:
+    functions = _lambda_state().setdefault("functions", {})
+    function = _lambda_find_function(function_name)
+    if not function:
+        raise HTTPException(404, detail="ResourceNotFoundException")
+    functions.pop(function["function_name"], None)
+    _record_usage("lambda.delete_function", {"function_name": function["function_name"]})
+
+
+def _lambda_add_permission(function: dict, req: LambdaPermissionRequest) -> dict:
+    statement_id = _lambda_function_key(req.statement_id) or _id("sid")
+    principal = (req.principal or "").strip()
+    if not principal:
+        raise HTTPException(400, detail="MissingParameter: principal is required.")
+    action = (req.action or "lambda:InvokeFunction").strip() or "lambda:InvokeFunction"
+    source_arn = (req.source_arn or "").strip()
+    source_account = (req.source_account or "").strip()
+    permissions = function.setdefault("permissions", [])
+    if any((permission.get("statement_id", "")).lower() == statement_id.lower() for permission in permissions):
+        raise HTTPException(409, detail="ResourceConflictException: statement_id already exists.")
+    permission = {
+        "statement_id": statement_id,
+        "action": action,
+        "principal": principal,
+        "source_arn": source_arn,
+        "source_account": source_account,
+        "created": _now(),
+    }
+    permissions.append(permission)
+    function["last_modified"] = _now()
+    _record_usage("lambda.add_permission", {"function_name": function["function_name"], "statement_id": statement_id})
+    return permission
+
+
+def _lambda_remove_permission(function: dict, statement_id: str) -> None:
+    statement_id = _lambda_function_key(statement_id)
+    permissions = function.setdefault("permissions", [])
+    next_permissions = [permission for permission in permissions if (permission.get("statement_id", "") or "").lower() != statement_id.lower()]
+    if len(next_permissions) == len(permissions):
+        raise HTTPException(404, detail="ResourceNotFoundException")
+    function["permissions"] = next_permissions
+    function["last_modified"] = _now()
+    _record_usage("lambda.remove_permission", {"function_name": function["function_name"], "statement_id": statement_id})
+
+
+def _lambda_get_policy(function: dict) -> dict:
+    return {
+        "Policy": json.dumps(_lambda_policy_document(function), default=str),
+        "RevisionId": _lambda_policy_revision_id(function),
+    }
+
+
+def _lambda_run_handler(function: dict, event_payload: Any) -> dict:
+    workdir = _lambda_function_dir(function["function_name"])
+    module_name = _lambda_handler_module(function.get("handler", "lambda_function.lambda_handler")) or "lambda_function"
+    handler_name = _lambda_handler_name(function.get("handler", "lambda_function.lambda_handler")) or "lambda_handler"
+    code_path = workdir / f"{module_name}.py"
+    if not code_path.exists():
+        _lambda_sync_code_artifact(function)
+    helper_code = textwrap.dedent(
+        """
+        import contextlib
+        import importlib.util
+        import io
+        import json
+        import os
+        import sys
+        import traceback
+
+        workdir = sys.argv[1]
+        module_name = sys.argv[2]
+        handler_name = sys.argv[3]
+        payload = json.loads(sys.stdin.read() or "{}")
+
+        sys.path.insert(0, workdir)
+        module_path = os.path.join(workdir, module_name + ".py")
+        spec = importlib.util.spec_from_file_location(module_name, module_path)
+        if spec is None or spec.loader is None:
+            raise RuntimeError(f"Unable to load module {module_name}")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        handler = getattr(module, handler_name)
+
+        class Context:
+            function_name = ""
+            memory_limit_in_mb = 0
+            invoked_function_arn = ""
+            aws_request_id = ""
+
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        ctx = Context()
+        try:
+            with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                result = handler(payload, ctx)
+            print(json.dumps({
+                "ok": True,
+                "result": result,
+                "stdout": stdout.getvalue(),
+                "stderr": stderr.getvalue(),
+            }, default=str))
+        except Exception as exc:
+            print(json.dumps({
+                "ok": False,
+                "error": str(exc),
+                "traceback": traceback.format_exc(),
+                "stdout": stdout.getvalue(),
+                "stderr": stderr.getvalue(),
+            }, default=str))
+        """
+    ).strip()
+    proc = subprocess.run(
+        [sys.executable, "-c", helper_code, str(workdir), module_name, handler_name],
+        input=json.dumps(event_payload or {}, default=str),
+        capture_output=True,
+        text=True,
+        timeout=max(int(function.get("timeout", 3) or 3), 1) + 1,
+        env={
+            **os.environ,
+            "PYTHONPATH": str(workdir) + (os.pathsep + os.environ.get("PYTHONPATH", "") if os.environ.get("PYTHONPATH") else ""),
+        },
+    )
+    output_lines = [line for line in (proc.stdout or "").splitlines() if line.strip()]
+    if output_lines:
+        try:
+            payload = json.loads(output_lines[-1])
+        except Exception:
+            payload = {"ok": False, "error": proc.stdout or proc.stderr or "Lambda runtime error"}
+    else:
+        payload = {"ok": False, "error": proc.stderr or "Lambda runtime error"}
+    return {
+        "returncode": proc.returncode,
+        "ok": bool(payload.get("ok")) and proc.returncode == 0,
+        "result": payload.get("result"),
+        "stdout": payload.get("stdout", ""),
+        "stderr": payload.get("stderr", ""),
+        "error": payload.get("error", ""),
+        "traceback": payload.get("traceback", ""),
+    }
+
+
+def _lambda_record_invocation(function: dict, invocation_type: str, event_payload: Any, run_result: dict, source: str = "", source_principal: str = "", source_arn: str = "", source_account: str = "") -> dict:
+    record = {
+        "id": _id("laminv"),
+        "at": _now(),
+        "function_name": function.get("function_name", ""),
+        "function_arn": function.get("function_arn", ""),
+        "invocation_type": invocation_type,
+        "status": "success" if run_result.get("ok") else "error",
+        "source": source,
+        "source_principal": source_principal,
+        "source_arn": source_arn,
+        "source_account": source_account,
+        "request_payload": copy.deepcopy(event_payload),
+        "response_payload": copy.deepcopy(run_result.get("result")),
+        "stdout": run_result.get("stdout", ""),
+        "stderr": run_result.get("stderr", ""),
+        "error": run_result.get("error", ""),
+        "traceback": run_result.get("traceback", ""),
+    }
+    function.setdefault("invocations", []).append(record)
+    function["invocations"] = function["invocations"][-200:]
+    function["last_modified"] = _now()
+    _persist_state()
+    return record
+
+
+def _lambda_invoke_function(function_name: str, event_payload: Any, invocation_type: str = "RequestResponse", source: str = "", source_principal: str = "", source_arn: str = "", source_account: str = "") -> dict:
+    function = _lambda_find_function(function_name)
+    if not function:
+        raise HTTPException(404, detail="ResourceNotFoundException")
+    allowed, reason = _lambda_can_invoke_from_source(function, source_principal, source_arn, source_account)
+    if not allowed:
+        raise HTTPException(403, detail=reason)
+    normalized = (invocation_type or "RequestResponse").strip().lower()
+    if normalized == "event":
+        record = {
+            "id": _id("laminv"),
+            "at": _now(),
+            "function_name": function.get("function_name", ""),
+            "function_arn": function.get("function_arn", ""),
+            "invocation_type": "Event",
+            "status": "accepted",
+            "source": source,
+            "source_principal": source_principal,
+            "source_arn": source_arn,
+            "source_account": source_account,
+            "request_payload": copy.deepcopy(event_payload),
+            "response_payload": None,
+            "stdout": "",
+            "stderr": "",
+            "error": "",
+            "traceback": "",
+        }
+        function.setdefault("invocations", []).append(record)
+        function["invocations"] = function["invocations"][-200:]
+        function["last_modified"] = _now()
+        _persist_state()
+
+        def _worker():
+            try:
+                run_result = _lambda_run_handler(function, event_payload)
+                record.update({
+                    "status": "success" if run_result.get("ok") else "error",
+                    "response_payload": copy.deepcopy(run_result.get("result")),
+                    "stdout": run_result.get("stdout", ""),
+                    "stderr": run_result.get("stderr", ""),
+                    "error": run_result.get("error", ""),
+                    "traceback": run_result.get("traceback", ""),
+                    "completed_at": _now(),
+                })
+                function["last_modified"] = _now()
+                _persist_state()
+            except Exception:
+                record.update({
+                    "status": "error",
+                    "error": "Lambda invocation failed",
+                    "traceback": traceback.format_exc(),
+                    "completed_at": _now(),
+                })
+                function["last_modified"] = _now()
+                _persist_state()
+
+        threading.Thread(target=_worker, daemon=True).start()
+        return record
+
+    run_result = _lambda_run_handler(function, event_payload)
+    return _lambda_record_invocation(function, "RequestResponse", event_payload, run_result, source=source, source_principal=source_principal, source_arn=source_arn, source_account=source_account)
+
+
+def _lambda_invoke_response(function_name: str, event_payload: Any, invocation_type: str = "RequestResponse", source: str = "", source_principal: str = "", source_arn: str = "", source_account: str = "") -> dict:
+    record = _lambda_invoke_function(function_name, event_payload, invocation_type=invocation_type, source=source, source_principal=source_principal, source_arn=source_arn, source_account=source_account)
+    return {
+        "function_name": record["function_name"],
+        "function_arn": record["function_arn"],
+        "invocation_type": record["invocation_type"],
+        "status": record["status"],
+        "payload": record.get("response_payload"),
+        "stdout": record.get("stdout", ""),
+        "stderr": record.get("stderr", ""),
+        "error": record.get("error", ""),
+        "traceback": record.get("traceback", ""),
+        "at": record.get("at", ""),
+    }
+
+
+def _sqs_state() -> dict:
+    return STATE.setdefault("sqs", {"queues": {}, "events": []})
+
+
+def _sqs_queue_key(queue_name: str) -> str:
+    return (queue_name or "").strip()
+
+
+def _sqs_validate_queue_name(queue_name: str) -> None:
+    if not queue_name:
+        raise HTTPException(400, detail="MissingParameter: queue_name is required.")
+    if len(queue_name) < 1 or len(queue_name) > 80:
+        raise HTTPException(400, detail="InvalidParameterValue: queue_name must be 1-80 characters.")
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+", queue_name):
+        raise HTTPException(400, detail="InvalidParameterValue: queue_name can contain letters, numbers, periods, underscores, and hyphens.")
+
+
+def _sqs_queue_url(queue_name: str) -> str:
+    return f"http://127.0.0.1:9000/api/sqs/queues/{queue_name}"
+
+
+def _sqs_queue_arn(queue_name: str) -> str:
+    return f"arn:aws:sqs:us-east-1:{AWS_ACCOUNT_ID}:{queue_name}"
+
+
+def _sqs_find_queue(queue_name: str) -> dict | None:
+    key = _sqs_queue_key(queue_name)
+    if not key:
+        return None
+    queues = _sqs_state().setdefault("queues", {})
+    if key in queues:
+        return queues[key]
+    lowered = key.lower()
+    for existing_name, queue in queues.items():
+        if existing_name.lower() == lowered:
+            return queue
+    return None
+
+
+def _sqs_set_queue(queue: dict) -> dict:
+    _sqs_state().setdefault("queues", {})[queue["queue_name"]] = queue
+    return queue
+
+
+def _sqs_list_queues() -> list[dict]:
+    queues = list(_sqs_state().setdefault("queues", {}).values())
+    queues.sort(key=lambda item: (item.get("created", ""), item.get("queue_name", "")))
+    return queues
+
+
+def _sqs_normalize_queue(queue: dict) -> dict:
+    queue.setdefault("queue_name", "")
+    queue.setdefault("queue_type", "standard")
+    queue.setdefault("fifo_queue", bool(str(queue.get("queue_name", "")).endswith(".fifo")))
+    queue.setdefault("content_based_deduplication", False)
+    queue.setdefault("visibility_timeout", 30)
+    queue.setdefault("receive_wait_time_seconds", 0)
+    queue.setdefault("message_retention_period", 345600)
+    queue.setdefault("max_message_size", 262144)
+    queue.setdefault("delay_seconds", 0)
+    queue.setdefault("redrive_policy", {})
+    queue.setdefault("tags", {})
+    queue.setdefault("attributes", {})
+    queue.setdefault("messages", [])
+    queue.setdefault("created", _now())
+    queue.setdefault("last_modified", _now())
+    return queue
+
+
+def _sqs_timestamp(value: str | None) -> int:
+    if not value:
+        return 0
+    try:
+        return int(_parse_ts(value).timestamp())
+    except Exception:
+        return 0
+
+
+def _sqs_message_is_visible(message: dict) -> bool:
+    if message.get("deleted"):
+        return False
+    visible_at = message.get("visible_at") or ""
+    if not visible_at:
+        return True
+    try:
+        return _parse_ts(visible_at) <= datetime.now(timezone.utc)
+    except Exception:
+        return True
+
+
+def _sqs_sweep_queue(queue: dict) -> None:
+    now = datetime.now(timezone.utc)
+    retention = int(queue.get("message_retention_period", 345600) or 345600)
+    messages = []
+    for message in queue.get("messages", []):
+        if not isinstance(message, dict):
+            continue
+        sent_at = message.get("sent_at", "")
+        if sent_at:
+            try:
+                if now - _parse_ts(sent_at) > timedelta(seconds=retention):
+                    continue
+            except Exception:
+                pass
+        if message.get("in_flight") and message.get("visible_at"):
+            try:
+                if _parse_ts(message["visible_at"]) <= now:
+                    message["in_flight"] = False
+                    message["receipt_handle"] = ""
+            except Exception:
+                message["in_flight"] = False
+                message["receipt_handle"] = ""
+        if not message.get("deleted"):
+            messages.append(message)
+    queue["messages"] = messages
+
+
+def _sqs_dedup_key(queue: dict, body: str, dedup_id: str) -> str:
+    if dedup_id:
+        return dedup_id
+    if queue.get("content_based_deduplication"):
+        return hashlib.sha256(body.encode("utf-8")).hexdigest()
+    return ""
+
+
+def _sqs_message_is_blocked_by_fifo(queue: dict, message: dict) -> bool:
+    if not queue.get("fifo_queue"):
+        return False
+    group_id = message.get("group_id", "") or "__default__"
+    for candidate in queue.get("messages", []):
+        if candidate is message:
+            break
+        if candidate.get("deleted"):
+            continue
+        if (candidate.get("group_id", "") or "__default__") != group_id:
+            continue
+        if candidate.get("in_flight"):
+            return True
+    return False
+
+
+def _sqs_view_message(queue: dict, message: dict, include_body: bool = True) -> dict:
+    view = {
+        "message_id": message.get("message_id", ""),
+        "receipt_handle": message.get("receipt_handle", ""),
+        "receive_count": int(message.get("receive_count", 0) or 0),
+        "sent_at": message.get("sent_at", ""),
+        "visible_at": message.get("visible_at", ""),
+        "group_id": message.get("group_id", ""),
+        "dedup_id": message.get("dedup_id", ""),
+        "in_flight": bool(message.get("in_flight", False)),
+        "md5_of_body": message.get("md5_of_body", ""),
+        "sequence_number": message.get("sequence_number", ""),
+    }
+    if include_body:
+        view["body"] = message.get("body", "")
+        view["attributes"] = copy.deepcopy(message.get("attributes", {}))
+        view["message_attributes"] = copy.deepcopy(message.get("message_attributes", {}))
+    return view
+
+
+def _sqs_queue_attributes(queue: dict) -> dict[str, str]:
+    attrs = {
+        "ApproximateNumberOfMessages": str(sum(1 for m in queue.get("messages", []) if not m.get("deleted") and not m.get("in_flight") and _sqs_message_is_visible(m))),
+        "ApproximateNumberOfMessagesNotVisible": str(sum(1 for m in queue.get("messages", []) if not m.get("deleted") and m.get("in_flight"))),
+        "VisibilityTimeout": str(int(queue.get("visibility_timeout", 30) or 30)),
+        "CreatedTimestamp": str(_sqs_timestamp(queue.get("created"))),
+        "LastModifiedTimestamp": str(_sqs_timestamp(queue.get("last_modified"))),
+        "DelaySeconds": str(int(queue.get("delay_seconds", 0) or 0)),
+        "ReceiveMessageWaitTimeSeconds": str(int(queue.get("receive_wait_time_seconds", 0) or 0)),
+        "MessageRetentionPeriod": str(int(queue.get("message_retention_period", 345600) or 345600)),
+        "MaximumMessageSize": str(int(queue.get("max_message_size", 262144) or 262144)),
+        "QueueArn": queue.get("queue_arn", _sqs_queue_arn(queue.get("queue_name", ""))),
+        "FifoQueue": "true" if queue.get("fifo_queue") else "false",
+        "ContentBasedDeduplication": "true" if queue.get("content_based_deduplication") else "false",
+    }
+    redrive_policy = queue.get("redrive_policy") or {}
+    if redrive_policy:
+        attrs["RedrivePolicy"] = json.dumps(redrive_policy, separators=(",", ":"), default=str)
+    return attrs
+
+
+def _sqs_queue_view(queue: dict, include_messages: bool = True) -> dict:
+    queue = _sqs_normalize_queue(queue)
+    _sqs_sweep_queue(queue)
+    view = copy.deepcopy(queue)
+    view["queue_url"] = queue.get("queue_url") or _sqs_queue_url(queue["queue_name"])
+    view["queue_arn"] = queue.get("queue_arn") or _sqs_queue_arn(queue["queue_name"])
+    view["attributes"] = _sqs_queue_attributes(queue)
+    view["message_count"] = len(queue.get("messages", []))
+    view["visible_message_count"] = sum(1 for m in queue.get("messages", []) if not m.get("deleted") and not m.get("in_flight") and _sqs_message_is_visible(m))
+    view["in_flight_count"] = sum(1 for m in queue.get("messages", []) if not m.get("deleted") and m.get("in_flight"))
+    view["messages"] = [_sqs_view_message(queue, message) for message in queue.get("messages", []) if include_messages and not message.get("deleted")]
+    if not include_messages:
+        view["messages"] = []
+    return view
+
+
+def _sqs_queue_list_view(queue: dict) -> dict:
+    view = _sqs_queue_view(queue, include_messages=False)
+    view["latest_message_at"] = max((m.get("sent_at", "") for m in queue.get("messages", []) if m.get("sent_at")), default="")
+    return view
+
+
+def _sqs_redrive_queue_name(queue: dict) -> str:
+    policy = queue.get("redrive_policy") or {}
+    target = policy.get("deadLetterTargetArn") or policy.get("deadLetterTargetQueueArn") or ""
+    if ":queue/" in target:
+        return target.rsplit(":", 1)[-1]
+    if ":sqs:" in target:
+        return target.rsplit(":", 1)[-1]
+    return ""
+
+
+def _sqs_enqueue_message(queue: dict, body: str, attributes: dict | None = None, message_attributes: dict | None = None, group_id: str = "", dedup_id: str = "", source: str = "") -> dict:
+    queue = _sqs_normalize_queue(queue)
+    _sqs_sweep_queue(queue)
+    body = body if isinstance(body, str) else json.dumps(body, default=str)
+    if len(body.encode("utf-8")) > int(queue.get("max_message_size", 262144) or 262144):
+        raise HTTPException(400, detail="InvalidParameterValue: message body exceeds MaximumMessageSize.")
+    if queue.get("fifo_queue") and not group_id:
+        raise HTTPException(400, detail="MissingParameter: MessageGroupId is required for FIFO queues.")
+    dedup_key = _sqs_dedup_key(queue, body, dedup_id)
+    if queue.get("fifo_queue") and dedup_key:
+        dedup_window_start = datetime.now(timezone.utc) - timedelta(minutes=5)
+        for existing in reversed(queue.get("messages", [])):
+            if existing.get("dedup_id") == dedup_key:
+                sent_at = existing.get("sent_at", "")
+                if sent_at and _parse_ts(sent_at) >= dedup_window_start:
+                    return existing
+    message = {
+        "message_id": _id("msg"),
+        "body": body,
+        "attributes": copy.deepcopy(attributes or {}),
+        "message_attributes": copy.deepcopy(message_attributes or {}),
+        "md5_of_body": hashlib.md5(body.encode("utf-8")).hexdigest(),
+        "sent_at": _now(),
+        "visible_at": _now(),
+        "receive_count": 0,
+        "receipt_handle": "",
+        "in_flight": False,
+        "deleted": False,
+        "group_id": group_id,
+        "dedup_id": dedup_key,
+        "sequence_number": str(len(queue.get("messages", [])) + 1),
+        "source": source,
+    }
+    delay = int(queue.get("delay_seconds", 0) or 0)
+    if delay > 0:
+        message["visible_at"] = (datetime.now(timezone.utc) + timedelta(seconds=delay)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+    queue.setdefault("messages", []).append(message)
+    queue["last_modified"] = _now()
+    _persist_state()
+    return message
+
+
+def _sqs_create_queue_record(req: "SQSQueueCreateRequest") -> dict:
+    queue_name = _sqs_queue_key(req.queue_name)
+    _sqs_validate_queue_name(queue_name)
+    if _sqs_find_queue(queue_name):
+        raise HTTPException(409, detail="QueueAlreadyExists")
+    fifo = bool(req.fifo_queue or queue_name.endswith(".fifo"))
+    if fifo and not queue_name.endswith(".fifo"):
+        queue_name = f"{queue_name}.fifo"
+    queue = {
+        "queue_name": queue_name,
+        "queue_url": _sqs_queue_url(queue_name),
+        "queue_arn": _sqs_queue_arn(queue_name),
+        "queue_type": "fifo" if fifo else "standard",
+        "fifo_queue": fifo,
+        "content_based_deduplication": bool(req.content_based_deduplication),
+        "visibility_timeout": max(0, int(req.visibility_timeout or 30)),
+        "receive_wait_time_seconds": max(0, int(req.receive_wait_time_seconds or 0)),
+        "message_retention_period": max(60, int(req.message_retention_period or 345600)),
+        "max_message_size": max(1024, int(req.max_message_size or 262144)),
+        "delay_seconds": max(0, int(req.delay_seconds or 0)),
+        "redrive_policy": copy.deepcopy(req.redrive_policy or {}),
+        "tags": copy.deepcopy(req.tags or {}),
+        "attributes": {},
+        "messages": [],
+        "created": _now(),
+        "last_modified": _now(),
+    }
+    if queue["redrive_policy"] and not isinstance(queue["redrive_policy"], dict):
+        raise HTTPException(400, detail="InvalidParameterValue: redrive_policy must be an object.")
+    _sqs_set_queue(queue)
+    _record_usage("sqs.create_queue", {"queue_name": queue["queue_name"]})
+    return queue
+
+
+def _sqs_queue_from_name_or_url(name_or_url: str) -> dict | None:
+    if not name_or_url:
+        return None
+    if name_or_url.startswith("http://") or name_or_url.startswith("https://"):
+        if "/queues/" in name_or_url:
+            candidate = name_or_url.rsplit("/queues/", 1)[-1]
+            return _sqs_find_queue(candidate)
+    if ":queue/" in name_or_url:
+        candidate = name_or_url.rsplit(":", 1)[-1]
+        return _sqs_find_queue(candidate)
+    return _sqs_find_queue(name_or_url)
+
+
+def _sqs_get_queue(queue_name: str) -> dict:
+    queue = _sqs_find_queue(queue_name)
+    if not queue:
+        raise HTTPException(404, detail="AWS.SimpleQueueService.NonExistentQueue")
+    return _sqs_queue_view(queue)
+
+
+def _sqs_update_queue_attributes(queue: dict, payload: dict) -> dict:
+    queue = _sqs_normalize_queue(queue)
+    if "VisibilityTimeout" in payload:
+        queue["visibility_timeout"] = max(0, int(payload.get("VisibilityTimeout", queue["visibility_timeout"])))
+    if "ReceiveMessageWaitTimeSeconds" in payload:
+        queue["receive_wait_time_seconds"] = max(0, int(payload.get("ReceiveMessageWaitTimeSeconds", queue["receive_wait_time_seconds"])))
+    if "MessageRetentionPeriod" in payload:
+        queue["message_retention_period"] = max(60, int(payload.get("MessageRetentionPeriod", queue["message_retention_period"])))
+    if "MaximumMessageSize" in payload:
+        queue["max_message_size"] = max(1024, int(payload.get("MaximumMessageSize", queue["max_message_size"])))
+    if "DelaySeconds" in payload:
+        queue["delay_seconds"] = max(0, int(payload.get("DelaySeconds", queue["delay_seconds"])))
+    if "RedrivePolicy" in payload:
+        redrive = payload.get("RedrivePolicy") or {}
+        if isinstance(redrive, str):
+            try:
+                redrive = json.loads(redrive)
+            except Exception:
+                raise HTTPException(400, detail="InvalidParameterValue: RedrivePolicy must be JSON.")
+        queue["redrive_policy"] = copy.deepcopy(redrive or {})
+    if "ContentBasedDeduplication" in payload:
+        queue["content_based_deduplication"] = str(payload.get("ContentBasedDeduplication")).lower() == "true"
+    queue["last_modified"] = _now()
+    _persist_state()
+    return queue
+
+
+def _sqs_delete_queue(queue_name: str) -> None:
+    queue = _sqs_find_queue(queue_name)
+    if not queue:
+        raise HTTPException(404, detail="AWS.SimpleQueueService.NonExistentQueue")
+    _sqs_state().setdefault("queues", {}).pop(queue["queue_name"], None)
+    _record_usage("sqs.delete_queue", {"queue_name": queue["queue_name"]})
+
+
+def _sqs_extract_messages_for_delivery(queue: dict, max_messages: int) -> list[dict]:
+    queue = _sqs_normalize_queue(queue)
+    _sqs_sweep_queue(queue)
+    now = datetime.now(timezone.utc)
+    available = []
+    group_locks: set[str] = set()
+    for message in queue.get("messages", []):
+        if message.get("deleted") or message.get("in_flight") or not _sqs_message_is_visible(message):
+            continue
+        if queue.get("fifo_queue"):
+            group_id = message.get("group_id", "") or "__default__"
+            if group_id in group_locks:
+                continue
+            if _sqs_message_is_blocked_by_fifo(queue, message):
+                continue
+            group_locks.add(group_id)
+        available.append(message)
+        if len(available) >= max_messages:
+            break
+    deliveries = []
+    visibility = int(queue.get("visibility_timeout", 30) or 30)
+    for message in available:
+        message["receive_count"] = int(message.get("receive_count", 0) or 0) + 1
+        redrive_policy = queue.get("redrive_policy") or {}
+        max_receive = int(redrive_policy.get("maxReceiveCount", 0) or 0)
+        if max_receive and message["receive_count"] > max_receive:
+            dlq_name = _sqs_redrive_queue_name(queue)
+            dlq = _sqs_find_queue(dlq_name) if dlq_name else None
+            if dlq:
+                _sqs_enqueue_message(dlq, message.get("body", ""), message.get("attributes", {}), message.get("message_attributes", {}), message.get("group_id", ""), message.get("dedup_id", ""), source=f"redrive:{queue['queue_name']}")
+            message["deleted"] = True
+            continue
+        message["in_flight"] = True
+        message["receipt_handle"] = _id("rhdl")
+        message["visible_at"] = (now + timedelta(seconds=visibility)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        deliveries.append(message)
+    queue["last_modified"] = _now()
+    _persist_state()
+    return deliveries
+
+
+def _sqs_delete_message(queue: dict, receipt_handle: str) -> bool:
+    for message in queue.get("messages", []):
+        if message.get("receipt_handle") == receipt_handle and message.get("in_flight"):
+            message["deleted"] = True
+            queue["messages"] = [m for m in queue.get("messages", []) if not m.get("deleted")]
+            queue["last_modified"] = _now()
+            _persist_state()
+            return True
+    return False
+
+
+def _sqs_change_message_visibility(queue: dict, receipt_handle: str, visibility_timeout: int) -> bool:
+    for message in queue.get("messages", []):
+        if message.get("receipt_handle") == receipt_handle and message.get("in_flight"):
+            message["visible_at"] = (datetime.now(timezone.utc) + timedelta(seconds=max(0, int(visibility_timeout)))).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+            queue["last_modified"] = _now()
+            _persist_state()
+            return True
+    return False
+
+
+def _sqs_purge_queue(queue: dict) -> None:
+    queue["messages"] = []
+    queue["last_modified"] = _now()
+    _persist_state()
+
+
+def _sqs_tags_view(queue: dict) -> dict:
+    return copy.deepcopy(queue.get("tags", {}))
+
+
+def _sqs_set_tags(queue: dict, tags: dict[str, str]) -> None:
+    queue["tags"] = {str(k): str(v) for k, v in tags.items()}
+    queue["last_modified"] = _now()
+    _persist_state()
+
+
+def _sqs_query_bool(value: str | None) -> bool:
+    return str(value or "").lower() in {"true", "1", "yes", "on"}
+
+
 AMI_CATALOG = [
     {
         "ami": "ami-amzn2023",
@@ -1209,6 +3108,21 @@ EC2_INSTANCE_TYPE_CATALOG = [
 
 @app.middleware("http")
 async def _capability_middleware(request: Request, call_next):
+    principal = _iam_principal_from_request(request)
+    request.state.iam_principal = principal
+    identity = _iam_resolve_identity(principal)
+    request.state.iam_identity = identity
+    auth = _iam_route_action_resource(request)
+    if auth is not None and not identity.get("is_root"):
+        action, resource = auth
+        allowed, reason = _iam_authorize(principal, action, resource, {
+            "aws:PrincipalArn": identity.get("arn", ""),
+            "aws:PrincipalType": identity.get("type", ""),
+            "aws:username": identity.get("name", ""),
+            "aws:RequestedRegion": "us-east-1",
+        })
+        if not allowed:
+            return _iam_deny_response(request, action, resource, reason)
     _ensure_capability(request.url.path)
     response = await call_next(request)
     if request.method in {"POST", "PUT", "DELETE", "PATCH"}:
@@ -1255,7 +3169,14 @@ def _startup_reconcile_ec2_state():
 buckets:    Dict[str, dict] = STATE.setdefault("buckets", {})
 objects:    Dict[str, dict] = STATE.setdefault("objects", {})
 multiparts: Dict[str, dict] = STATE.setdefault("multiparts", {})
-iam_state = STATE.setdefault("iam", {"users": {}, "roles": {}, "policies": {}, "attachments": []})
+iam_state = STATE.setdefault("iam", {"users": {}, "groups": {}, "roles": {}, "policies": {}, "attachments": [], "identity_providers": {}, "account_settings": {"password_policy": {"minimum_length": 8, "require_symbols": True, "require_numbers": True, "require_uppercase": True, "require_lowercase": True}}})
+iam_state.setdefault("users", {})
+iam_state.setdefault("groups", {})
+iam_state.setdefault("roles", {})
+iam_state.setdefault("policies", {})
+iam_state.setdefault("attachments", [])
+iam_state.setdefault("identity_providers", {})
+iam_state.setdefault("account_settings", {"password_policy": {"minimum_length": 8, "require_symbols": True, "require_numbers": True, "require_uppercase": True, "require_lowercase": True}})
 ec2_state = STATE.setdefault("ec2", {"instances": {}})
 vpc_state = STATE.setdefault("vpc", {"vpcs": {}, "subnets": {}, "security_groups": {}, "route_tables": {}, "internet_gateways": {}})
 vpc_state.setdefault("internet_gateways", {})
@@ -1906,7 +3827,14 @@ def _s3_find_version(entry: dict | None, version_id: str | None) -> dict | None:
     return None
 
 
-def _s3_write_object_version(bucket: str, key: str, version: dict, replace_version_id: str | None = None) -> dict:
+def _s3_write_object_version(
+    bucket: str,
+    key: str,
+    version: dict,
+    replace_version_id: str | None = None,
+    event_name: str | None = None,
+    source: str = "",
+) -> dict:
     entry = _s3_ensure_object_entry(bucket, key, create=True)
     versions = entry.setdefault("versions", [])
     if replace_version_id == "__overwrite__":
@@ -1922,14 +3850,17 @@ def _s3_write_object_version(bucket: str, key: str, version: dict, replace_versi
         versions.insert(0, version)
     entry["versions"] = [copy.deepcopy(v) for v in versions]
     _s3_refresh_object_entry(entry)
+    if event_name:
+        _s3_emit_event(bucket, key, event_name, entry.get("versions", [version])[0] if entry.get("versions") else version, source=source)
     return entry
 
 
-def _s3_insert_simple_delete_marker(bucket: str, key: str) -> dict:
+def _s3_insert_simple_delete_marker(bucket: str, key: str, source: str = "") -> dict:
     entry = _s3_ensure_object_entry(bucket, key, create=True)
     status = _s3_bucket_versioning_status(bucket)
     if status == "Disabled":
         objects.setdefault(bucket, {}).pop(key, None)
+        _s3_emit_event(bucket, key, "s3:ObjectRemoved:Delete", None, source=source)
         return {}
 
     versions = entry.setdefault("versions", [])
@@ -1939,7 +3870,8 @@ def _s3_insert_simple_delete_marker(bucket: str, key: str) -> dict:
         delete_marker=True,
         version_id=_s3_new_version_id(bucket) if status == "Enabled" else "null",
     )
-    return _s3_write_object_version(bucket, key, delete_marker)
+    event_name = "s3:ObjectRemoved:DeleteMarkerCreated" if status in {"Enabled", "Suspended"} else "s3:ObjectRemoved:Delete"
+    return _s3_write_object_version(bucket, key, delete_marker, event_name=event_name, source=source)
 
 
 def _s3_delete_version(bucket: str, key: str, version_id: str) -> bool:
@@ -1947,6 +3879,7 @@ def _s3_delete_version(bucket: str, key: str, version_id: str) -> bool:
     if not entry:
         return False
     versions = entry.get("versions", [])
+    deleted_version = next((copy.deepcopy(v) for v in versions if str(v.get("version_id")) == str(version_id)), None)
     next_versions = [v for v in versions if str(v.get("version_id")) != str(version_id)]
     if len(next_versions) == len(versions):
         return False
@@ -1955,6 +3888,7 @@ def _s3_delete_version(bucket: str, key: str, version_id: str) -> bool:
         _s3_refresh_object_entry(entry)
     else:
         objects.get(bucket, {}).pop(key, None)
+    _s3_emit_event(bucket, key, "s3:ObjectRemoved:Delete", deleted_version, source="DeleteObject")
     return True
 
 
@@ -1979,6 +3913,342 @@ def _s3_list_versions(bucket: str, prefix: str = "") -> list[tuple[str, dict]]:
     return result
 
 
+def _s3_default_notifications() -> dict:
+    return {
+        "eventBridgeEnabled": False,
+        "topicConfigurations": [],
+        "queueConfigurations": [],
+        "cloudFunctionConfigurations": [],
+        "deliveries": [],
+        "updatedAt": _now(),
+    }
+
+
+def _s3_bucket_notifications(bucket: str, create: bool = True) -> dict | None:
+    b = buckets.get(bucket)
+    if not b:
+        return None
+    notifications = b.get("notifications")
+    if not isinstance(notifications, dict):
+        if not create:
+            return None
+        notifications = _s3_default_notifications()
+        b["notifications"] = notifications
+    notifications.setdefault("eventBridgeEnabled", False)
+    notifications.setdefault("topicConfigurations", [])
+    notifications.setdefault("queueConfigurations", [])
+    notifications.setdefault("cloudFunctionConfigurations", [])
+    notifications.setdefault("deliveries", [])
+    notifications.setdefault("updatedAt", _now())
+    return notifications
+
+
+def _s3_xml_name(elem: ET.Element | None) -> str:
+    if elem is None:
+        return ""
+    return (elem.tag or "").rsplit("}", 1)[-1]
+
+
+def _s3_xml_find_child(elem: ET.Element, name: str) -> ET.Element | None:
+    for child in list(elem):
+        if _s3_xml_name(child) == name:
+            return child
+    return None
+
+
+def _s3_xml_find_children(elem: ET.Element, name: str) -> list[ET.Element]:
+    return [child for child in list(elem) if _s3_xml_name(child) == name]
+
+
+def _s3_xml_text(elem: ET.Element | None, name: str, default: str = "") -> str:
+    child = _s3_xml_find_child(elem, name) if elem is not None else None
+    return (child.text or default).strip() if child is not None else default
+
+
+def _s3_event_pattern_matches(pattern: str, event_name: str) -> bool:
+    escaped = re.escape(pattern).replace(r"\*", ".*")
+    return re.fullmatch(escaped, event_name) is not None
+
+
+def _s3_notification_rule_matches(rule: dict, event_name: str, key: str) -> bool:
+    patterns = rule.get("events") or []
+    if patterns and not any(_s3_event_pattern_matches(pattern, event_name) for pattern in patterns):
+        return False
+    prefix = (rule.get("prefix") or "").strip()
+    suffix = (rule.get("suffix") or "").strip()
+    if prefix and not key.startswith(prefix):
+        return False
+    if suffix and not key.endswith(suffix):
+        return False
+    return True
+
+
+def _s3_build_notification_event(bucket: str, key: str, version: dict | None, event_name: str, source: str) -> dict:
+    bucket_meta = buckets.get(bucket, {})
+    version_id = (version or {}).get("version_id", "null")
+    return {
+        "Records": [
+            {
+                "eventVersion": "2.1",
+                "eventSource": "aws:s3",
+                "awsRegion": bucket_meta.get("region", "us-east-1"),
+                "eventTime": _now(),
+                "eventName": event_name.replace("s3:", ""),
+                "userIdentity": {"principalId": "AWS:SIMULATOR"},
+                "requestParameters": {"sourceIPAddress": "127.0.0.1"},
+                "responseElements": {
+                    "x-amz-request-id": _req_id(),
+                    "x-amz-id-2": uuid.uuid4().hex,
+                },
+                "s3": {
+                    "s3SchemaVersion": "1.0",
+                    "configurationId": source or "cloudlearn-s3-notification",
+                    "bucket": {
+                        "name": bucket,
+                        "arn": bucket_meta.get("arn", f"arn:aws:s3:::{bucket}"),
+                    },
+                    "object": {
+                        "key": key,
+                        "size": int((version or {}).get("size", 0) or 0),
+                        "eTag": (version or {}).get("etag", ""),
+                        "versionId": version_id,
+                        "sequencer": uuid.uuid4().hex[:16],
+                    },
+                },
+            }
+        ]
+    }
+
+
+def _s3_notification_delivery_targets(bucket: str, event_name: str, key: str) -> list[dict]:
+    notifications = _s3_bucket_notifications(bucket, create=False)
+    if not notifications:
+        return []
+    deliveries: list[dict] = []
+    for rule in notifications.get("topicConfigurations", []):
+        if _s3_notification_rule_matches(rule, event_name, key):
+            deliveries.append({
+                "type": "TopicConfiguration",
+                "destination": rule.get("topic", ""),
+                "id": rule.get("id", ""),
+            })
+    for rule in notifications.get("queueConfigurations", []):
+        if _s3_notification_rule_matches(rule, event_name, key):
+            deliveries.append({
+                "type": "QueueConfiguration",
+                "destination": rule.get("queue", ""),
+                "id": rule.get("id", ""),
+            })
+    for rule in notifications.get("cloudFunctionConfigurations", []):
+        if _s3_notification_rule_matches(rule, event_name, key):
+            deliveries.append({
+                "type": "CloudFunctionConfiguration",
+                "destination": rule.get("cloudFunction", ""),
+                "id": rule.get("id", ""),
+            })
+    if notifications.get("eventBridgeEnabled"):
+        deliveries.append({
+            "type": "EventBridgeConfiguration",
+            "destination": "eventbridge",
+            "id": "eventbridge",
+        })
+    return deliveries
+
+
+def _s3_notification_record_delivery(
+    bucket: str,
+    event_name: str,
+    key: str,
+    version_id: str = "",
+    source: str = "",
+    payload: dict | None = None,
+    test_event: bool = False,
+) -> list[dict]:
+    notifications = _s3_bucket_notifications(bucket, create=True)
+    if not notifications:
+        return []
+    records = []
+    deliveries = _s3_notification_delivery_targets(bucket, event_name, key)
+    for target in deliveries:
+        record = {
+            "id": _id("s3evt"),
+            "at": _now(),
+            "bucket": bucket,
+            "key": key,
+            "version_id": version_id or "null",
+            "event_name": event_name,
+            "source": source,
+            "destination_type": target["type"],
+            "destination": target["destination"],
+            "rule_id": target.get("id", ""),
+            "status": "delivered",
+            "test_event": test_event,
+            "payload": copy.deepcopy(payload or {}),
+        }
+        if target["type"] == "CloudFunctionConfiguration" and target.get("destination"):
+            function = _lambda_resolve_function(target["destination"])
+            if function:
+                try:
+                    _lambda_invoke_function(
+                        function["function_name"],
+                        payload or {},
+                        invocation_type="Event",
+                        source=source or "s3",
+                        source_principal="s3.amazonaws.com",
+                        source_arn=f"arn:aws:s3:::{bucket}",
+                        source_account=AWS_ACCOUNT_ID,
+                    )
+                except Exception as exc:
+                    record["status"] = "failed"
+                    record["error"] = getattr(exc, "detail", None) or str(exc)
+            else:
+                record["status"] = "failed"
+                record["error"] = "Lambda function not found"
+        elif target["type"] == "QueueConfiguration" and target.get("destination"):
+            queue = _sqs_queue_from_name_or_url(target["destination"])
+            if queue:
+                try:
+                    _sqs_enqueue_message(
+                        queue,
+                        json.dumps(payload or {}, default=str),
+                        attributes={"event_name": event_name, "bucket": bucket, "source": source or "s3"},
+                        message_attributes={},
+                        source=source or "s3",
+                    )
+                except Exception as exc:
+                    record["status"] = "failed"
+                    record["error"] = getattr(exc, "detail", None) or str(exc)
+            else:
+                record["status"] = "failed"
+                record["error"] = "SQS queue not found"
+        notifications["deliveries"].append(record)
+        records.append(record)
+    notifications["deliveries"] = notifications["deliveries"][-200:]
+    notifications["updatedAt"] = _now()
+    return records
+
+
+def _s3_emit_event(bucket: str, key: str, event_name: str, version: dict | None = None, source: str = "") -> dict:
+    payload = _s3_build_notification_event(bucket, key, version, event_name, source)
+    _s3_notification_record_delivery(
+        bucket=bucket,
+        event_name=event_name,
+        key=key,
+        version_id=(version or {}).get("version_id", "null"),
+        source=source,
+        payload=payload,
+        test_event=event_name == "s3:TestEvent",
+    )
+    return payload
+
+
+def _s3_notification_xml_from_config(bucket: str) -> str:
+    notifications = _s3_bucket_notifications(bucket, create=True) or _s3_default_notifications()
+    root = ET.Element("NotificationConfiguration", xmlns=S3_NS)
+    if notifications.get("eventBridgeEnabled"):
+        ET.SubElement(root, "EventBridgeConfiguration")
+
+    def add_filter(parent: ET.Element, rule: dict) -> None:
+        if not rule.get("prefix") and not rule.get("suffix"):
+            return
+        filter_el = ET.SubElement(parent, "Filter")
+        s3key = ET.SubElement(filter_el, "S3Key")
+        if rule.get("prefix"):
+            fr = ET.SubElement(s3key, "FilterRule")
+            ET.SubElement(fr, "Name").text = "prefix"
+            ET.SubElement(fr, "Value").text = rule.get("prefix", "")
+        if rule.get("suffix"):
+            fr = ET.SubElement(s3key, "FilterRule")
+            ET.SubElement(fr, "Name").text = "suffix"
+            ET.SubElement(fr, "Value").text = rule.get("suffix", "")
+
+    for rule in notifications.get("topicConfigurations", []):
+        item = ET.SubElement(root, "TopicConfiguration")
+        if rule.get("id"):
+            ET.SubElement(item, "Id").text = rule.get("id", "")
+        for event in rule.get("events", []):
+            ET.SubElement(item, "Event").text = event
+        ET.SubElement(item, "Topic").text = rule.get("topic", "")
+        add_filter(item, rule)
+
+    for rule in notifications.get("queueConfigurations", []):
+        item = ET.SubElement(root, "QueueConfiguration")
+        if rule.get("id"):
+            ET.SubElement(item, "Id").text = rule.get("id", "")
+        for event in rule.get("events", []):
+            ET.SubElement(item, "Event").text = event
+        ET.SubElement(item, "Queue").text = rule.get("queue", "")
+        add_filter(item, rule)
+
+    for rule in notifications.get("cloudFunctionConfigurations", []):
+        item = ET.SubElement(root, "CloudFunctionConfiguration")
+        if rule.get("id"):
+            ET.SubElement(item, "Id").text = rule.get("id", "")
+        for event in rule.get("events", []):
+            ET.SubElement(item, "Event").text = event
+        ET.SubElement(item, "CloudFunction").text = rule.get("cloudFunction", "")
+        add_filter(item, rule)
+
+    return ET.tostring(root, encoding="utf-8", xml_declaration=True).decode("utf-8")
+
+
+def _s3_parse_notification_xml(body: bytes) -> dict:
+    config = _s3_default_notifications()
+    if not body or not body.strip():
+        return config
+    try:
+        root = ET.fromstring(body)
+    except ET.ParseError as exc:
+        raise HTTPException(400, detail=f"MalformedXML: {exc}")
+    if _s3_xml_name(root) != "NotificationConfiguration":
+        raise HTTPException(400, detail="InvalidNotificationConfiguration")
+
+    config["eventBridgeEnabled"] = _s3_xml_find_child(root, "EventBridgeConfiguration") is not None
+
+    def parse_rule(el: ET.Element, dest_name: str) -> dict:
+        rule = {
+            "id": _s3_xml_text(el, "Id", _id("notif")),
+            "events": [child.text.strip() for child in _s3_xml_find_children(el, "Event") if child.text and child.text.strip()],
+            "prefix": "",
+            "suffix": "",
+        }
+        if dest_name == "TopicConfiguration":
+            rule["topic"] = _s3_xml_text(el, "Topic", "")
+        elif dest_name == "QueueConfiguration":
+            rule["queue"] = _s3_xml_text(el, "Queue", "")
+        else:
+            rule["cloudFunction"] = _s3_xml_text(el, "CloudFunction", "")
+        filter_el = _s3_xml_find_child(el, "Filter")
+        if filter_el is not None:
+            s3_key = _s3_xml_find_child(filter_el, "S3Key")
+            if s3_key is not None:
+                for fr in _s3_xml_find_children(s3_key, "FilterRule"):
+                    name = _s3_xml_text(fr, "Name", "").lower()
+                    value = _s3_xml_text(fr, "Value", "")
+                    if name == "prefix":
+                        rule["prefix"] = value
+                    elif name == "suffix":
+                        rule["suffix"] = value
+        return rule
+
+    config["topicConfigurations"] = [parse_rule(el, "TopicConfiguration") for el in _s3_xml_find_children(root, "TopicConfiguration")]
+    config["queueConfigurations"] = [parse_rule(el, "QueueConfiguration") for el in _s3_xml_find_children(root, "QueueConfiguration")]
+    config["cloudFunctionConfigurations"] = [parse_rule(el, "CloudFunctionConfiguration") for el in _s3_xml_find_children(root, "CloudFunctionConfiguration")]
+    config["updatedAt"] = _now()
+    return config
+
+
+def _s3_notification_summary(bucket: str) -> dict:
+    notifications = _s3_bucket_notifications(bucket, create=False) or _s3_default_notifications()
+    return {
+        "bucket": bucket,
+        "eventBridgeEnabled": bool(notifications.get("eventBridgeEnabled")),
+        "rule_count": len(notifications.get("topicConfigurations", [])) + len(notifications.get("queueConfigurations", [])) + len(notifications.get("cloudFunctionConfigurations", [])),
+        "delivery_count": len(notifications.get("deliveries", [])),
+        "updatedAt": notifications.get("updatedAt", ""),
+    }
+
+
 def _validate_bucket_name(name: str) -> Optional[Response]:
     if len(name) < 3 or len(name) > 63:
         return _error_xml("InvalidBucketName", "Bucket name must be between 3 and 63 characters.", f"/{name}", 400)
@@ -1995,7 +4265,7 @@ api = APIRouter(prefix="/api/s3")
 def api_list_buckets():
     return {
         "owner": "cloudlearn-simulator",
-        "buckets": [{"name": n, **{k: v for k, v in m.items() if k != "tags"}} for n, m in buckets.items()],
+        "buckets": [{"name": n, **{k: v for k, v in m.items() if k not in {"tags", "notifications"}}} for n, m in buckets.items()],
         "count": len(buckets),
     }
 
@@ -2014,6 +4284,7 @@ def api_create_bucket(name: str, region: str = Query(default="us-east-1")):
         "versioning": "Disabled",
         "arn": f"arn:aws:s3:::{name}",
         "tags": {},
+        "notifications": _s3_default_notifications(),
     }
     objects[name] = {}
     return {"message": f"Bucket '{name}' created", "location": f"/{name}"}
@@ -2038,6 +4309,20 @@ class BucketVersioningRequest(BaseModel):
     status: str
 
 
+class S3NotificationRuleRequest(BaseModel):
+    id: str = ""
+    destination_type: str = "TopicConfiguration"
+    destination: str = ""
+    events: list[str] = []
+    prefix: str = ""
+    suffix: str = ""
+
+
+class BucketNotificationRequest(BaseModel):
+    event_bridge_enabled: bool = False
+    rules: list[S3NotificationRuleRequest] = []
+
+
 @api.delete("/buckets/{name}")
 def api_delete_bucket(name: str):
     if name not in buckets:
@@ -2058,6 +4343,64 @@ def api_set_bucket_versioning(name: str, payload: BucketVersioningRequest):
         raise HTTPException(400, detail="InvalidVersioningStatus")
     buckets[name]["versioning"] = status
     return {"message": f"Bucket '{name}' versioning set to {status}", "versioning": status}
+
+
+@api.get("/buckets/{name}/notifications")
+def api_get_bucket_notifications(name: str):
+    if name not in buckets:
+        raise HTTPException(404, detail="NoSuchBucket")
+    return {
+        "bucket": name,
+        **(_s3_bucket_notifications(name, create=True) or _s3_default_notifications()),
+        "summary": _s3_notification_summary(name),
+    }
+
+
+@api.put("/buckets/{name}/notifications")
+def api_set_bucket_notifications(name: str, payload: BucketNotificationRequest):
+    if name not in buckets:
+        raise HTTPException(404, detail="NoSuchBucket")
+    notif = _s3_default_notifications()
+    notif["eventBridgeEnabled"] = bool(payload.event_bridge_enabled)
+    for rule in payload.rules or []:
+        rule_obj = {
+            "id": rule.id.strip() or _id("notif"),
+            "events": [evt.strip() for evt in (rule.events or []) if evt and evt.strip()],
+            "prefix": (rule.prefix or "").strip(),
+            "suffix": (rule.suffix or "").strip(),
+        }
+        if rule.destination_type == "QueueConfiguration":
+            rule_obj["queue"] = rule.destination.strip()
+            notif["queueConfigurations"].append(rule_obj)
+        elif rule.destination_type == "CloudFunctionConfiguration":
+            rule_obj["cloudFunction"] = rule.destination.strip()
+            notif["cloudFunctionConfigurations"].append(rule_obj)
+        else:
+            rule_obj["topic"] = rule.destination.strip()
+            notif["topicConfigurations"].append(rule_obj)
+    notif["updatedAt"] = _now()
+    buckets[name]["notifications"] = notif
+    if notif["eventBridgeEnabled"] or notif["topicConfigurations"] or notif["queueConfigurations"] or notif["cloudFunctionConfigurations"]:
+        _s3_notification_record_delivery(name, "s3:TestEvent", "", "", "api_set_bucket_notifications", {"message": "TestEvent"}, test_event=True)
+    return {"message": f"Bucket '{name}' notifications updated", **notif, "summary": _s3_notification_summary(name)}
+
+
+@api.delete("/buckets/{name}/notifications")
+def api_delete_bucket_notifications(name: str):
+    if name not in buckets:
+        raise HTTPException(404, detail="NoSuchBucket")
+    buckets[name]["notifications"] = _s3_default_notifications()
+    return {"message": f"Bucket '{name}' notifications cleared", "summary": _s3_notification_summary(name)}
+
+
+@api.get("/buckets/{name}/notifications/events")
+def api_list_bucket_notification_events(name: str, limit: int = 50):
+    if name not in buckets:
+        raise HTTPException(404, detail="NoSuchBucket")
+    notif = _s3_bucket_notifications(name, create=True) or _s3_default_notifications()
+    limit = max(1, min(int(limit or 50), 200))
+    events = list(reversed(notif.get("deliveries", [])))[:limit]
+    return {"bucket": name, "events": events, "count": len(events), "summary": _s3_notification_summary(name)}
 
 
 @api.get("/buckets/{bucket}/objects")
@@ -2153,7 +4496,7 @@ async def api_upload_object(bucket: str, file: UploadFile = File(...)):
         delete_marker=False,
     )
     replace_version_id = "__overwrite__" if versioning_status == "Disabled" else ("null" if versioning_status == "Suspended" else None)
-    entry = _s3_write_object_version(bucket, key, version, replace_version_id=replace_version_id)
+    entry = _s3_write_object_version(bucket, key, version, replace_version_id=replace_version_id, event_name="s3:ObjectCreated:Put", source="api_upload_object")
     return {"message": f"Object '{key}' uploaded", "etag": version["etag"], "size": len(data), "version_id": entry.get("current_version_id", version_id)}
 
 
@@ -2221,7 +4564,7 @@ def api_delete_object(bucket: str, key: str, version_id: str = Query(default="",
         if key in objects.get(bucket, {}):
             del objects[bucket][key]
         return {"message": f"Object '{key}' deleted"}
-    entry = _s3_insert_simple_delete_marker(bucket, key)
+    entry = _s3_insert_simple_delete_marker(bucket, key, source="DeleteObject")
     return {
         "message": f"Delete marker created for '{key}'",
         "delete_marker": True,
@@ -3435,11 +5778,95 @@ def api_iam_list_users():
 
 @app.post("/api/iam/users")
 def api_iam_create_user(req: IAMUserRequest):
+    if not (req.user_name or "").strip():
+        raise HTTPException(400, detail="MissingParameter: user_name is required.")
     user_id = _id("user")
-    user = {"user_id": user_id, "user_name": req.user_name, "path": req.path, "created": _now(), "policies": []}
+    user = {"user_id": user_id, "user_name": req.user_name, "path": req.path, "created": _now(), "policies": [], "groups": []}
     iam_state["users"][user_id] = user
     _record_usage("iam.create_user", user)
     return user
+
+
+@app.delete("/api/iam/users/{user_id}")
+def api_iam_delete_user(user_id: str):
+    user = iam_state["users"].get(user_id) or _iam_find_user(user_id)
+    if not user:
+        raise HTTPException(404, detail="TargetNotFound")
+    for group in iam_state.get("groups", {}).values():
+        group["members"] = [member for member in group.get("members", []) if member != user.get("user_id")]
+    _iam_detach_policy_records("user", user.get("user_id", ""))
+    iam_state["users"].pop(user["user_id"], None)
+    _record_usage("iam.delete_user", user)
+    return {"message": "User deleted", "user": user}
+
+
+@app.get("/api/iam/groups")
+def api_iam_list_groups():
+    return {"groups": list(iam_state["groups"].values()), "count": len(iam_state["groups"])}
+
+
+@app.post("/api/iam/groups")
+def api_iam_create_group(req: IAMGroupRequest):
+    if not (req.group_name or "").strip():
+        raise HTTPException(400, detail="MissingParameter: group_name is required.")
+    group_id = _id("group")
+    group = {
+        "group_id": group_id,
+        "group_name": req.group_name,
+        "path": req.path,
+        "created": _now(),
+        "members": [],
+        "policies": [],
+    }
+    iam_state["groups"][group_id] = group
+    _record_usage("iam.create_group", group)
+    return group
+
+
+@app.delete("/api/iam/groups/{group_id}")
+def api_iam_delete_group(group_id: str):
+    group = iam_state["groups"].get(group_id) or _iam_find_group(group_id)
+    if not group:
+        raise HTTPException(404, detail="TargetNotFound")
+    for user in iam_state.get("users", {}).values():
+        user["groups"] = [gid for gid in user.get("groups", []) if gid != group.get("group_id")]
+    _iam_detach_policy_records("group", group.get("group_id", ""))
+    iam_state["groups"].pop(group["group_id"], None)
+    _record_usage("iam.delete_group", group)
+    return {"message": "Group deleted", "group": group}
+
+
+@app.post("/api/iam/groups/{group_id}/users")
+def api_iam_add_user_to_group(group_id: str, payload: dict[str, Any]):
+    group = iam_state["groups"].get(group_id) or _iam_find_group(group_id)
+    if not group:
+        raise HTTPException(404, detail="TargetNotFound")
+    user_id = (payload.get("user_id") or payload.get("user_name") or "").strip()
+    user = _iam_find_user(user_id)
+    if not user:
+        raise HTTPException(404, detail="TargetNotFound")
+    members = group.setdefault("members", [])
+    if user["user_id"] not in members:
+        members.append(user["user_id"])
+    user_groups = user.setdefault("groups", [])
+    if group["group_id"] not in user_groups:
+        user_groups.append(group["group_id"])
+    _record_usage("iam.add_user_to_group", {"group_id": group["group_id"], "user_id": user["user_id"]})
+    return {"message": "User added to group", "group": group, "user": user}
+
+
+@app.delete("/api/iam/groups/{group_id}/users/{user_id}")
+def api_iam_remove_user_from_group(group_id: str, user_id: str):
+    group = iam_state["groups"].get(group_id) or _iam_find_group(group_id)
+    if not group:
+        raise HTTPException(404, detail="TargetNotFound")
+    user = _iam_find_user(user_id)
+    if not user:
+        raise HTTPException(404, detail="TargetNotFound")
+    group["members"] = [member for member in group.get("members", []) if member != user["user_id"]]
+    user["groups"] = [gid for gid in user.get("groups", []) if gid != group["group_id"]]
+    _record_usage("iam.remove_user_from_group", {"group_id": group["group_id"], "user_id": user["user_id"]})
+    return {"message": "User removed from group", "group": group, "user": user}
 
 
 @app.get("/api/iam/roles")
@@ -3449,6 +5876,8 @@ def api_iam_list_roles():
 
 @app.post("/api/iam/roles")
 def api_iam_create_role(req: IAMRoleRequest):
+    if not (req.role_name or "").strip():
+        raise HTTPException(400, detail="MissingParameter: role_name is required.")
     role_id = _id("role")
     role = {
         "role_id": role_id,
@@ -3464,6 +5893,22 @@ def api_iam_create_role(req: IAMRoleRequest):
     return role
 
 
+@app.delete("/api/iam/roles/{role_id}")
+def api_iam_delete_role(role_id: str):
+    role = iam_state["roles"].get(role_id)
+    if not role:
+        for candidate in iam_state.get("roles", {}).values():
+            if role_id in {candidate.get("role_id", ""), candidate.get("role_name", ""), _iam_role_arn(candidate.get("role_name", ""))}:
+                role = candidate
+                break
+    if not role:
+        raise HTTPException(404, detail="TargetNotFound")
+    _iam_detach_policy_records("role", role.get("role_id", ""))
+    iam_state["roles"].pop(role["role_id"], None)
+    _record_usage("iam.delete_role", role)
+    return {"message": "Role deleted", "role": role}
+
+
 @app.get("/api/iam/policies")
 def api_iam_list_policies():
     return {"policies": list(iam_state["policies"].values()), "count": len(iam_state["policies"])}
@@ -3471,11 +5916,25 @@ def api_iam_list_policies():
 
 @app.post("/api/iam/policies")
 def api_iam_create_policy(req: IAMPolicyRequest):
+    if not (req.policy_name or "").strip():
+        raise HTTPException(400, detail="MissingParameter: policy_name is required.")
     policy_id = _id("policy")
     policy = {"policy_id": policy_id, "policy_name": req.policy_name, "document": req.document, "created": _now()}
     iam_state["policies"][policy_id] = policy
     _record_usage("iam.create_policy", policy)
     return policy
+
+
+@app.delete("/api/iam/policies/{policy_id}")
+def api_iam_delete_policy(policy_id: str):
+    policy = iam_state["policies"].get(policy_id)
+    if not policy:
+        raise HTTPException(404, detail="NoSuchPolicy")
+    _iam_remove_policy_from_all_principals(policy_id)
+    iam_state["policies"].pop(policy_id, None)
+    iam_state["attachments"] = [a for a in iam_state.get("attachments", []) if a.get("policy_id") != policy_id]
+    _record_usage("iam.delete_policy", policy)
+    return {"message": "Policy deleted", "policy": policy}
 
 
 @app.post("/api/iam/attach-policy")
@@ -3486,9 +5945,16 @@ def api_iam_attach_policy(payload: dict[str, Any]):
     if policy_id not in iam_state["policies"]:
         raise HTTPException(404, detail="NoSuchPolicy")
     if target_type == "user":
-        target = iam_state["users"].get(target_id)
+        target = iam_state["users"].get(target_id) or _iam_find_user(target_id)
+    elif target_type == "group":
+        target = iam_state["groups"].get(target_id) or _iam_find_group(target_id)
     else:
         target = iam_state["roles"].get(target_id)
+        if not target:
+            for role in iam_state["roles"].values():
+                if target_id in {role.get("role_name", ""), _iam_role_arn(role.get("role_name", ""))}:
+                    target = role
+                    break
     if not target:
         raise HTTPException(404, detail="TargetNotFound")
     target.setdefault("policies", []).append(policy_id)
@@ -3497,9 +5963,70 @@ def api_iam_attach_policy(payload: dict[str, Any]):
     return {"message": "Policy attached", "target": target, "policy_id": policy_id}
 
 
+@app.delete("/api/iam/attachments")
+def api_iam_detach_policy(payload: dict[str, Any]):
+    target_type = (payload.get("target_type") or "user").strip().lower()
+    target_id = (payload.get("target_id") or "").strip()
+    policy_id = (payload.get("policy_id") or "").strip()
+    if not target_id or not policy_id:
+        raise HTTPException(400, detail="MissingParameter: target_id and policy_id are required.")
+    removed = _iam_detach_policy_records(target_type, target_id, policy_id)
+    if not removed:
+        raise HTTPException(404, detail="TargetNotFound")
+    _record_usage("iam.detach_policy", {"target_type": target_type, "target_id": target_id, "policy_id": policy_id})
+    return {"message": "Policy detached", "target_type": target_type, "target_id": target_id, "policy_id": policy_id}
+
+
 @app.get("/api/iam/attachments")
 def api_iam_list_attachments():
     return {"attachments": list(iam_state["attachments"]), "count": len(iam_state["attachments"])}
+
+
+@app.get("/api/iam/identity-providers")
+def api_iam_list_identity_providers():
+    return {"identity_providers": list(iam_state.get("identity_providers", {}).values()), "count": len(iam_state.get("identity_providers", {}))}
+
+
+@app.post("/api/iam/identity-providers")
+def api_iam_create_identity_provider(req: IAMIdentityProviderRequest):
+    if not (req.provider_name or "").strip():
+        raise HTTPException(400, detail="MissingParameter: provider_name is required.")
+    provider_id = _id("idp")
+    provider = {
+        "provider_id": provider_id,
+        "provider_name": req.provider_name,
+        "provider_type": req.provider_type,
+        "url": req.url,
+        "created": _now(),
+        "tags": copy.deepcopy(req.tags or []),
+    }
+    iam_state.setdefault("identity_providers", {})[provider_id] = provider
+    _record_usage("iam.create_identity_provider", provider)
+    return provider
+
+
+@app.delete("/api/iam/identity-providers/{provider_id}")
+def api_iam_delete_identity_provider(provider_id: str):
+    providers = iam_state.setdefault("identity_providers", {})
+    provider = providers.pop(provider_id, None)
+    if not provider:
+        raise HTTPException(404, detail="TargetNotFound")
+    _record_usage("iam.delete_identity_provider", provider)
+    return {"message": "Identity provider deleted", "identity_provider": provider}
+
+
+@app.get("/api/iam/account-settings")
+def api_iam_get_account_settings():
+    return {"account_settings": copy.deepcopy(iam_state.get("account_settings", {}))}
+
+
+@app.put("/api/iam/account-settings")
+def api_iam_update_account_settings(req: IAMAccountSettingsRequest):
+    current = iam_state.setdefault("account_settings", {"password_policy": {}})
+    if req.password_policy:
+        current["password_policy"] = copy.deepcopy(req.password_policy)
+    _record_usage("iam.update_account_settings", current)
+    return {"account_settings": copy.deepcopy(current)}
 
 
 @app.get("/api/ec2/instances")
@@ -6824,6 +9351,426 @@ def _rds_query_list_tags(params: dict[str, Any]) -> Response:
     return _rds_success_response("ListTagsForResource", result)
 
 
+def _sqs_xml_result(action: str, body: str, status: int = 200, extra_headers: dict | None = None) -> Response:
+    xml = f'<?xml version="1.0" encoding="UTF-8"?><{action}Response xmlns="{SQS_XML_NS}"><{action}Result>{body}</{action}Result><ResponseMetadata><RequestId>{_req_id()}</RequestId></ResponseMetadata></{action}Response>'
+    return _xml_response(xml, status=status, extra_headers=extra_headers)
+
+
+def _sqs_xml_queue(queue: dict) -> str:
+    return f"<QueueUrl>{xml_escape(queue.get('queue_url') or _sqs_queue_url(queue['queue_name']))}</QueueUrl>"
+
+
+def _sqs_xml_attributes(queue: dict, names: list[str] | None = None) -> str:
+    attrs = _sqs_xml_queue_attributes(queue, names)
+    body = []
+    for name, value in attrs:
+        body.append("<Attribute>")
+        body.append(f"<Name>{xml_escape(name)}</Name>")
+        body.append(f"<Value>{xml_escape(value)}</Value>")
+        body.append("</Attribute>")
+    return "".join(body)
+
+
+def _sqs_xml_queue_attributes(queue: dict, names: list[str] | None = None) -> list[tuple[str, str]]:
+    attrs = _sqs_queue_attributes(queue)
+    if not names or any(name == "All" for name in names):
+        return list(attrs.items())
+    return [(name, attrs[name]) for name in names if name in attrs]
+
+
+def _sqs_xml_message(message: dict) -> str:
+    body = [
+        "<Message>",
+        f"<MessageId>{xml_escape(message.get('message_id', ''))}</MessageId>",
+        f"<ReceiptHandle>{xml_escape(message.get('receipt_handle', ''))}</ReceiptHandle>",
+        f"<MD5OfBody>{xml_escape(message.get('md5_of_body', ''))}</MD5OfBody>",
+        f"<Body>{xml_escape(message.get('body', ''))}</Body>",
+    ]
+    attrs = message.get("attributes") or {}
+    if attrs:
+        body.append("<Attribute>")
+        for key, value in attrs.items():
+            body.append(f"<Name>{xml_escape(str(key))}</Name>")
+            body.append(f"<Value>{xml_escape(str(value))}</Value>")
+        body.append("</Attribute>")
+    msg_attrs = message.get("message_attributes") or {}
+    if msg_attrs:
+        body.append("<MessageAttribute>")
+        for key, value in msg_attrs.items():
+            body.append(f"<Name>{xml_escape(str(key))}</Name>")
+            body.append(f"<StringValue>{xml_escape(str(value))}</StringValue>")
+        body.append("</MessageAttribute>")
+    body.append("</Message>")
+    return "".join(body)
+
+
+def _sqs_xml_queue_tags(tags: dict[str, str]) -> str:
+    return "".join(f"<Tag>{xml_escape(k)}={xml_escape(v)}</Tag>" for k, v in tags.items())
+
+
+def _sqs_query_collect_list(params: dict[str, Any], prefix: str) -> list[str]:
+    values: list[str] = []
+    index = 1
+    while True:
+        key = f"{prefix}.{index}"
+        if key not in params:
+            break
+        value = params.get(key)
+        if isinstance(value, list):
+            values.extend([str(v) for v in value if str(v).strip()])
+        elif value is not None and str(value).strip():
+            values.append(str(value))
+        index += 1
+    if not values and prefix in params:
+        value = params.get(prefix)
+        if isinstance(value, list):
+            values.extend([str(v) for v in value if str(v).strip()])
+        elif value is not None and str(value).strip():
+            values.append(str(value))
+    return values
+
+
+def _sqs_query_create_queue(params: dict[str, Any]) -> Response:
+    req = SQSQueueCreateRequest(
+        queue_name=str(params.get("QueueName", params.get("queueName", ""))).strip(),
+        fifo_queue=_sqs_query_bool(params.get("FifoQueue")),
+        content_based_deduplication=_sqs_query_bool(params.get("ContentBasedDeduplication")),
+        visibility_timeout=int(params.get("VisibilityTimeout", 30) or 30),
+        receive_wait_time_seconds=int(params.get("ReceiveMessageWaitTimeSeconds", 0) or 0),
+        message_retention_period=int(params.get("MessageRetentionPeriod", 345600) or 345600),
+        max_message_size=int(params.get("MaximumMessageSize", 262144) or 262144),
+        delay_seconds=int(params.get("DelaySeconds", 0) or 0),
+        redrive_policy=json.loads(params.get("RedrivePolicy", "{}") or "{}") if str(params.get("RedrivePolicy", "")).strip() else {},
+        tags={},
+    )
+    queue = _sqs_create_queue_record(req)
+    return _sqs_xml_result("CreateQueue", _sqs_xml_queue(queue))
+
+
+def _sqs_query_list_queues(params: dict[str, Any]) -> Response:
+    prefix = str(params.get("QueueNamePrefix", params.get("queueNamePrefix", ""))).strip()
+    queues = [_sqs_queue_list_view(queue) for queue in _sqs_list_queues() if not prefix or queue.get("queue_name", "").startswith(prefix)]
+    body = "".join(_sqs_xml_queue(queue) for queue in queues)
+    body = f"<QueueUrls>{body}</QueueUrls>"
+    return _sqs_xml_result("ListQueues", body)
+
+
+def _sqs_query_get_queue_url(params: dict[str, Any]) -> Response:
+    queue_name = str(params.get("QueueName", params.get("queueName", ""))).strip()
+    queue = _sqs_find_queue(queue_name)
+    if not queue:
+        raise HTTPException(404, detail="AWS.SimpleQueueService.NonExistentQueue")
+    return _sqs_xml_result("GetQueueUrl", f"<QueueUrl>{xml_escape(queue.get('queue_url') or _sqs_queue_url(queue['queue_name']))}</QueueUrl>")
+
+
+def _sqs_query_get_set_attributes(action: str, params: dict[str, Any]) -> Response:
+    queue_ref = str(params.get("QueueUrl", params.get("queueUrl", params.get("QueueName", params.get("queueName", ""))))).strip()
+    queue = _sqs_queue_from_name_or_url(queue_ref)
+    if not queue:
+        raise HTTPException(404, detail="AWS.SimpleQueueService.NonExistentQueue")
+    if action == "GetQueueAttributes":
+        names = _sqs_query_collect_list(params, "AttributeName")
+        body = "<Attributes>" + _sqs_xml_attributes(queue, names) + "</Attributes>"
+        return _sqs_xml_result("GetQueueAttributes", body)
+    attrs: dict[str, Any] = {}
+    for key, value in params.items():
+        if key.startswith("Attribute."):
+            parts = key.split(".")
+            if len(parts) >= 3 and parts[2] == "Name":
+                index = parts[1]
+                val = params.get(f"Attribute.{index}.Value")
+                if val is not None:
+                    attrs[str(value)] = val
+    if not attrs:
+        for key in ["VisibilityTimeout", "ReceiveMessageWaitTimeSeconds", "MessageRetentionPeriod", "MaximumMessageSize", "DelaySeconds", "RedrivePolicy", "ContentBasedDeduplication"]:
+            if key in params:
+                attrs[key] = params[key]
+    _sqs_update_queue_attributes(queue, attrs)
+    return _sqs_xml_result("SetQueueAttributes", "")
+
+
+def _sqs_query_send_message(params: dict[str, Any]) -> Response:
+    queue_ref = str(params.get("QueueUrl", params.get("queueUrl", params.get("QueueName", params.get("queueName", ""))))).strip()
+    queue = _sqs_queue_from_name_or_url(queue_ref)
+    if not queue:
+        raise HTTPException(404, detail="AWS.SimpleQueueService.NonExistentQueue")
+    body = str(params.get("MessageBody", params.get("messageBody", "")))
+    if not body:
+        raise HTTPException(400, detail="MissingParameter: MessageBody")
+    group_id = str(params.get("MessageGroupId", params.get("messageGroupId", ""))).strip()
+    dedup_id = str(params.get("MessageDeduplicationId", params.get("messageDeduplicationId", ""))).strip()
+    message = _sqs_enqueue_message(queue, body, {}, {}, group_id=group_id, dedup_id=dedup_id, source="SendMessage")
+    body_xml = f"<MessageId>{xml_escape(message['message_id'])}</MessageId><MD5OfMessageBody>{xml_escape(message['md5_of_body'])}</MD5OfMessageBody>"
+    if message.get("sequence_number"):
+        body_xml += f"<SequenceNumber>{xml_escape(message['sequence_number'])}</SequenceNumber>"
+    return _sqs_xml_result("SendMessage", body_xml)
+
+
+def _sqs_query_receive_message(params: dict[str, Any]) -> Response:
+    queue_ref = str(params.get("QueueUrl", params.get("queueUrl", params.get("QueueName", params.get("queueName", ""))))).strip()
+    queue = _sqs_queue_from_name_or_url(queue_ref)
+    if not queue:
+        raise HTTPException(404, detail="AWS.SimpleQueueService.NonExistentQueue")
+    max_messages = max(1, min(int(params.get("MaxNumberOfMessages", params.get("maxNumberOfMessages", 1)) or 1), 10))
+    wait_time = max(0, int(params.get("WaitTimeSeconds", params.get("waitTimeSeconds", queue.get("receive_wait_time_seconds", 0))) or 0))
+    visibility_timeout = params.get("VisibilityTimeout", params.get("visibilityTimeout"))
+    visibility_timeout = int(visibility_timeout) if visibility_timeout is not None and str(visibility_timeout).strip() else int(queue.get("visibility_timeout", 30))
+    deadline = time.time() + wait_time
+    deliveries = []
+    while True:
+        deliveries = _sqs_extract_messages_for_delivery(queue, max_messages)
+        if deliveries or wait_time <= 0 or time.time() >= deadline:
+            break
+        time.sleep(0.2)
+    if visibility_timeout != int(queue.get("visibility_timeout", 30) or 30):
+        for message in deliveries:
+            message["visible_at"] = (datetime.now(timezone.utc) + timedelta(seconds=visibility_timeout)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+    body = "<ReceiveMessageResult>" + "".join(_sqs_xml_message(message) for message in deliveries) + "</ReceiveMessageResult>"
+    return _sqs_xml_result("ReceiveMessage", body)
+
+
+def _sqs_query_delete_message(params: dict[str, Any]) -> Response:
+    queue_ref = str(params.get("QueueUrl", params.get("queueUrl", params.get("QueueName", params.get("queueName", ""))))).strip()
+    queue = _sqs_queue_from_name_or_url(queue_ref)
+    if not queue:
+        raise HTTPException(404, detail="AWS.SimpleQueueService.NonExistentQueue")
+    receipt_handle = str(params.get("ReceiptHandle", params.get("receiptHandle", ""))).strip()
+    if not receipt_handle:
+        raise HTTPException(400, detail="MissingParameter: ReceiptHandle")
+    if not _sqs_delete_message(queue, receipt_handle):
+        raise HTTPException(400, detail="ReceiptHandleIsInvalid")
+    return _sqs_xml_result("DeleteMessage", "")
+
+
+def _sqs_query_change_message_visibility(params: dict[str, Any]) -> Response:
+    queue_ref = str(params.get("QueueUrl", params.get("queueUrl", params.get("QueueName", params.get("queueName", ""))))).strip()
+    queue = _sqs_queue_from_name_or_url(queue_ref)
+    if not queue:
+        raise HTTPException(404, detail="AWS.SimpleQueueService.NonExistentQueue")
+    receipt_handle = str(params.get("ReceiptHandle", params.get("receiptHandle", ""))).strip()
+    visibility_timeout = int(params.get("VisibilityTimeout", params.get("visibilityTimeout", 30)) or 30)
+    if not receipt_handle:
+        raise HTTPException(400, detail="MissingParameter: ReceiptHandle")
+    if not _sqs_change_message_visibility(queue, receipt_handle, visibility_timeout):
+        raise HTTPException(400, detail="ReceiptHandleIsInvalid")
+    return _sqs_xml_result("ChangeMessageVisibility", "")
+
+
+def _sqs_query_purge_queue(params: dict[str, Any]) -> Response:
+    queue_ref = str(params.get("QueueUrl", params.get("queueUrl", params.get("QueueName", params.get("queueName", ""))))).strip()
+    queue = _sqs_queue_from_name_or_url(queue_ref)
+    if not queue:
+        raise HTTPException(404, detail="AWS.SimpleQueueService.NonExistentQueue")
+    _sqs_purge_queue(queue)
+    return _sqs_xml_result("PurgeQueue", "")
+
+
+def _sqs_query_tag_untag_list_tags(action: str, params: dict[str, Any]) -> Response:
+    queue_ref = str(params.get("QueueUrl", params.get("queueUrl", params.get("QueueName", params.get("queueName", ""))))).strip()
+    queue = _sqs_queue_from_name_or_url(queue_ref)
+    if not queue:
+        raise HTTPException(404, detail="AWS.SimpleQueueService.NonExistentQueue")
+    if action == "ListQueueTags":
+        tags = _sqs_tags_view(queue)
+        body = "<Tags>" + "".join(f"<Tag><Key>{xml_escape(k)}</Key><Value>{xml_escape(v)}</Value></Tag>" for k, v in tags.items()) + "</Tags>"
+        return _sqs_xml_result("ListQueueTags", body)
+    if action == "TagQueue":
+        tags = {}
+        for key, value in params.items():
+            if key.startswith("Tag.") and key.endswith(".Key"):
+                idx = key.split(".")[1]
+                tag_value = params.get(f"Tag.{idx}.Value", "")
+                tags[str(value)] = str(tag_value)
+        if not tags and params.get("Tags"):
+            maybe = params.get("Tags")
+            if isinstance(maybe, dict):
+                tags = {str(k): str(v) for k, v in maybe.items()}
+        if tags:
+            current = _sqs_tags_view(queue)
+            current.update(tags)
+            _sqs_set_tags(queue, current)
+        return _sqs_xml_result("TagQueue", "")
+    current = _sqs_tags_view(queue)
+    keys = _sqs_query_collect_list(params, "TagKey")
+    if not keys:
+        keys = list(current.keys())
+    for key in keys:
+        current.pop(key, None)
+    _sqs_set_tags(queue, current)
+    return _sqs_xml_result("UntagQueue", "")
+
+
+@app.api_route("/sqs", methods=["GET", "POST"], include_in_schema=False)
+@app.api_route("/api/sqs/aws", methods=["GET", "POST"], include_in_schema=False)
+async def api_sqs_query(request: Request):
+    params = await _ec2_query_params(request)
+    action = str(params.get("Action", "")).strip()
+    if not action:
+        return _error_xml("InvalidAction", "Missing Action parameter.", "/sqs", 400)
+    try:
+        if action == "CreateQueue":
+            return _sqs_query_create_queue(params)
+        if action == "ListQueues":
+            return _sqs_query_list_queues(params)
+        if action == "GetQueueUrl":
+            return _sqs_query_get_queue_url(params)
+        if action in {"GetQueueAttributes", "SetQueueAttributes"}:
+            return _sqs_query_get_set_attributes(action, params)
+        if action == "SendMessage":
+            return _sqs_query_send_message(params)
+        if action == "ReceiveMessage":
+            return _sqs_query_receive_message(params)
+        if action == "DeleteMessage":
+            return _sqs_query_delete_message(params)
+        if action == "ChangeMessageVisibility":
+            return _sqs_query_change_message_visibility(params)
+        if action == "PurgeQueue":
+            return _sqs_query_purge_queue(params)
+        if action in {"TagQueue", "UntagQueue", "ListQueueTags"}:
+            return _sqs_query_tag_untag_list_tags(action, params)
+    except HTTPException as exc:
+        code = str(exc.detail).split(":", 1)[0]
+        message = str(exc.detail)
+        return _error_xml(code, message, "/sqs", exc.status_code)
+    return _error_xml("InvalidAction", f"The action '{action}' is not implemented by the simulator.", "/sqs", 400)
+
+
+@app.get("/api/sqs/queues")
+def api_sqs_list_queues():
+    queues = [_sqs_queue_list_view(queue) for queue in _sqs_list_queues()]
+    return {"queues": queues, "count": len(queues)}
+
+
+@app.post("/api/sqs/queues")
+def api_sqs_create_queue(req: SQSQueueCreateRequest):
+    queue = _sqs_create_queue_record(req)
+    return _sqs_queue_view(queue)
+
+
+@app.get("/api/sqs/queues/{queue_name}")
+def api_sqs_get_queue(queue_name: str):
+    queue = _sqs_find_queue(queue_name)
+    if not queue:
+        raise HTTPException(404, detail="QueueNotFound")
+    return _sqs_queue_view(queue)
+
+
+@app.put("/api/sqs/queues/{queue_name}")
+def api_sqs_update_queue(queue_name: str, req: SQSQueueUpdateRequest):
+    queue = _sqs_find_queue(queue_name)
+    if not queue:
+        raise HTTPException(404, detail="QueueNotFound")
+    payload = {
+        "VisibilityTimeout": req.visibility_timeout,
+        "ReceiveMessageWaitTimeSeconds": req.receive_wait_time_seconds,
+        "MessageRetentionPeriod": req.message_retention_period,
+        "MaximumMessageSize": req.max_message_size,
+        "DelaySeconds": req.delay_seconds,
+        "ContentBasedDeduplication": req.content_based_deduplication,
+        "RedrivePolicy": req.redrive_policy,
+    }
+    if req.tags is not None:
+        queue["tags"] = copy.deepcopy(req.tags)
+    _sqs_update_queue_attributes(queue, {k: v for k, v in payload.items() if v is not None})
+    return _sqs_queue_view(queue)
+
+
+@app.delete("/api/sqs/queues/{queue_name}")
+def api_sqs_delete_queue(queue_name: str):
+    _sqs_delete_queue(queue_name)
+    return {"deleted": True, "queue_name": queue_name}
+
+
+@app.get("/api/sqs/queues/{queue_name}/messages")
+def api_sqs_list_messages(queue_name: str):
+    queue = _sqs_find_queue(queue_name)
+    if not queue:
+        raise HTTPException(404, detail="QueueNotFound")
+    return {"queue_name": queue["queue_name"], "messages": [_sqs_view_message(queue, msg) for msg in queue.get("messages", []) if not msg.get("deleted")], "count": len(queue.get("messages", []))}
+
+
+@app.post("/api/sqs/queues/{queue_name}/messages")
+def api_sqs_send_message(queue_name: str, req: SQSMessageSendRequest):
+    queue = _sqs_find_queue(queue_name)
+    if not queue:
+        raise HTTPException(404, detail="QueueNotFound")
+    message = _sqs_enqueue_message(queue, req.message_body, req.message_attributes or req.message_attributes_map or {}, req.message_attributes_map or {}, req.message_group_id, req.message_deduplication_id, source="api_send_message")
+    return {"message": _sqs_view_message(queue, message), "queue_name": queue["queue_name"], "queue_url": queue.get("queue_url")}
+
+
+@app.post("/api/sqs/queues/{queue_name}/receive")
+def api_sqs_receive_message(queue_name: str, req: SQSReceiveRequest):
+    queue = _sqs_find_queue(queue_name)
+    if not queue:
+        raise HTTPException(404, detail="QueueNotFound")
+    deliveries = _sqs_extract_messages_for_delivery(queue, max(1, min(int(req.max_number_of_messages or 1), 10)))
+    if req.visibility_timeout is not None:
+        for message in deliveries:
+            message["visible_at"] = (datetime.now(timezone.utc) + timedelta(seconds=max(0, int(req.visibility_timeout)))).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+    return {"queue_name": queue["queue_name"], "messages": [_sqs_view_message(queue, msg) for msg in deliveries], "count": len(deliveries)}
+
+
+@app.delete("/api/sqs/queues/{queue_name}/messages/{receipt_handle}")
+def api_sqs_delete_message(queue_name: str, receipt_handle: str):
+    queue = _sqs_find_queue(queue_name)
+    if not queue:
+        raise HTTPException(404, detail="QueueNotFound")
+    if not _sqs_delete_message(queue, receipt_handle):
+        raise HTTPException(400, detail="ReceiptHandleIsInvalid")
+    return {"deleted": True, "queue_name": queue["queue_name"], "receipt_handle": receipt_handle}
+
+
+@app.post("/api/sqs/queues/{queue_name}/messages/{receipt_handle}/visibility")
+def api_sqs_change_visibility(queue_name: str, receipt_handle: str, req: SQSVisibilityRequest):
+    queue = _sqs_find_queue(queue_name)
+    if not queue:
+        raise HTTPException(404, detail="QueueNotFound")
+    if not _sqs_change_message_visibility(queue, receipt_handle, req.visibility_timeout):
+        raise HTTPException(400, detail="ReceiptHandleIsInvalid")
+    return {"updated": True, "queue_name": queue["queue_name"], "receipt_handle": receipt_handle, "visibility_timeout": req.visibility_timeout}
+
+
+@app.post("/api/sqs/queues/{queue_name}/purge")
+def api_sqs_purge(queue_name: str):
+    queue = _sqs_find_queue(queue_name)
+    if not queue:
+        raise HTTPException(404, detail="QueueNotFound")
+    _sqs_purge_queue(queue)
+    return {"purged": True, "queue_name": queue["queue_name"]}
+
+
+@app.get("/api/sqs/queues/{queue_name}/tags")
+def api_sqs_list_tags(queue_name: str):
+    queue = _sqs_find_queue(queue_name)
+    if not queue:
+        raise HTTPException(404, detail="QueueNotFound")
+    return {"queue_name": queue["queue_name"], "tags": _sqs_tags_view(queue)}
+
+
+@app.post("/api/sqs/queues/{queue_name}/tags")
+def api_sqs_tag_queue(queue_name: str, payload: dict[str, str]):
+    queue = _sqs_find_queue(queue_name)
+    if not queue:
+        raise HTTPException(404, detail="QueueNotFound")
+    current = _sqs_tags_view(queue)
+    current.update({str(k): str(v) for k, v in payload.items()})
+    _sqs_set_tags(queue, current)
+    return {"tagged": True, "queue_name": queue["queue_name"], "tags": _sqs_tags_view(queue)}
+
+
+@app.delete("/api/sqs/queues/{queue_name}/tags")
+def api_sqs_untag_queue(queue_name: str, payload: dict[str, Any]):
+    queue = _sqs_find_queue(queue_name)
+    if not queue:
+        raise HTTPException(404, detail="QueueNotFound")
+    keys = payload.get("keys") if isinstance(payload, dict) else []
+    current = _sqs_tags_view(queue)
+    for key in keys or []:
+        current.pop(str(key), None)
+    _sqs_set_tags(queue, current)
+    return {"untagged": True, "queue_name": queue["queue_name"], "tags": _sqs_tags_view(queue)}
+
+
 @app.api_route("/rds", methods=["GET", "POST"], include_in_schema=False)
 @app.api_route("/api/rds/aws", methods=["GET", "POST"], include_in_schema=False)
 async def api_rds_query(request: Request):
@@ -7048,6 +9995,203 @@ async def api_apigateway_invoke_root(api_id: str, stage_name: str, request: Requ
     return await _apigw_invoke(api_id, stage_name, "", request)
 
 
+@app.get("/api/lambda/functions")
+def api_lambda_list_functions():
+    functions = [_lambda_function_view(function) for function in _lambda_list_functions()]
+    return {"functions": functions, "count": len(functions)}
+
+
+@app.post("/api/lambda/functions")
+def api_lambda_create_function(req: LambdaFunctionRequest):
+    function = _lambda_create_function_record(req)
+    return _lambda_function_view(function)
+
+
+@app.get("/api/lambda/functions/{function_name}")
+def api_lambda_get_function(function_name: str):
+    function = _lambda_find_function(function_name)
+    if not function:
+        raise HTTPException(404, detail="ResourceNotFoundException")
+    return _lambda_function_view(function)
+
+
+@app.put("/api/lambda/functions/{function_name}/code")
+def api_lambda_update_function_code(function_name: str, payload: dict[str, Any]):
+    function = _lambda_find_function(function_name)
+    if not function:
+        raise HTTPException(404, detail="ResourceNotFoundException")
+    updated = _lambda_update_function_code(function, str(payload.get("code", "")))
+    return _lambda_function_view(updated)
+
+
+@app.put("/api/lambda/functions/{function_name}/configuration")
+def api_lambda_update_function_configuration(function_name: str, req: LambdaFunctionUpdateRequest):
+    function = _lambda_find_function(function_name)
+    if not function:
+        raise HTTPException(404, detail="ResourceNotFoundException")
+    updated = _lambda_update_function_configuration(function, req)
+    return _lambda_function_view(updated)
+
+
+@app.delete("/api/lambda/functions/{function_name}")
+def api_lambda_delete_function(function_name: str):
+    _lambda_delete_function(function_name)
+    return {"deleted": True, "function_name": function_name}
+
+
+@app.get("/api/lambda/functions/{function_name}/policy")
+def api_lambda_get_policy(function_name: str):
+    function = _lambda_find_function(function_name)
+    if not function:
+        raise HTTPException(404, detail="ResourceNotFoundException")
+    policy = _lambda_get_policy(function)
+    return {"function_name": function["function_name"], "function_arn": function["function_arn"], **policy}
+
+
+@app.post("/api/lambda/functions/{function_name}/policy")
+def api_lambda_add_permission(function_name: str, req: LambdaPermissionRequest):
+    function = _lambda_find_function(function_name)
+    if not function:
+        raise HTTPException(404, detail="ResourceNotFoundException")
+    permission = _lambda_add_permission(function, req)
+    policy = _lambda_get_policy(function)
+    return {"function_name": function["function_name"], "function_arn": function["function_arn"], "statement": permission, **policy}
+
+
+@app.delete("/api/lambda/functions/{function_name}/policy/{statement_id}")
+def api_lambda_remove_permission(function_name: str, statement_id: str):
+    function = _lambda_find_function(function_name)
+    if not function:
+        raise HTTPException(404, detail="ResourceNotFoundException")
+    _lambda_remove_permission(function, statement_id)
+    return {"deleted": True, "function_name": function["function_name"], "statement_id": statement_id}
+
+
+@app.get("/api/lambda/functions/{function_name}/invocations")
+def api_lambda_list_invocations(function_name: str):
+    function = _lambda_find_function(function_name)
+    if not function:
+        raise HTTPException(404, detail="ResourceNotFoundException")
+    invocations = _lambda_invocations_view(function)
+    return {"function_name": function["function_name"], "function_arn": function["function_arn"], "invocations": invocations, "count": len(invocations)}
+
+
+@app.get("/api/lambda/functions/{function_name}/versions")
+def api_lambda_list_versions(function_name: str):
+    function = _lambda_find_function(function_name)
+    if not function:
+        raise HTTPException(404, detail="ResourceNotFoundException")
+    versions = _lambda_versions_view(function)
+    return {"function_name": function["function_name"], "function_arn": function["function_arn"], "versions": versions, "count": len(versions)}
+
+
+@app.post("/api/lambda/functions/{function_name}/versions")
+def api_lambda_publish_version(function_name: str, payload: LambdaVersionRequest):
+    function = _lambda_find_function(function_name)
+    if not function:
+        raise HTTPException(404, detail="ResourceNotFoundException")
+    version = _lambda_publish_version(function, payload.description)
+    return {"function_name": function["function_name"], "function_arn": function["function_arn"], "version": version}
+
+
+@app.post("/api/lambda/functions/{function_name}/invoke")
+def api_lambda_invoke_function(function_name: str, payload: LambdaInvokeRequest):
+    return _lambda_invoke_response(function_name, payload.payload, invocation_type=payload.invocation_type)
+
+
+@app.get("/2015-03-31/functions")
+def api_lambda_list_functions_aws():
+    return api_lambda_list_functions()
+
+
+@app.post("/2015-03-31/functions")
+def api_lambda_create_function_aws(req: LambdaFunctionRequest):
+    return api_lambda_create_function(req)
+
+
+@app.get("/2015-03-31/functions/{function_name}")
+def api_lambda_get_function_aws(function_name: str):
+    return api_lambda_get_function(function_name)
+
+
+@app.delete("/2015-03-31/functions/{function_name}")
+def api_lambda_delete_function_aws(function_name: str):
+    return api_lambda_delete_function(function_name)
+
+
+@app.get("/2015-03-31/functions/{function_name}/policy")
+def api_lambda_get_policy_aws(function_name: str):
+    return api_lambda_get_policy(function_name)
+
+
+@app.post("/2015-03-31/functions/{function_name}/policy")
+def api_lambda_add_permission_aws(function_name: str, req: LambdaPermissionRequest):
+    return api_lambda_add_permission(function_name, req)
+
+
+@app.delete("/2015-03-31/functions/{function_name}/policy/{statement_id}")
+def api_lambda_remove_permission_aws(function_name: str, statement_id: str):
+    return api_lambda_remove_permission(function_name, statement_id)
+
+
+@app.put("/2015-03-31/functions/{function_name}/code")
+def api_lambda_update_function_code_aws(function_name: str, payload: dict[str, Any]):
+    return api_lambda_update_function_code(function_name, payload)
+
+
+@app.put("/2015-03-31/functions/{function_name}/configuration")
+def api_lambda_update_function_configuration_aws(function_name: str, req: LambdaFunctionUpdateRequest):
+    return api_lambda_update_function_configuration(function_name, req)
+
+
+@app.post("/2015-03-31/functions/{function_name}/versions")
+def api_lambda_publish_version_aws(function_name: str, payload: LambdaVersionRequest):
+    return api_lambda_publish_version(function_name, payload)
+
+
+@app.get("/2015-03-31/functions/{function_name}/versions")
+def api_lambda_list_versions_aws(function_name: str):
+    return api_lambda_list_versions(function_name)
+
+
+@app.post("/2015-03-31/functions/{function_name}/invocations")
+async def api_lambda_invoke_function_aws(function_name: str, request: Request):
+    function = _lambda_find_function(function_name)
+    if not function:
+        raise HTTPException(404, detail="ResourceNotFoundException")
+    invocation_type = request.headers.get("x-amz-invocation-type") or request.query_params.get("InvocationType", "RequestResponse")
+    body = await request.body()
+    payload = {}
+    if body:
+        try:
+            payload = json.loads(body.decode("utf-8"))
+        except Exception:
+            payload = {"body": body.decode("utf-8", errors="replace")}
+    record = _lambda_invoke_function(function_name, payload, invocation_type=invocation_type)
+    if invocation_type and invocation_type.lower() == "event":
+        return Response(status_code=202)
+    response_payload = record.get("response_payload")
+    if isinstance(response_payload, (dict, list)):
+        body_bytes = json.dumps(response_payload, default=str).encode("utf-8")
+        media_type = "application/json"
+    elif isinstance(response_payload, bytes):
+        body_bytes = response_payload
+        media_type = "application/octet-stream"
+    elif response_payload is None:
+        body_bytes = b""
+        media_type = "application/json"
+    else:
+        body_bytes = str(response_payload).encode("utf-8")
+        media_type = "text/plain"
+    headers = {
+        "X-Amz-Executed-Version": "$LATEST",
+        "X-Amz-Function-Error": "Handled" if record.get("status") == "error" else "",
+    }
+    if not headers["X-Amz-Function-Error"]:
+        headers.pop("X-Amz-Function-Error", None)
+    return Response(content=body_bytes, media_type=media_type, headers=headers)
+
+
 @app.get("/api/runtime/bundles")
 def api_runtime_bundles():
     return {"bundles": list(runtime_state["bundles"].values()), "count": len(runtime_state["bundles"])}
@@ -7159,6 +10303,39 @@ async def s3_put_bucket(bucket: str, request: Request) -> Response:
         buckets[bucket]["versioning"] = status
         return _empty_response(200)
 
+    if "notification" in params:
+        if not _bucket_exists(bucket):
+            return _error_xml("NoSuchBucket", "The specified bucket does not exist.", f"/{bucket}", 404)
+        body = await request.body()
+        buckets[bucket]["notifications"] = _s3_parse_notification_xml(body)
+        if body.strip():
+            _s3_notification_record_delivery(
+                bucket=bucket,
+                event_name="s3:TestEvent",
+                key="",
+                source="PutBucketNotificationConfiguration",
+                payload={"message": "TestEvent"},
+                test_event=True,
+            )
+        return _empty_response(200)
+
+    # Notification configuration
+    if "notification" in params:
+        if not _bucket_exists(bucket):
+            return _error_xml("NoSuchBucket", "The specified bucket does not exist.", f"/{bucket}", 404)
+        body = await request.body()
+        buckets[bucket]["notifications"] = _s3_parse_notification_xml(body)
+        if body.strip():
+            _s3_notification_record_delivery(
+                bucket=bucket,
+                event_name="s3:TestEvent",
+                key="",
+                source="PutBucketNotificationConfiguration",
+                payload={"message": "TestEvent"},
+                test_event=True,
+            )
+        return _empty_response(200)
+
     # Tagging
     if "tagging" in params:
         if not _bucket_exists(bucket):
@@ -7217,6 +10394,7 @@ async def s3_put_bucket(bucket: str, request: Request) -> Response:
         "versioning": "Disabled",
         "arn": f"arn:aws:s3:::{bucket}",
         "tags": {},
+        "notifications": _s3_default_notifications(),
     }
     objects[bucket] = {}
     return _empty_response(200, {"Location": f"/{bucket}"})
@@ -7249,6 +10427,10 @@ async def s3_get_bucket(bucket: str, request: Request) -> Response:
             f'<VersioningConfiguration xmlns="{S3_NS}">{status_xml}</VersioningConfiguration>'
         )
         return _xml_response(xml)
+
+    # GetBucketNotificationConfiguration
+    if "notification" in params:
+        return _xml_response(_s3_notification_xml_from_config(bucket))
 
     # ListObjectVersions
     if "versions" in params:
@@ -7384,8 +10566,12 @@ async def s3_get_bucket(bucket: str, request: Request) -> Response:
 @app.delete("/{bucket}")
 async def s3_delete_bucket(bucket: str, request: Request) -> Response:
     """DELETE /{bucket} → DeleteBucket"""
+    params = dict(request.query_params)
     if not _bucket_exists(bucket):
         return _error_xml("NoSuchBucket", "The specified bucket does not exist.", f"/{bucket}", 404)
+    if "notification" in params:
+        buckets[bucket]["notifications"] = _s3_default_notifications()
+        return _empty_response(204)
     if objects.get(bucket):
         return _error_xml("BucketNotEmpty", "The bucket you tried to delete is not empty.", f"/{bucket}", 409)
     del buckets[bucket]
@@ -7489,7 +10675,7 @@ async def s3_put_object(bucket: str, key: str, request: Request) -> Response:
             etag=_etag(src["data"]),
         )
         replace_version_id = "__overwrite__" if versioning_status == "Disabled" else ("null" if versioning_status == "Suspended" else None)
-        _s3_write_object_version(bucket, key, version, replace_version_id=replace_version_id)
+        _s3_write_object_version(bucket, key, version, replace_version_id=replace_version_id, event_name="s3:ObjectCreated:Copy", source="CopyObject")
         new_etag = version["etag"]
         xml = (
             f'<?xml version="1.0" encoding="UTF-8"?>'
@@ -7523,7 +10709,7 @@ async def s3_put_object(bucket: str, key: str, request: Request) -> Response:
         delete_marker=False,
     )
     replace_version_id = "__overwrite__" if versioning_status == "Disabled" else ("null" if versioning_status == "Suspended" else None)
-    entry = _s3_write_object_version(bucket, key, version, replace_version_id=replace_version_id)
+    entry = _s3_write_object_version(bucket, key, version, replace_version_id=replace_version_id, event_name="s3:ObjectCreated:Put", source="PutObject")
     return _empty_response(200, {"ETag": version["etag"], "x-amz-version-id": entry.get("current_version_id", version_id)})
 
 
@@ -7684,7 +10870,7 @@ async def s3_delete_object(bucket: str, key: str, request: Request) -> Response:
         if key in objects.get(bucket, {}):
             del objects[bucket][key]
         return _empty_response(204)
-    entry = _s3_insert_simple_delete_marker(bucket, key)
+    entry = _s3_insert_simple_delete_marker(bucket, key, source="DeleteObject")
     version_id = entry.get("current_version_id", "null") if isinstance(entry, dict) else "null"
     return _empty_response(204, {"x-amz-delete-marker": "true", "x-amz-version-id": version_id})
 
@@ -7711,8 +10897,9 @@ async def s3_post_bucket(bucket: str, request: Request) -> Response:
                     if k in objects.get(bucket, {}):
                         if _s3_bucket_versioning_status(bucket) == "Disabled":
                             del objects[bucket][k]
+                            _s3_emit_event(bucket, k, "s3:ObjectRemoved:Delete", None, source="DeleteObjects")
                         else:
-                            _s3_insert_simple_delete_marker(bucket, k)
+                            _s3_insert_simple_delete_marker(bucket, k, source="DeleteObjects")
                     deleted.append(k)
         except ET.ParseError:
             return _error_xml("MalformedXML", "The XML you provided was not well-formed.", f"/{bucket}", 400)
@@ -7805,7 +10992,7 @@ async def s3_post_object(bucket: str, key: str, request: Request) -> Response:
             delete_marker=False,
         )
         replace_version_id = "__overwrite__" if versioning_status == "Disabled" else ("null" if versioning_status == "Suspended" else None)
-        _s3_write_object_version(bucket, key, version, replace_version_id=replace_version_id)
+        _s3_write_object_version(bucket, key, version, replace_version_id=replace_version_id, event_name="s3:ObjectCreated:CompleteMultipartUpload", source="CompleteMultipartUpload")
         del multiparts[upload_id]
 
         xml = (

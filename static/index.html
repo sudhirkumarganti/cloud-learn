@@ -49,6 +49,13 @@
     .ph{padding:16px 20px;border-bottom:1px solid #eaeded;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px}
     .pt{font-size:18px;font-weight:700}
     .ps{font-size:13px;color:#687078;margin-top:3px}
+    .iam-shell{display:grid;grid-template-columns:220px minmax(0,1fr);gap:16px;align-items:start}
+    .iam-nav{border:1px solid #eaeded;border-radius:4px;background:#fff;overflow:hidden;position:sticky;top:66px;align-self:start}
+    .iam-nav-item{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:10px 14px;border-left:3px solid transparent;cursor:pointer;font-size:13px;color:#16191f}
+    .iam-nav-item:hover{background:#f2f8fd}
+    .iam-nav-item.active{background:#e8f5fb;border-left-color:#0073bb;font-weight:700}
+    .iam-nav-item .small{color:#687078;font-size:12px;font-weight:400}
+    .iam-nav-note{padding:10px 14px;border-top:1px solid #eaeded;background:#fafafa;font-size:12px;color:#687078;line-height:1.45}
 
     /* ── Buttons ── */
     .btn{padding:6px 16px;border-radius:3px;font-size:13px;font-weight:700;cursor:pointer;border:1px solid;display:inline-flex;align-items:center;gap:5px;transition:background .1s;white-space:nowrap}
@@ -250,6 +257,14 @@
     .vpc-actions-item:disabled{color:#aab7b8;cursor:not-allowed;background:#fff}
     .vpc-grid-wrap{padding:0 16px 16px;overflow-x:auto}
     .vpc-grid{min-width:1120px}
+    .lambda-grid{min-width:1180px}
+    .lambda-grid th:nth-child(2),.lambda-grid td:nth-child(2){width:220px}
+    .lambda-grid th:nth-child(3),.lambda-grid td:nth-child(3){width:140px}
+    .lambda-grid th:nth-child(4),.lambda-grid td:nth-child(4){width:260px}
+    .lambda-grid th:nth-child(5),.lambda-grid td:nth-child(5){width:110px}
+    .lambda-grid th:nth-child(6),.lambda-grid td:nth-child(6){width:90px}
+    .lambda-grid th:nth-child(7),.lambda-grid td:nth-child(7){width:90px}
+    .lambda-grid th:nth-child(8),.lambda-grid td:nth-child(8){width:150px}
     .vpc-grid th:nth-child(2),.vpc-grid td:nth-child(2){width:220px}
     .vpc-grid th:nth-child(3),.vpc-grid td:nth-child(3){width:170px}
     .vpc-grid th:nth-child(4),.vpc-grid td:nth-child(4){width:110px}
@@ -260,6 +275,31 @@
     .vpc-grid tbody tr.active td{background:#f2f8fd}
     .vpc-grid-name{display:block;overflow:hidden;text-overflow:clip;white-space:nowrap;font-weight:700;color:#0073bb}
     .vpc-grid-sub{display:block;font-size:12px;color:#687078;overflow:hidden;text-overflow:clip;white-space:nowrap}
+    .apigw-resource-scroll{max-height:420px;overflow:auto;border:1px solid #eaeded;border-radius:4px;background:#fff}
+    .apigw-resource-scroll .tbl{min-width:1220px}
+    .apigw-resource-scroll .tbl th:nth-child(2),.apigw-resource-scroll .tbl td:nth-child(2){width:280px}
+    .apigw-resource-scroll .tbl th:nth-child(3),.apigw-resource-scroll .tbl td:nth-child(3){width:280px}
+    .apigw-resource-scroll .tbl th:nth-child(4),.apigw-resource-scroll .tbl td:nth-child(4){width:220px}
+    .apigw-resource-scroll .tbl th:nth-child(5),.apigw-resource-scroll .tbl td:nth-child(5){width:320px}
+    .apigw-list-scroll{overflow:auto}
+    .apigw-list-scroll .tbl{min-width:1450px}
+    .apigw-list-scroll .tbl th:nth-child(2),.apigw-list-scroll .tbl td:nth-child(2){width:260px}
+    .apigw-list-scroll .tbl th:nth-child(3),.apigw-list-scroll .tbl td:nth-child(3){width:190px}
+    .apigw-list-scroll .tbl th:nth-child(4),.apigw-list-scroll .tbl td:nth-child(4){width:120px}
+    .apigw-list-scroll .tbl th:nth-child(5),.apigw-list-scroll .tbl td:nth-child(5){width:110px}
+    .apigw-list-scroll .tbl th:nth-child(6),.apigw-list-scroll .tbl td:nth-child(6){width:110px}
+    .apigw-list-scroll .tbl th:nth-child(7),.apigw-list-scroll .tbl td:nth-child(7){width:520px}
+    .sqs-grid-wrap{margin:0 16px 16px;border:1px solid #eaeded;border-radius:4px;background:#fff;max-height:420px;overflow:auto}
+    .sqs-grid-wrap .tbl thead th{position:sticky;top:0;z-index:1;background:#fff}
+    .sqs-message-scroll{max-height:420px;overflow:auto;border:1px solid #eaeded;border-radius:4px;background:#fff}
+    .sqs-message-scroll .tbl{min-width:1320px}
+    .sqs-message-scroll .tbl th:nth-child(2),.sqs-message-scroll .tbl td:nth-child(2){width:320px}
+    .sqs-message-scroll .tbl th:nth-child(3),.sqs-message-scroll .tbl td:nth-child(3){width:220px}
+    .sqs-message-scroll .tbl th:nth-child(4),.sqs-message-scroll .tbl td:nth-child(4){width:110px}
+    .sqs-message-scroll .tbl th:nth-child(5),.sqs-message-scroll .tbl td:nth-child(5){width:110px}
+    .sqs-message-scroll .tbl th:nth-child(6),.sqs-message-scroll .tbl td:nth-child(6){width:110px}
+    .sqs-message-scroll .tbl th:nth-child(7),.sqs-message-scroll .tbl td:nth-child(7){width:190px}
+    .sqs-message-scroll .tbl th:nth-child(8),.sqs-message-scroll .tbl td:nth-child(8){width:180px}
     .vpc-detail-wrap{padding:0 16px 16px}
     .vpc-detail-panel{border:1px solid #eaeded;border-radius:4px;background:#fff;overflow:hidden}
     .vpc-detail-banner{padding:14px 16px;border-bottom:1px solid #eaeded;background:#fff}
@@ -427,11 +467,22 @@
     .tbl th:nth-child(13), .tbl td:nth-child(13){width:130px}
     .tbl th:nth-child(14), .tbl td:nth-child(14){width:150px}
     .tbl .small-col{font-size:12px;color:#687078;white-space:nowrap;overflow:hidden;text-overflow:clip}
+    .sqs-grid.tbl{display:table;width:100%;min-width:1800px;table-layout:fixed}
+    .sqs-grid.tbl th,.sqs-grid.tbl td{padding-left:4px;padding-right:4px}
+    .sqs-grid.tbl th:first-child,.sqs-grid.tbl td:first-child{padding-left:6px;padding-right:6px}
+    .sqs-grid.tbl th:nth-child(2),.sqs-grid.tbl td:nth-child(2){width:13%}
+    .sqs-grid.tbl th:nth-child(3),.sqs-grid.tbl td:nth-child(3){width:35%}
+    .sqs-grid.tbl th:nth-child(4),.sqs-grid.tbl td:nth-child(4){width:10%}
+    .sqs-grid.tbl th:nth-child(5),.sqs-grid.tbl td:nth-child(5){width:7%}
+    .sqs-grid.tbl th:nth-child(6),.sqs-grid.tbl td:nth-child(6){width:7%}
+    .sqs-grid.tbl th:nth-child(7),.sqs-grid.tbl td:nth-child(7){width:24%}
     .ec2-copyable{display:flex;align-items:center;gap:8px;min-width:0;max-width:100%}
     .ec2-copyable-text{min-width:0;flex:1;overflow:hidden;text-overflow:clip;white-space:nowrap;display:block}
-    .ec2-copyable-btn{border:none;background:transparent;color:#0073bb;font-size:12px;font-weight:700;cursor:pointer;opacity:0;transition:opacity .12s ease;flex:0 0 auto;padding:0}
+    .ec2-copyable-btn{border:1px solid transparent;background:transparent;color:#687078;font-size:13px;font-weight:700;cursor:pointer;opacity:0;transition:opacity .12s ease,background .12s ease,border-color .12s ease,color .12s ease;flex:0 0 auto;padding:0;width:18px;height:18px;border-radius:3px;display:inline-flex;align-items:center;justify-content:center;line-height:1}
     .ec2-copyable:hover .ec2-copyable-btn,.ec2-copyable:focus-within .ec2-copyable-btn{opacity:1}
-    .ec2-copyable-btn:hover{text-decoration:underline}
+    .ec2-copyable-btn:hover{background:#f8fbfd;border-color:#cfd7df;color:#16191f}
+    .ec2-copyable-icon{width:11px;height:11px;display:block;line-height:1;flex:0 0 auto}
+    .ec2-copyable-icon svg{display:block;width:100%;height:100%}
 
     /* ── Tabs ── */
     .tabs{display:flex;border-bottom:2px solid #eaeded;padding:0 20px;background:#fff}
@@ -565,7 +616,9 @@ const { useState, useEffect, useRef, useCallback, useMemo } = React;
 /* ── API layer ──────────────────────────────────────────────────────────── */
 async function api(method, path, body, isForm) {
   const opts = { method, cache: 'no-store' };
-  if (body && !isForm) { opts.headers = {'Content-Type':'application/json'}; opts.body = JSON.stringify(body); }
+  const principal = window.localStorage.getItem('cloudlearn.principal') || 'root';
+  opts.headers = {'X-CloudLearn-Principal': principal};
+  if (body && !isForm) { opts.headers['Content-Type'] = 'application/json'; opts.body = JSON.stringify(body); }
   else if (body) opts.body = body;
   const r = await fetch(path, opts);
   if (!r.ok) { const e = await r.json().catch(() => ({detail: r.statusText})); throw new Error(e.detail || 'Request failed'); }
@@ -578,6 +631,10 @@ const S3 = {
   getBucket:     (n)        => api('GET',    `/api/s3/buckets/${n}`),
   getVersioning: (n)        => api('GET',    `/api/s3/buckets/${n}/versioning`),
   setVersioning: (n, st)    => api('PUT',    `/api/s3/buckets/${n}/versioning`, {status: st}),
+  getNotifications: (n)     => api('GET',    `/api/s3/buckets/${n}/notifications`),
+  setNotifications: (n, p)  => api('PUT',    `/api/s3/buckets/${n}/notifications`, p),
+  clearNotifications: (n)   => api('DELETE', `/api/s3/buckets/${n}/notifications`),
+  listNotificationEvents: (n, limit=50) => api('GET', `/api/s3/buckets/${n}/notifications/events?limit=${limit}`),
   deleteBucket:  (n)        => api('DELETE', `/api/s3/buckets/${n}`),
   listObjects:   (b, pfx)   => api('GET',    `/api/s3/buckets/${b}/objects?prefix=${pfx||''}`),
   listVersions:  (b, pfx)   => api('GET',    `/api/s3/buckets/${b}/versions?prefix=${pfx||''}`),
@@ -606,11 +663,25 @@ const License = {
 const IAM = {
   listUsers: () => api('GET', '/api/iam/users'),
   createUser: (payload) => api('POST', '/api/iam/users', payload),
+  removeUser: (id) => api('DELETE', `/api/iam/users/${encodeURIComponent(id)}`),
+  listGroups: () => api('GET', '/api/iam/groups'),
+  createGroup: (payload) => api('POST', '/api/iam/groups', payload),
+  addUserToGroup: (groupId, payload) => api('POST', `/api/iam/groups/${encodeURIComponent(groupId)}/users`, payload),
+  removeUserFromGroup: (groupId, userId) => api('DELETE', `/api/iam/groups/${encodeURIComponent(groupId)}/users/${encodeURIComponent(userId)}`),
+  removeGroup: (id) => api('DELETE', `/api/iam/groups/${encodeURIComponent(id)}`),
   listRoles: () => api('GET', '/api/iam/roles'),
   createRole: (payload) => api('POST', '/api/iam/roles', payload),
+  removeRole: (id) => api('DELETE', `/api/iam/roles/${encodeURIComponent(id)}`),
   listPolicies: () => api('GET', '/api/iam/policies'),
   createPolicy: (payload) => api('POST', '/api/iam/policies', payload),
+  removePolicy: (id) => api('DELETE', `/api/iam/policies/${encodeURIComponent(id)}`),
   attachPolicy: (payload) => api('POST', '/api/iam/attach-policy', payload),
+  detachPolicy: (payload) => api('DELETE', '/api/iam/attachments', payload),
+  listIdentityProviders: () => api('GET', '/api/iam/identity-providers'),
+  createIdentityProvider: (payload) => api('POST', '/api/iam/identity-providers', payload),
+  removeIdentityProvider: (providerId) => api('DELETE', `/api/iam/identity-providers/${encodeURIComponent(providerId)}`),
+  getAccountSettings: () => api('GET', '/api/iam/account-settings'),
+  updateAccountSettings: (payload) => api('PUT', '/api/iam/account-settings', payload),
 };
 
 const EC2 = {
@@ -661,6 +732,24 @@ const RDS = {
   listTags: (id) => api('GET', `/api/rds/databases/${id}/tags`),
 };
 
+const SQS = {
+  list: () => api('GET', '/api/sqs/queues'),
+  get: (name) => api('GET', `/api/sqs/queues/${encodeURIComponent(name)}`),
+  create: (payload) => api('POST', '/api/sqs/queues', payload),
+  update: (name, payload) => api('PUT', `/api/sqs/queues/${encodeURIComponent(name)}`, payload),
+  remove: (name) => api('DELETE', `/api/sqs/queues/${encodeURIComponent(name)}`),
+  messages: (name) => api('GET', `/api/sqs/queues/${encodeURIComponent(name)}/messages`),
+  send: (name, payload) => api('POST', `/api/sqs/queues/${encodeURIComponent(name)}/messages`, payload),
+  receive: (name, payload) => api('POST', `/api/sqs/queues/${encodeURIComponent(name)}/receive`, payload),
+  deleteMessage: (name, receiptHandle) => api('DELETE', `/api/sqs/queues/${encodeURIComponent(name)}/messages/${encodeURIComponent(receiptHandle)}`),
+  changeVisibility: (name, receiptHandle, payload) => api('POST', `/api/sqs/queues/${encodeURIComponent(name)}/messages/${encodeURIComponent(receiptHandle)}/visibility`, payload),
+  purge: (name) => api('POST', `/api/sqs/queues/${encodeURIComponent(name)}/purge`),
+  tags: (name) => api('GET', `/api/sqs/queues/${encodeURIComponent(name)}/tags`),
+  tag: (name, payload) => api('POST', `/api/sqs/queues/${encodeURIComponent(name)}/tags`, payload),
+  untag: (name, payload) => api('DELETE', `/api/sqs/queues/${encodeURIComponent(name)}/tags`, payload),
+  invokeUrl: (name) => `/api/sqs/aws?Action=GetQueueUrl&QueueName=${encodeURIComponent(name)}&Version=2012-11-05`,
+};
+
 const APIGateway = {
   list: () => api('GET', '/api/apigateway/apis'),
   get: (id) => api('GET', `/api/apigateway/apis/${id}`),
@@ -676,6 +765,22 @@ const APIGateway = {
   listStages: (id) => api('GET', `/api/apigateway/apis/${id}/stages`),
   listLogs: (id) => api('GET', `/api/apigateway/apis/${id}/logs`),
   invokeUrl: (id, stage='') => `/api/apigateway/invoke/${id}${stage ? `/${stage}` : ''}`,
+};
+
+const Lambda = {
+  list: () => api('GET', '/api/lambda/functions'),
+  get: (name) => api('GET', `/api/lambda/functions/${encodeURIComponent(name)}`),
+  create: (payload) => api('POST', '/api/lambda/functions', payload),
+  updateCode: (name, payload) => api('PUT', `/api/lambda/functions/${encodeURIComponent(name)}/code`, payload),
+  updateConfig: (name, payload) => api('PUT', `/api/lambda/functions/${encodeURIComponent(name)}/configuration`, payload),
+  remove: (name) => api('DELETE', `/api/lambda/functions/${encodeURIComponent(name)}`),
+  invoke: (name, payload) => api('POST', `/api/lambda/functions/${encodeURIComponent(name)}/invoke`, payload),
+  versions: (name) => api('GET', `/api/lambda/functions/${encodeURIComponent(name)}/versions`),
+  publishVersion: (name, payload) => api('POST', `/api/lambda/functions/${encodeURIComponent(name)}/versions`, payload),
+  invocations: (name) => api('GET', `/api/lambda/functions/${encodeURIComponent(name)}/invocations`),
+  getPolicy: (name) => api('GET', `/api/lambda/functions/${encodeURIComponent(name)}/policy`),
+  addPermission: (name, payload) => api('POST', `/api/lambda/functions/${encodeURIComponent(name)}/policy`, payload),
+  removePermission: (name, statementId) => api('DELETE', `/api/lambda/functions/${encodeURIComponent(name)}/policy/${encodeURIComponent(statementId)}`),
 };
 
 const Deployments = {
@@ -711,6 +816,7 @@ const rdsConnectionCommand = (db) => {
   return `${db.engine || 'db'} client -h ${host} -p ${port} -U ${user}`;
 };
 const maskSecret = (value) => value ? '********' : '—';
+const lambdaDefaultCode = (name='my-function') => `def lambda_handler(event, context):\n    return {\n        "message": "Hello from Lambda",\n        "function_name": "${name}",\n        "received_event": event,\n    }\n`;
 
 /* ── Notification ───────────────────────────────────────────────────────── */
 function Notif({msg, type, onClose}) {
@@ -1169,6 +1275,13 @@ function ObjDetail({bucket, objKey, versionId = '', onClose, onDelete}) {
 
 function S3ApiDocsPanel({mode, bucketName = 'my-bucket'}) {
   const [showApiDocs, setShowApiDocs] = useState(false);
+  const notificationParams = [
+    ['NotificationConfiguration', 'XML document that defines event destinations and event filters.', 'XML'],
+    ['EventBridgeConfiguration', 'Enables delivery of bucket events to Amazon EventBridge.', 'XML'],
+    ['TopicConfiguration', 'Configures notifications to an SNS topic.', 'XML'],
+    ['QueueConfiguration', 'Configures notifications to an SQS queue.', 'XML'],
+    ['CloudFunctionConfiguration', 'Configures notifications to a Lambda function.', 'XML'],
+  ];
   const docs = useMemo(() => {
     if (mode === 'objects') {
       return [
@@ -1179,6 +1292,13 @@ function S3ApiDocsPanel({mode, bucketName = 'my-bucket'}) {
           response: `<ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">\n  <Name>${bucketName}</Name>\n  <Contents>...</Contents>\n</ListBucketResult>`,
           responseRoot: 'Contents',
           summary: 'Lists the objects in the selected bucket.',
+          params: [
+            ['prefix', 'Filters keys by prefix.', 'String'],
+            ['delimiter', 'Groups keys by delimiter.', 'String'],
+            ['continuation-token', 'Pagination token for the next page.', 'String'],
+            ['start-after', 'Starts listing after the specified key.', 'String'],
+            ['max-keys', 'Maximum number of objects to return.', 'Integer'],
+          ],
         },
         {
           action: 'ListObjectVersions',
@@ -1187,6 +1307,13 @@ function S3ApiDocsPanel({mode, bucketName = 'my-bucket'}) {
           response: `<ListVersionsResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">\n  <Name>${bucketName}</Name>\n  <Version>...</Version>\n</ListVersionsResult>`,
           responseRoot: 'Version',
           summary: 'Lists object versions in a versioning-enabled bucket.',
+          params: [
+            ['prefix', 'Filters versions by key prefix.', 'String'],
+            ['delimiter', 'Groups keys by delimiter.', 'String'],
+            ['key-marker', 'Starts listing at or after this key.', 'String'],
+            ['version-id-marker', 'Starts listing at or after this version ID.', 'String'],
+            ['max-keys', 'Maximum number of versions to return.', 'Integer'],
+          ],
         },
         {
           action: 'PutObject',
@@ -1195,6 +1322,11 @@ function S3ApiDocsPanel({mode, bucketName = 'my-bucket'}) {
           response: `<PutObjectResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">\n  <ETag>...</ETag>\n</PutObjectResult>`,
           responseRoot: 'ETag',
           summary: 'Uploads an object to the bucket.',
+          params: [
+            ['Content-Type', 'Content type of the uploaded object.', 'String'],
+            ['x-amz-meta-*', 'Optional custom metadata headers.', 'String'],
+            ['x-amz-server-side-encryption', 'Optional encryption choice.', 'String'],
+          ],
         },
         {
           action: 'GetObject',
@@ -1203,6 +1335,9 @@ function S3ApiDocsPanel({mode, bucketName = 'my-bucket'}) {
           response: 'Object bytes stream with the stored content type.',
           responseRoot: 'Body',
           summary: 'Downloads an object from the bucket.',
+          params: [
+            ['versionId', 'Optional object version to retrieve.', 'String'],
+          ],
         },
         {
           action: 'DeleteObject',
@@ -1211,6 +1346,9 @@ function S3ApiDocsPanel({mode, bucketName = 'my-bucket'}) {
           response: `<DeleteResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">\n  <Deleted><Key>photo.jpg</Key></Deleted>\n</DeleteResult>`,
           responseRoot: 'Deleted',
           summary: 'Deletes an object or creates a delete marker.',
+          params: [
+            ['versionId', 'Deletes a specific object version when supplied.', 'String'],
+          ],
         },
       ];
     }
@@ -1222,6 +1360,7 @@ function S3ApiDocsPanel({mode, bucketName = 'my-bucket'}) {
         response: '<ListAllMyBucketsResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">\n  <Owner>...</Owner>\n  <Buckets>...</Buckets>\n</ListAllMyBucketsResult>',
         responseRoot: 'Buckets',
         summary: 'Lists the buckets in your account.',
+        params: [],
       },
       {
         action: 'CreateBucket',
@@ -1230,6 +1369,10 @@ function S3ApiDocsPanel({mode, bucketName = 'my-bucket'}) {
         response: `<CreateBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">\n  <Location>/${bucketName}</Location>\n</CreateBucketResult>`,
         responseRoot: 'Location',
         summary: 'Creates a new general purpose bucket.',
+        params: [
+          ['Bucket', 'Bucket name in the request path.', 'String'],
+          ['LocationConstraint', 'Optional AWS Region placement hint.', 'String'],
+        ],
       },
       {
         action: 'GetBucketVersioning',
@@ -1238,6 +1381,9 @@ function S3ApiDocsPanel({mode, bucketName = 'my-bucket'}) {
         response: `<VersioningConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/">\n  <Status>Enabled</Status>\n</VersioningConfiguration>`,
         responseRoot: 'VersioningConfiguration',
         summary: 'Returns the versioning state for a bucket.',
+        params: [
+          ['Bucket', 'The bucket name in the request path.', 'String'],
+        ],
       },
       {
         action: 'PutBucketVersioning',
@@ -1246,6 +1392,10 @@ function S3ApiDocsPanel({mode, bucketName = 'my-bucket'}) {
         response: '<VersioningConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/">...</VersioningConfiguration>',
         responseRoot: 'VersioningConfiguration',
         summary: 'Enables, suspends, or disables versioning on a bucket.',
+        params: [
+          ['VersioningConfiguration.Status', 'Enabled or Suspended.', 'String'],
+          ['VersioningConfiguration.MFADelete', 'Optional MFA delete setting.', 'String'],
+        ],
       },
       {
         action: 'ListObjectsV2',
@@ -1254,6 +1404,54 @@ function S3ApiDocsPanel({mode, bucketName = 'my-bucket'}) {
         response: `<ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">\n  <Name>${bucketName}</Name>\n  <Contents>...</Contents>\n</ListBucketResult>`,
         responseRoot: 'Contents',
         summary: 'Lists objects in a bucket.',
+        params: [
+          ['prefix', 'Filters objects by prefix.', 'String'],
+          ['delimiter', 'Groups keys by delimiter.', 'String'],
+          ['continuation-token', 'Pagination token for the next page.', 'String'],
+          ['max-keys', 'Maximum number of keys to return.', 'Integer'],
+        ],
+      },
+      {
+        action: 'GetBucketNotificationConfiguration',
+        request: `GET /${bucketName}?notification HTTP/1.1`,
+        syntax: `GET /${bucketName}?notification`,
+        response: `<NotificationConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/">\n  <TopicConfiguration>\n    <Id>image-topic</Id>\n    <Event>s3:ObjectCreated:*</Event>\n    <Topic>sns-topic-arn</Topic>\n  </TopicConfiguration>\n  <QueueConfiguration>\n    <Id>queue-events</Id>\n    <Event>s3:ObjectRemoved:*</Event>\n    <Queue>sqs-queue-arn</Queue>\n  </QueueConfiguration>\n  <CloudFunctionConfiguration>\n    <Id>lambda-events</Id>\n    <Event>s3:ObjectCreated:Put</Event>\n    <CloudFunction>lambda-arn</CloudFunction>\n  </CloudFunctionConfiguration>\n  <EventBridgeConfiguration />\n</NotificationConfiguration>`,
+        responseRoot: 'NotificationConfiguration',
+        summary: 'Returns the bucket notification configuration.',
+        params: [
+          ['notification', 'Reads the bucket notification subresource.', 'String'],
+        ],
+      },
+      {
+        action: 'PutBucketNotificationConfiguration',
+        request: `PUT /${bucketName}?notification HTTP/1.1\n\n<NotificationConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/">\n  <TopicConfiguration>\n    <Id>image-topic</Id>\n    <Event>s3:ObjectCreated:*</Event>\n    <Topic>arn:aws:sns:us-east-1:123456789012:my-topic</Topic>\n  </TopicConfiguration>\n</NotificationConfiguration>`,
+        syntax: `PUT /${bucketName}?notification`,
+        response: 'No response body on success. S3 also sends a test notification to validate the destination.',
+        responseRoot: 'NotificationConfiguration',
+        summary: 'Replaces the bucket notification configuration.',
+        params: notificationParams,
+      },
+      {
+        action: 'DeleteBucketNotificationConfiguration',
+        request: `DELETE /${bucketName}?notification HTTP/1.1`,
+        syntax: `DELETE /${bucketName}?notification`,
+        response: 'No response body on success. The notification configuration is removed from the bucket.',
+        responseRoot: 'NotificationConfiguration',
+        summary: 'Deletes the bucket notification configuration.',
+        params: [
+          ['notification', 'Deletes the bucket notification subresource.', 'String'],
+        ],
+      },
+      {
+        action: 'EnableEventBridge',
+        request: `PUT /${bucketName}?notification HTTP/1.1\n\n<NotificationConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/">\n  <EventBridgeConfiguration />\n</NotificationConfiguration>`,
+        syntax: `PUT /${bucketName}?notification`,
+        response: 'No response body on success. Bucket events are routed to Amazon EventBridge.',
+        responseRoot: 'EventBridgeConfiguration',
+        summary: 'Enables Amazon EventBridge delivery for all bucket events.',
+        params: [
+          ['EventBridgeConfiguration', 'Turns on delivery of bucket events to EventBridge.', 'XML'],
+        ],
       },
     ];
   }, [mode, bucketName]);
@@ -1262,6 +1460,16 @@ function S3ApiDocsPanel({mode, bucketName = 'my-bucket'}) {
     setDocAction(docs[0]?.action || '');
   }, [mode, bucketName]);
   const selectedDocAction = docs.find(item => item.action === docAction) || docs[0];
+  const payload = selectedDocAction?.response || '';
+  const requestParams = selectedDocAction?.params || [];
+  const renderPayload = (value) => {
+    if (!value) {
+      return <div className="ec2-docs-note" style={{marginTop:8}}>No response body is returned on success.</div>;
+    }
+    return String(value).trim().startsWith('<')
+      ? renderXmlSnippet(value)
+      : <pre className="ec2-docs-code">{value}</pre>;
+  };
 
   return (
     <>
@@ -1289,6 +1497,7 @@ function S3ApiDocsPanel({mode, bucketName = 'my-bucket'}) {
                 {[
                   {id:'s3-doc-request-syntax', title:'Request syntax'},
                   {id:'s3-doc-query-parameters', title:'Request parameters'},
+                  {id:'s3-doc-event-notifications', title:'Event notifications'},
                   {id:'s3-doc-response-structures', title:'Response structures'},
                   {id:'s3-doc-examples', title:'Examples'},
                 ].map(item => (
@@ -1315,17 +1524,39 @@ function S3ApiDocsPanel({mode, bucketName = 'my-bucket'}) {
               <table className="ec2-docs-param-table">
                 <thead><tr><th>Parameter</th><th>Description</th><th>Type</th></tr></thead>
                 <tbody>
-                  <tr><td><span className="ec2-mono">prefix</span></td><td>Filters objects by prefix.</td><td>String</td></tr>
-                  <tr><td><span className="ec2-mono">region</span></td><td>Sets the bucket region during CreateBucket.</td><td>String</td></tr>
-                  <tr><td><span className="ec2-mono">versioning</span></td><td>Enables or suspends bucket versioning.</td><td>String</td></tr>
-                  <tr><td><span className="ec2-mono">list-type</span></td><td>Uses the V2 object listing response shape.</td><td>String</td></tr>
+                  {requestParams.length ? requestParams.map(([name, desc, type]) => (
+                    <tr key={`${selectedDocAction.action}-${name}`}>
+                      <td><span className="ec2-mono">{name}</span></td>
+                      <td>{desc}</td>
+                      <td>{type}</td>
+                    </tr>
+                  )) : (
+                    <tr><td colSpan="3" style={{color:'#687078'}}>No request parameters for this example.</td></tr>
+                  )}
                 </tbody>
               </table>
+            </div>
+            <div className="ec2-docs-section" id="s3-doc-event-notifications">
+              <h3>Event notifications</h3>
+              <div className="ec2-docs-note">
+                S3 bucket notifications are bucket-scoped. One notification rule points to a single destination type and can be filtered by prefix and suffix.
+                In AWS, the common destinations are SNS, SQS, Lambda, and EventBridge.
+              </div>
+              <table className="ec2-docs-param-table">
+                <thead><tr><th>Destination</th><th>Use case</th><th>Notes</th></tr></thead>
+                <tbody>
+                  <tr><td><span className="ec2-mono">TopicConfiguration</span></td><td>SNS topic fan-out</td><td>Useful for pub/sub and multi-consumer notifications.</td></tr>
+                  <tr><td><span className="ec2-mono">QueueConfiguration</span></td><td>SQS queue delivery</td><td>Common for durable async processing.</td></tr>
+                  <tr><td><span className="ec2-mono">CloudFunctionConfiguration</span></td><td>Lambda invocation</td><td>Best fit for direct event-driven handlers.</td></tr>
+                  <tr><td><span className="ec2-mono">EventBridgeConfiguration</span></td><td>Event routing</td><td>Routes all bucket events to EventBridge for rule-based fan-out.</td></tr>
+                </tbody>
+              </table>
+              <div className="ec2-docs-note" style={{marginTop:12}}>Common event types include <span className="ec2-mono">s3:ObjectCreated:*</span>, <span className="ec2-mono">s3:ObjectRemoved:*</span>, <span className="ec2-mono">s3:LifecycleExpiration:*</span>, and <span className="ec2-mono">s3:TestEvent</span>.</div>
             </div>
             <div className="ec2-docs-section" id="s3-doc-response-structures">
               <h3>Response structures</h3>
               <div className="ec2-docs-note">Successful responses use S3 XML documents and bucket/object metadata shapes.</div>
-              {renderXmlSnippet('<ListAllMyBucketsResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">\n  <Owner>...</Owner>\n  <Buckets>\n    <Bucket>...</Bucket>\n  </Buckets>\n</ListAllMyBucketsResult>')}
+              {renderPayload(payload)}
             </div>
             <div className="ec2-docs-section" id="s3-doc-examples">
               <h3>Examples</h3>
@@ -1349,9 +1580,7 @@ function S3ApiDocsPanel({mode, bucketName = 'my-bucket'}) {
                 </div>
                 <div className="ec2-docs-block">
                   <div className="ec2-docs-block-title">Response</div>
-                  {selectedDocAction.action === 'GetObject' ? (
-                    <pre className="ec2-docs-code">Object bytes stream</pre>
-                  ) : renderXmlSnippet(selectedDocAction.response)}
+                  {renderPayload(selectedDocAction.response)}
                   <div className="fh" style={{marginTop:8}}>Response root: <span className="ec2-mono">{selectedDocAction.responseRoot}</span></div>
                 </div>
               </div>
@@ -1645,7 +1874,7 @@ function VPCApiDocsPanel() {
                 </div>
                 <div className="ec2-docs-block">
                   <div className="ec2-docs-block-title">Response</div>
-                  {renderXmlSnippet(selectedDocAction.response)}
+                  {renderPayload(selectedDocAction.response)}
                 </div>
               </div>
             </div>
@@ -1658,23 +1887,29 @@ function VPCApiDocsPanel() {
 
 function DashboardView({onOpen, notify}) {
   const cards = [
+    {id:'iam', title:'IAM', desc:'Users, roles, policies, and access control across the simulator.', cta:'Open IAM'},
     {id:'s3', title:'Amazon S3', desc:'Object storage buckets, objects, upload/download, versioning, tags.', cta:'Open S3'},
     {id:'ec2', title:'EC2', desc:'Instance lifecycles backed by runtime containers or processes.', cta:'Open EC2'},
+    {id:'sqs', title:'Amazon SQS', desc:'Standard and FIFO queues, messages, visibility timeout, tags, and dead-letter queues.', cta:'Open SQS'},
     {id:'vpc', title:'VPC', desc:'Virtual networks, subnets, route tables, and security groups.', cta:'Open VPC'},
     {id:'rds', title:'Amazon RDS', desc:'Managed database instances, subnet groups, snapshots, and tags.', cta:'Open RDS'},
+    {id:'lambda', title:'AWS Lambda', desc:'Functions, inline code, invocations, versions, and S3 triggers.', cta:'Open Lambda'},
     {id:'apigateway', title:'API Gateway', desc:'REST APIs, resources, methods, stages, integrations, and invoke URLs.', cta:'Open API Gateway'},
   ];
 
   return (
     <div className="panel">
       <div className="ph">
-        <div>
-          <div className="pt">AWS Management Console</div>
-          <div className="ps">Simulator shell aligned to AWS console structure for supported MVP services.</div>
-        </div>
+          <div>
+            <div className="pt">AWS Management Console</div>
+            <div className="ps">Simulator shell aligned to AWS console structure for supported MVP services.</div>
+          </div>
           <div className="btn-grp">
+            <button className="btn btn-s" onClick={()=>onOpen('iam')}>Open IAM</button>
             <button className="btn btn-p" onClick={()=>onOpen('s3')}>Open S3</button>
             <button className="btn btn-s" onClick={()=>onOpen('rds')}>Open RDS</button>
+            <button className="btn btn-s" onClick={()=>onOpen('lambda')}>Open Lambda</button>
+            <button className="btn btn-s" onClick={()=>onOpen('sqs')}>Open SQS</button>
             <button className="btn btn-s" onClick={()=>onOpen('apigateway')}>Open API Gateway</button>
           </div>
         </div>
@@ -1852,114 +2087,495 @@ function LicenseView({notify}) {
 }
 
 function IAMView({notify}) {
+  const accountPolicyDefaults = {minimum_length: 8, require_symbols: true, require_numbers: true, require_uppercase: true, require_lowercase: true};
   const [users, setUsers] = useState([]);
+  const [groups, setGroups] = useState([]);
   const [roles, setRoles] = useState([]);
   const [policies, setPolicies] = useState([]);
   const [attachments, setAttachments] = useState([]);
+  const [identityProviders, setIdentityProviders] = useState([]);
+  const [accountSettings, setAccountSettings] = useState({password_policy: accountPolicyDefaults});
   const [busy, setBusy] = useState(false);
+  const [principal, setPrincipal] = useState(() => window.localStorage.getItem('cloudlearn.principal') || 'root');
+  const [section, setSection] = useState('users');
+  const [search, setSearch] = useState('');
   const [form, setForm] = useState({
-    user_name:'',
-    role_name:'',
-    role_assume:'{"Version":"2012-10-17","Statement":[]}',
-    policy_name:'',
-    policy_document:'{"Version":"2012-10-17","Statement":[]}',
-    attach_target_type:'user',
-    attach_target_id:'',
-    attach_policy_id:''
+    user_name: '',
+    group_name: '',
+    group_path: '/',
+    group_member_group_id: '',
+    group_member_user_id: '',
+    role_name: '',
+    role_assume: '{"Version":"2012-10-17","Statement":[]}',
+    policy_name: '',
+    policy_document: '{"Version":"2012-10-17","Statement":[]}',
+    attach_target_type: 'user',
+    attach_target_id: '',
+    attach_policy_id: '',
+    idp_name: '',
+    idp_type: 'SAML',
+    idp_url: '',
   });
+  const [passwordPolicyForm, setPasswordPolicyForm] = useState(accountPolicyDefaults);
 
   const load = useCallback(async () => {
     try {
-      const [u,r,p] = await Promise.all([IAM.listUsers(), IAM.listRoles(), IAM.listPolicies()]);
-      setUsers(u.users||[]); setRoles(r.roles||[]); setPolicies(p.policies||[]);
+      const [u, g, r, p, idp, settings] = await Promise.all([
+        IAM.listUsers(),
+        IAM.listGroups(),
+        IAM.listRoles(),
+        IAM.listPolicies(),
+        IAM.listIdentityProviders().catch(() => ({identity_providers: []})),
+        IAM.getAccountSettings().catch(() => ({account_settings: {password_policy: accountPolicyDefaults}})),
+      ]);
+      setUsers(u.users || []);
+      setGroups(g.groups || []);
+      setRoles(r.roles || []);
+      setPolicies(p.policies || []);
+      setIdentityProviders(idp.identity_providers || []);
+      const nextSettings = settings.account_settings || {password_policy: accountPolicyDefaults};
+      setAccountSettings(nextSettings);
+      setPasswordPolicyForm({
+        minimum_length: nextSettings.password_policy?.minimum_length ?? accountPolicyDefaults.minimum_length,
+        require_symbols: nextSettings.password_policy?.require_symbols ?? accountPolicyDefaults.require_symbols,
+        require_numbers: nextSettings.password_policy?.require_numbers ?? accountPolicyDefaults.require_numbers,
+        require_uppercase: nextSettings.password_policy?.require_uppercase ?? accountPolicyDefaults.require_uppercase,
+        require_lowercase: nextSettings.password_policy?.require_lowercase ?? accountPolicyDefaults.require_lowercase,
+      });
       try {
         const a = await api('GET', '/api/iam/attachments');
         setAttachments(a.attachments || []);
       } catch {
         setAttachments([]);
       }
-    } catch(e) { notify(e.message, 'error'); }
+    } catch (e) {
+      notify(e.message, 'error');
+    }
   }, [notify]);
 
   useEffect(() => { load(); }, [load]);
+
+  const q = search.toLowerCase();
+  const filteredUsers = users.filter(u => !q || [u.user_name, u.path, u.user_id, ...(u.groups || [])].some(v => String(v || '').toLowerCase().includes(q)));
+  const filteredGroups = groups.filter(g => !q || [g.group_name, g.path, g.group_id].some(v => String(v || '').toLowerCase().includes(q)));
+  const filteredRoles = roles.filter(r => !q || [r.role_name, r.path, r.role_id].some(v => String(v || '').toLowerCase().includes(q)));
+  const filteredPolicies = policies.filter(p => !q || [p.policy_name, p.policy_id].some(v => String(v || '').toLowerCase().includes(q)));
+  const filteredAttachments = attachments.filter(a => !q || [a.target_type, a.target_id, a.policy_id].some(v => String(v || '').toLowerCase().includes(q)));
+  const filteredIdentityProviders = identityProviders.filter(idp => !q || [idp.provider_name, idp.provider_type, idp.provider_id].some(v => String(v || '').toLowerCase().includes(q)));
+
+  const sections = [
+    {id: 'users', label: 'Users', count: users.length},
+    {id: 'groups', label: 'User groups', count: groups.length},
+    {id: 'roles', label: 'Roles', count: roles.length},
+    {id: 'policies', label: 'Policies', count: policies.length},
+    {id: 'attachments', label: 'Policy attachments', count: attachments.length},
+    {id: 'identity-providers', label: 'Identity providers', count: identityProviders.length},
+    {id: 'account-settings', label: 'Account settings', count: 1},
+  ];
+
+  const sectionMeta = {
+    users: {title: 'Users', subtitle: 'Create and manage IAM users.'},
+    groups: {title: 'User groups', subtitle: 'Create groups and manage membership.'},
+    roles: {title: 'Roles', subtitle: 'Create roles and define trust policies.'},
+    policies: {title: 'Policies', subtitle: 'Create customer-managed policies.'},
+    attachments: {title: 'Policy attachments', subtitle: 'Attach policies to users, groups, and roles.'},
+    'identity-providers': {title: 'Identity providers', subtitle: 'Manage SAML or OIDC providers.'},
+    'account-settings': {title: 'Account settings', subtitle: 'Manage password policy defaults.'},
+  };
+
+  const renderCreatePanel = () => {
+    if (section === 'users') {
+      return (
+        <div className="panel" style={{marginBottom:0}}>
+          <div className="ph">
+            <div>
+              <div className="pt">Create user</div>
+              <div className="ps">Create a new IAM user in this account.</div>
+            </div>
+          </div>
+          <div style={{padding:16}}>
+            <div className="fg"><label className="fl">User name</label><input className="fi" placeholder="alice" value={form.user_name} onChange={e=>setForm(f=>({...f,user_name:e.target.value}))}/></div>
+            <button className="btn btn-p" type="button" onClick={async()=>{setBusy(true);try{await IAM.createUser({user_name:form.user_name});notify('User created','success');setForm(f=>({...f,user_name:''}));load();}catch(e){notify(e.message,'error');}finally{setBusy(false);}}} disabled={busy || !form.user_name.trim()}>Create user</button>
+          </div>
+        </div>
+      );
+    }
+    if (section === 'groups') {
+      return (
+        <div className="panel" style={{marginBottom:0}}>
+          <div className="ph">
+            <div>
+              <div className="pt">Create group</div>
+              <div className="ps">Create a user group and manage its membership.</div>
+            </div>
+          </div>
+          <div style={{padding:16}}>
+            <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(220px,1fr))',gap:12}}>
+              <div className="fg"><label className="fl">Group name</label><input className="fi" placeholder="Developers" value={form.group_name} onChange={e=>setForm(f=>({...f,group_name:e.target.value}))}/></div>
+              <div className="fg"><label className="fl">Path</label><input className="fi" value={form.group_path} onChange={e=>setForm(f=>({...f,group_path:e.target.value}))}/></div>
+            </div>
+            <div className="btn-grp" style={{marginTop:10}}>
+              <button className="btn btn-p" type="button" onClick={async()=>{setBusy(true);try{await IAM.createGroup({group_name:form.group_name, path:form.group_path || '/'});notify('Group created','success');setForm(f=>({...f,group_name:'',group_path:'/'}));load();}catch(e){notify(e.message,'error');}finally{setBusy(false);}}} disabled={busy || !form.group_name.trim()}>Create group</button>
+            </div>
+            <div className="vpc-create-section">
+              <div className="vpc-create-subhead">Manage membership</div>
+              <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(220px,1fr))',gap:12}}>
+                <div className="fg">
+                  <label className="fl">Group</label>
+                  <select className="fi" value={form.group_member_group_id} onChange={e=>setForm(f=>({...f,group_member_group_id:e.target.value}))}>
+                    <option value="">Select group</option>
+                    {groups.map(g => <option key={g.group_id} value={g.group_id}>{g.group_name}</option>)}
+                  </select>
+                </div>
+                <div className="fg">
+                  <label className="fl">User</label>
+                  <select className="fi" value={form.group_member_user_id} onChange={e=>setForm(f=>({...f,group_member_user_id:e.target.value}))}>
+                    <option value="">Select user</option>
+                    {users.map(u => <option key={u.user_id} value={u.user_id}>{u.user_name}</option>)}
+                  </select>
+                </div>
+              </div>
+              <div className="btn-grp" style={{marginTop:10}}>
+                <button className="btn btn-p" type="button" onClick={async()=>{setBusy(true);try{await IAM.addUserToGroup(form.group_member_group_id, {user_id: form.group_member_user_id});notify('User added to group','success');load();}catch(e){notify(e.message,'error');}finally{setBusy(false);}}} disabled={busy || !form.group_member_group_id || !form.group_member_user_id}>Add user</button>
+                <button className="btn btn-s" type="button" onClick={async()=>{setBusy(true);try{await IAM.removeUserFromGroup(form.group_member_group_id, form.group_member_user_id);notify('User removed from group','success');load();}catch(e){notify(e.message,'error');}finally{setBusy(false);}}} disabled={busy || !form.group_member_group_id || !form.group_member_user_id}>Remove user</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      );
+    }
+    if (section === 'roles') {
+      return (
+        <div className="panel" style={{marginBottom:0}}>
+          <div className="ph">
+            <div>
+              <div className="pt">Create role</div>
+              <div className="ps">Create a role and define its trust policy.</div>
+            </div>
+          </div>
+          <div style={{padding:16}}>
+            <div className="fg"><label className="fl">Role name</label><input className="fi" placeholder="developer-role" value={form.role_name} onChange={e=>setForm(f=>({...f,role_name:e.target.value}))}/></div>
+            <div className="fg"><label className="fl">Trust policy</label><textarea className="fi" rows="5" value={form.role_assume} onChange={e=>setForm(f=>({...f,role_assume:e.target.value}))} placeholder='{"Version":"2012-10-17","Statement":[]}'/></div>
+            <button className="btn btn-p" type="button" onClick={async()=>{setBusy(true);try{await IAM.createRole({role_name:form.role_name, assume_role_policy_document:JSON.parse(form.role_assume||'{}')});notify('Role created','success');setForm(f=>({...f,role_name:'',role_assume:'{"Version":"2012-10-17","Statement":[]}'}));load();}catch(e){notify(e.message,'error');}finally{setBusy(false);}}} disabled={busy || !form.role_name.trim()}>Create role</button>
+          </div>
+        </div>
+      );
+    }
+    if (section === 'policies') {
+      return (
+        <div className="panel" style={{marginBottom:0}}>
+          <div className="ph">
+            <div>
+              <div className="pt">Create policy</div>
+              <div className="ps">Create a customer-managed policy from JSON.</div>
+            </div>
+          </div>
+          <div style={{padding:16}}>
+            <div className="fg"><label className="fl">Policy name</label><input className="fi" placeholder="ReadOnlyAccess" value={form.policy_name} onChange={e=>setForm(f=>({...f,policy_name:e.target.value}))}/></div>
+            <div className="fg"><label className="fl">Policy document</label><textarea className="fi" rows="8" value={form.policy_document} onChange={e=>setForm(f=>({...f,policy_document:e.target.value}))} placeholder='{"Version":"2012-10-17","Statement":[]}'/></div>
+            <button className="btn btn-p" type="button" onClick={async()=>{setBusy(true);try{await IAM.createPolicy({policy_name:form.policy_name, document:JSON.parse(form.policy_document||'{}')});notify('Policy created','success');setForm(f=>({...f,policy_name:'',policy_document:'{"Version":"2012-10-17","Statement":[]}'}));load();}catch(e){notify(e.message,'error');}finally{setBusy(false);}}} disabled={busy || !form.policy_name.trim()}>Create policy</button>
+          </div>
+        </div>
+      );
+    }
+    if (section === 'attachments') {
+      return (
+        <div className="panel" style={{marginBottom:0}}>
+          <div className="ph">
+            <div>
+              <div className="pt">Attach policy</div>
+              <div className="ps">Attach an existing policy to a user, group, or role.</div>
+            </div>
+          </div>
+          <div style={{padding:16}}>
+            <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(220px,1fr))',gap:12}}>
+              <div className="fg">
+                <label className="fl">Target type</label>
+                <select className="fi" value={form.attach_target_type} onChange={e=>setForm(f=>({...f,attach_target_type:e.target.value, attach_target_id:''}))}>
+                  {['user','group','role'].map(v => <option key={v} value={v}>{v}</option>)}
+                </select>
+              </div>
+              <div className="fg">
+                <label className="fl">Target ID</label>
+                <input className="fi" value={form.attach_target_id} onChange={e=>setForm(f=>({...f,attach_target_id:e.target.value}))}/>
+              </div>
+              <div className="fg">
+                <label className="fl">Policy ID</label>
+                <select className="fi" value={form.attach_policy_id} onChange={e=>setForm(f=>({...f,attach_policy_id:e.target.value}))}>
+                  <option value="">Select policy</option>
+                  {policies.map(p => <option key={p.policy_id} value={p.policy_id}>{p.policy_name}</option>)}
+                </select>
+              </div>
+            </div>
+            <button className="btn btn-p" type="button" onClick={async()=>{setBusy(true);try{await IAM.attachPolicy({target_type:form.attach_target_type, target_id:form.attach_target_id, policy_id:form.attach_policy_id});notify('Policy attached','success');load();}catch(e){notify(e.message,'error');}finally{setBusy(false);}}} disabled={busy || !form.attach_target_id || !form.attach_policy_id}>Attach policy</button>
+          </div>
+        </div>
+      );
+    }
+    if (section === 'identity-providers') {
+      return (
+        <div className="panel" style={{marginBottom:0}}>
+          <div className="ph">
+            <div>
+              <div className="pt">Create identity provider</div>
+              <div className="ps">Add SAML or OIDC providers for federated access.</div>
+            </div>
+          </div>
+          <div style={{padding:16}}>
+            <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(220px,1fr))',gap:12}}>
+              <div className="fg"><label className="fl">Provider name</label><input className="fi" placeholder="CorpSSO" value={form.idp_name} onChange={e=>setForm(f=>({...f,idp_name:e.target.value}))}/></div>
+              <div className="fg">
+                <label className="fl">Provider type</label>
+                <select className="fi" value={form.idp_type} onChange={e=>setForm(f=>({...f,idp_type:e.target.value}))}>
+                  {['SAML','OIDC'].map(v => <option key={v} value={v}>{v}</option>)}
+                </select>
+              </div>
+              <div className="fg"><label className="fl">URL</label><input className="fi" placeholder="https://idp.example.com/metadata" value={form.idp_url} onChange={e=>setForm(f=>({...f,idp_url:e.target.value}))}/></div>
+            </div>
+            <button className="btn btn-p" type="button" onClick={async()=>{setBusy(true);try{await IAM.createIdentityProvider({provider_name:form.idp_name, provider_type:form.idp_type, url:form.idp_url});notify('Identity provider created','success');setForm(f=>({...f,idp_name:'',idp_type:'SAML',idp_url:''}));load();}catch(e){notify(e.message,'error');}finally{setBusy(false);}}} disabled={busy || !form.idp_name.trim()}>Create provider</button>
+          </div>
+        </div>
+      );
+    }
+    return (
+      <div className="panel" style={{marginBottom:0}}>
+        <div className="ph">
+          <div>
+            <div className="pt">Password policy</div>
+            <div className="ps">Manage the account-wide password policy defaults.</div>
+          </div>
+        </div>
+        <div style={{padding:16}}>
+          <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(220px,1fr))',gap:12,marginBottom:12}}>
+            <div className="fg"><label className="fl">Minimum length</label><input className="fi" type="number" min="1" value={passwordPolicyForm.minimum_length} onChange={e=>setPasswordPolicyForm(f=>({...f,minimum_length: Number(e.target.value || 0)}))}/></div>
+            {[
+              ['require_symbols','Require symbols'],
+              ['require_numbers','Require numbers'],
+              ['require_uppercase','Require uppercase'],
+              ['require_lowercase','Require lowercase'],
+            ].map(([key, label]) => (
+              <label key={key} className="vpc-radio-line" style={{paddingTop:26}}>
+                <input type="checkbox" checked={!!passwordPolicyForm[key]} onChange={e=>setPasswordPolicyForm(f=>({...f,[key]: e.target.checked}))}/>
+                <span>{label}</span>
+              </label>
+            ))}
+          </div>
+          <button className="btn btn-p" type="button" onClick={async()=>{setBusy(true);try{await IAM.updateAccountSettings({password_policy: passwordPolicyForm});notify('Account settings updated','success');load();}catch(e){notify(e.message,'error');}finally{setBusy(false);}}} disabled={busy}>Save account settings</button>
+        </div>
+      </div>
+    );
+  };
+
+  const renderTable = () => {
+    if (section === 'users') {
+      return (
+        <div className="panel" style={{marginBottom:16}}>
+          <div className="ph"><div><div className="pt">Users</div><div className="ps">{filteredUsers.length} users</div></div></div>
+          <div style={{overflowX:'auto'}}>
+            <table className="tbl">
+              <thead><tr><th>Name</th><th>Groups</th><th>Path</th><th>Created</th><th>Actions</th></tr></thead>
+              <tbody>
+                {filteredUsers.map(u => (
+                  <tr key={u.user_id}>
+                    <td>{u.user_name}</td>
+                    <td>{(u.groups || []).length}</td>
+                    <td>{u.path || '/'}</td>
+                    <td>{fmtDate(u.created)}</td>
+                    <td><button className="btn btn-s" type="button" onClick={async()=>{if(!window.confirm(`Delete user ${u.user_name}?`)) return; setBusy(true); try { await IAM.removeUser(u.user_id); notify('User deleted','success'); load(); } catch (e) { notify(e.message,'error'); } finally { setBusy(false); }}} disabled={busy}>Delete</button></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      );
+    }
+    if (section === 'groups') {
+      return (
+        <div className="panel" style={{marginBottom:16}}>
+          <div className="ph"><div><div className="pt">User groups</div><div className="ps">{filteredGroups.length} groups</div></div></div>
+          <div style={{overflowX:'auto'}}>
+            <table className="tbl">
+              <thead><tr><th>Name</th><th>Path</th><th>Members</th><th>Policies</th><th>Created</th><th>Actions</th></tr></thead>
+              <tbody>
+                {filteredGroups.map(g => (
+                  <tr key={g.group_id}>
+                    <td>{g.group_name}</td>
+                    <td>{g.path || '/'}</td>
+                    <td>{(g.members || []).length}</td>
+                    <td>{(g.policies || []).length}</td>
+                    <td>{fmtDate(g.created)}</td>
+                    <td><button className="btn btn-s" type="button" onClick={async()=>{if(!window.confirm(`Delete group ${g.group_name}?`)) return; setBusy(true); try { await IAM.removeGroup(g.group_id); notify('Group deleted','success'); load(); } catch (e) { notify(e.message,'error'); } finally { setBusy(false); }}} disabled={busy}>Delete</button></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      );
+    }
+    if (section === 'roles') {
+      return (
+        <div className="panel" style={{marginBottom:16}}>
+          <div className="ph"><div><div className="pt">Roles</div><div className="ps">{filteredRoles.length} roles</div></div></div>
+          <div style={{overflowX:'auto'}}>
+            <table className="tbl">
+              <thead><tr><th>Name</th><th>Path</th><th>Created</th><th>Actions</th></tr></thead>
+              <tbody>
+                {filteredRoles.map(r => (
+                  <tr key={r.role_id}>
+                    <td>{r.role_name}</td>
+                    <td>{r.path || '/'}</td>
+                    <td>{fmtDate(r.created)}</td>
+                    <td><button className="btn btn-s" type="button" onClick={async()=>{if(!window.confirm(`Delete role ${r.role_name}?`)) return; setBusy(true); try { await IAM.removeRole(r.role_id); notify('Role deleted','success'); load(); } catch (e) { notify(e.message,'error'); } finally { setBusy(false); }}} disabled={busy}>Delete</button></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      );
+    }
+    if (section === 'policies') {
+      return (
+        <div className="panel" style={{marginBottom:16}}>
+          <div className="ph"><div><div className="pt">Policies</div><div className="ps">{filteredPolicies.length} policies</div></div></div>
+          <div style={{overflowX:'auto'}}>
+            <table className="tbl">
+              <thead><tr><th>Name</th><th>Created</th><th>Document</th><th>Actions</th></tr></thead>
+              <tbody>
+                {filteredPolicies.map(p => (
+                  <tr key={p.policy_id}>
+                    <td>{p.policy_name}</td>
+                    <td>{fmtDate(p.created)}</td>
+                    <td><span className="arn">{JSON.stringify(p.document || {}, null, 0)}</span></td>
+                    <td><button className="btn btn-s" type="button" onClick={async()=>{if(!window.confirm(`Delete policy ${p.policy_name}?`)) return; setBusy(true); try { await IAM.removePolicy(p.policy_id); notify('Policy deleted','success'); load(); } catch (e) { notify(e.message,'error'); } finally { setBusy(false); }}} disabled={busy}>Delete</button></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      );
+    }
+    if (section === 'attachments') {
+      return (
+        <div className="panel" style={{marginBottom:16}}>
+          <div className="ph"><div><div className="pt">Policy attachments</div><div className="ps">{filteredAttachments.length} attachments</div></div></div>
+          <div style={{overflowX:'auto'}}>
+            <table className="tbl">
+              <thead><tr><th>Target</th><th>Policy</th><th>Attached at</th><th>Actions</th></tr></thead>
+              <tbody>
+                {filteredAttachments.map((a, idx) => (
+                  <tr key={idx}>
+                    <td>{a.target_type}:{a.target_id}</td>
+                    <td>{a.policy_id}</td>
+                    <td>{fmtDate(a.at)}</td>
+                    <td><button className="btn btn-s" type="button" onClick={async()=>{if(!window.confirm(`Remove attachment ${a.target_type}:${a.target_id} -> ${a.policy_id}?`)) return; setBusy(true); try { await IAM.detachPolicy({target_type:a.target_type, target_id:a.target_id, policy_id:a.policy_id}); notify('Policy detached','success'); load(); } catch (e) { notify(e.message,'error'); } finally { setBusy(false); }}} disabled={busy}>Delete</button></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      );
+    }
+    if (section === 'identity-providers') {
+      return (
+        <div className="panel" style={{marginBottom:16}}>
+          <div className="ph"><div><div className="pt">Identity providers</div><div className="ps">{filteredIdentityProviders.length} providers</div></div></div>
+          <div style={{overflowX:'auto'}}>
+            <table className="tbl">
+              <thead><tr><th>Name</th><th>Type</th><th>URL</th><th>Created</th><th>Actions</th></tr></thead>
+              <tbody>
+                {filteredIdentityProviders.map(idp => (
+                  <tr key={idp.provider_id}>
+                    <td>{idp.provider_name}</td>
+                    <td>{idp.provider_type}</td>
+                    <td>{idp.url || '—'}</td>
+                    <td>{fmtDate(idp.created)}</td>
+                    <td><button className="btn btn-s" type="button" onClick={async()=>{if(!window.confirm(`Delete identity provider ${idp.provider_name}?`)) return; setBusy(true); try { await IAM.removeIdentityProvider(idp.provider_id); notify('Identity provider deleted','success'); load(); } catch (e) { notify(e.message,'error'); } finally { setBusy(false); }}} disabled={busy}>Delete</button></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      );
+    }
+    return (
+      <div className="panel" style={{marginBottom:16}}>
+        <div className="ph"><div><div className="pt">Account settings</div><div className="ps">Password policy defaults</div></div></div>
+        <div style={{overflowX:'auto'}}>
+          <table className="tbl">
+            <thead><tr><th>Setting</th><th>Value</th><th>Description</th></tr></thead>
+            <tbody>
+              <tr><td>Minimum length</td><td>{accountSettings.password_policy?.minimum_length ?? 8}</td><td>Minimum characters for console passwords.</td></tr>
+              <tr><td>Require symbols</td><td>{String(!!accountSettings.password_policy?.require_symbols)}</td><td>Whether symbols are required.</td></tr>
+              <tr><td>Require numbers</td><td>{String(!!accountSettings.password_policy?.require_numbers)}</td><td>Whether numbers are required.</td></tr>
+              <tr><td>Require uppercase</td><td>{String(!!accountSettings.password_policy?.require_uppercase)}</td><td>Whether uppercase letters are required.</td></tr>
+              <tr><td>Require lowercase</td><td>{String(!!accountSettings.password_policy?.require_lowercase)}</td><td>Whether lowercase letters are required.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    );
+  };
 
   return (
     <div className="panel">
       <div className="ph">
         <div>
           <div className="pt">IAM</div>
-          <div className="ps">Manage users, roles, policies, and attachments.</div>
+          <div className="ps">Manage users, groups, roles, policies, and account settings.</div>
         </div>
-        <div className="btn-grp"><button className="btn btn-s" onClick={load}>↻ Refresh</button></div>
+        <div className="btn-grp" style={{display:'flex',alignItems:'center',gap:8,flexWrap:'wrap'}}>
+          <input
+            className="fi"
+            style={{width:240}}
+            value={principal}
+            onChange={e => {
+              const v = e.target.value;
+              setPrincipal(v);
+              window.localStorage.setItem('cloudlearn.principal', v || 'root');
+            }}
+            placeholder="root"
+          />
+          <button className="btn btn-s" type="button" onClick={() => { setPrincipal('root'); window.localStorage.setItem('cloudlearn.principal', 'root'); notify('Principal reset to root','success'); }}>Reset</button>
+          <button className="btn btn-s" type="button" onClick={load}>↻ Refresh</button>
+        </div>
       </div>
-      <div style={{padding:20,display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(320px,1fr))',gap:16}}>
-        <div style={{border:'1px solid #eaeded',borderRadius:4,padding:16,background:'#fff'}}>
-          <div className="pt" style={{fontSize:16,marginBottom:10}}>Users</div>
-          <div className="fg"><input className="fi" placeholder="alice" value={form.user_name} onChange={e=>setForm(f=>({...f,user_name:e.target.value}))}/></div>
-          <button className="btn btn-p" onClick={async()=>{setBusy(true);try{await IAM.createUser({user_name:form.user_name});notify('User created','success');setForm(f=>({...f,user_name:''}));load();}catch(e){notify(e.message,'error');}finally{setBusy(false);}}} disabled={busy}>Create user</button>
-          <div style={{marginTop:16,overflowX:'auto'}}>
-            <table className="tbl">
-              <thead><tr><th>Name</th><th>Path</th></tr></thead>
-              <tbody>
-                {users.map(u => <tr key={u.user_id}><td>{u.user_name}</td><td>{u.path || '/'}</td></tr>)}
-              </tbody>
-            </table>
-          </div>
+      <div style={{padding:'0 20px 16px', color:'#687078', fontSize:12}}>Requests use principal <span className="ec2-mono">{principal || 'root'}</span>. Set a user or role ARN/name here to test policy enforcement, like the IAM console role switcher.</div>
+      <div style={{padding:'0 20px 16px'}}>
+        <div className="ec2-kv-grid" style={{gridTemplateColumns:'repeat(6,minmax(0,1fr))'}}>
+          <div className="ec2-kv"><dt>Users</dt><dd>{users.length}</dd></div>
+          <div className="ec2-kv"><dt>Groups</dt><dd>{groups.length}</dd></div>
+          <div className="ec2-kv"><dt>Roles</dt><dd>{roles.length}</dd></div>
+          <div className="ec2-kv"><dt>Policies</dt><dd>{policies.length}</dd></div>
+          <div className="ec2-kv"><dt>Attachments</dt><dd>{attachments.length}</dd></div>
+          <div className="ec2-kv"><dt>Providers</dt><dd>{identityProviders.length}</dd></div>
         </div>
-        <div style={{border:'1px solid #eaeded',borderRadius:4,padding:16,background:'#fff'}}>
-          <div className="pt" style={{fontSize:16,marginBottom:10}}>Roles</div>
-          <div className="fg"><input className="fi" placeholder="developer-role" value={form.role_name} onChange={e=>setForm(f=>({...f,role_name:e.target.value}))}/></div>
-          <div className="fg"><textarea className="fi" rows="4" value={form.role_assume} onChange={e=>setForm(f=>({...f,role_assume:e.target.value}))} placeholder='{"Version":"2012-10-17","Statement":[]}'/></div>
-          <button className="btn btn-p" onClick={async()=>{setBusy(true);try{await IAM.createRole({role_name:form.role_name, assume_role_policy_document:JSON.parse(form.role_assume||'{}')});notify('Role created','success');setForm(f=>({...f,role_name:'',role_assume:'{"Version":"2012-10-17","Statement":[]}'}));load();}catch(e){notify(e.message,'error');}finally{setBusy(false);}}} disabled={busy}>Create role</button>
-          <div style={{marginTop:16,overflowX:'auto'}}>
-            <table className="tbl">
-              <thead><tr><th>Name</th><th>Path</th></tr></thead>
-              <tbody>
-                {roles.map(r => <tr key={r.role_id}><td>{r.role_name}</td><td>{r.path || '/'}</td></tr>)}
-              </tbody>
-            </table>
-          </div>
-        </div>
-        <div style={{border:'1px solid #eaeded',borderRadius:4,padding:16,background:'#fff'}}>
-          <div className="pt" style={{fontSize:16,marginBottom:10}}>Policies</div>
-          <div className="fg"><input className="fi" placeholder="ReadOnlyAccess" value={form.policy_name} onChange={e=>setForm(f=>({...f,policy_name:e.target.value}))}/></div>
-          <div className="fg"><textarea className="fi" rows="6" value={form.policy_document} onChange={e=>setForm(f=>({...f,policy_document:e.target.value}))} placeholder='{"Version":"2012-10-17","Statement":[]}'/></div>
-          <button className="btn btn-p" onClick={async()=>{setBusy(true);try{await IAM.createPolicy({policy_name:form.policy_name,document:JSON.parse(form.policy_document||'{}')});notify('Policy created','success');setForm(f=>({...f,policy_name:'',policy_document:'{"Version":"2012-10-17","Statement":[]}'}));load();}catch(e){notify(e.message,'error');}finally{setBusy(false);}}} disabled={busy}>Create policy</button>
-          <div style={{marginTop:16,overflowX:'auto'}}>
-            <table className="tbl">
-              <thead><tr><th>Name</th><th>Document</th></tr></thead>
-              <tbody>
-                {policies.map(p => <tr key={p.policy_id}><td>{p.policy_name}</td><td><span className="arn">{JSON.stringify(p.document || {}, null, 0)}</span></td></tr>)}
-              </tbody>
-            </table>
-          </div>
-        </div>
-        <div style={{border:'1px solid #eaeded',borderRadius:4,padding:16,background:'#fff',gridColumn:'1 / -1'}}>
-          <div className="pt" style={{fontSize:16,marginBottom:10}}>Attach policy</div>
-          <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(220px,1fr))',gap:12}}>
-            <div className="fg">
-              <label className="fl">Target type</label>
-              <select className="fi" value={form.attach_target_type} onChange={e=>setForm(f=>({...f,attach_target_type:e.target.value}))}>
-                {['user','role'].map(v => <option key={v} value={v}>{v}</option>)}
-              </select>
+      </div>
+      <div style={{padding:'0 20px 20px'}}>
+        <div className="iam-shell">
+          <aside className="iam-nav">
+            {sections.map(item => (
+              <div key={item.id} className={`iam-nav-item ${section === item.id ? 'active' : ''}`} onClick={() => setSection(item.id)}>
+                <span>{item.label}</span>
+                <span className="small">{item.count}</span>
+              </div>
+            ))}
+          </aside>
+          <div>
+            <div className="ec2-toolbar" style={{borderRadius:4,marginBottom:16}}>
+              <input className="ec2-search" value={search} onChange={e=>setSearch(e.target.value)} placeholder={`Search ${sectionMeta[section].title.toLowerCase()}`} />
+              <div className="ec2-toolbar-spacer" />
+              <button className="btn btn-s" type="button" onClick={load}>↻ Refresh</button>
             </div>
-            <div className="fg">
-              <label className="fl">Target ID</label>
-              <input className="fi" value={form.attach_target_id} onChange={e=>setForm(f=>({...f,attach_target_id:e.target.value}))}/>
+            {renderTable()}
+            <div style={{marginTop:16}}>
+              {renderCreatePanel()}
             </div>
-            <div className="fg">
-              <label className="fl">Policy ID</label>
-              <input className="fi" value={form.attach_policy_id} onChange={e=>setForm(f=>({...f,attach_policy_id:e.target.value}))}/>
-            </div>
-          </div>
-          <button className="btn btn-p" onClick={async()=>{setBusy(true);try{await IAM.attachPolicy({target_type:form.attach_target_type, target_id:form.attach_target_id, policy_id:form.attach_policy_id});notify('Policy attached','success');load();}catch(e){notify(e.message,'error');}finally{setBusy(false);}}} disabled={busy}>Attach policy</button>
-          <div style={{marginTop:16,overflowX:'auto'}}>
-            <table className="tbl">
-              <thead><tr><th>Target</th><th>Policy</th></tr></thead>
-              <tbody>
-                {attachments.map((a, idx) => <tr key={idx}><td>{a.target_type}:{a.target_id}</td><td>{a.policy_id}</td></tr>)}
-              </tbody>
-            </table>
           </div>
         </div>
       </div>
@@ -2985,11 +3601,25 @@ Version=2016-11-15</pre>
                   <td>
                     <div className="ec2-copyable" title={i.name || ''}>
                       <button className="btn-lnk" onClick={()=>{setSelectedIds([i.instance_id]); setFocusedInstanceId(i.instance_id);}}>{i.name}</button>
-                      <button className="ec2-copyable-btn" onClick={(e)=>copyField(i.name, 'Instance name', e)}>Copy</button>
+                      <button className="ec2-copyable-btn" aria-label="Copy instance name" title="Copy instance name" onClick={(e)=>copyField(i.name, 'Instance name', e)}>
+                        <span className="ec2-copyable-icon" aria-hidden="true">
+                          <svg viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+                            <rect x="5" y="3" width="8" height="10" rx="1.5" stroke="currentColor" strokeWidth="1.2" />
+                            <rect x="3" y="1" width="8" height="10" rx="1.5" stroke="currentColor" strokeWidth="1.2" />
+                          </svg>
+                        </span>
+                      </button>
                     </div>
                     <div className="ec2-copyable" title={i.ami_name || i.ami || ''} style={{marginTop:2}}>
                       <span className="small-col ec2-copyable-text">{i.ami_name || i.ami}</span>
-                      <button className="ec2-copyable-btn" onClick={(e)=>copyField(i.ami_name || i.ami, 'AMI', e)}>Copy</button>
+                      <button className="ec2-copyable-btn" aria-label="Copy AMI" title="Copy AMI" onClick={(e)=>copyField(i.ami_name || i.ami, 'AMI', e)}>
+                        <span className="ec2-copyable-icon" aria-hidden="true">
+                          <svg viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+                            <rect x="5" y="3" width="8" height="10" rx="1.5" stroke="currentColor" strokeWidth="1.2" />
+                            <rect x="3" y="1" width="8" height="10" rx="1.5" stroke="currentColor" strokeWidth="1.2" />
+                          </svg>
+                        </span>
+                      </button>
                     </div>
                   </td>
                   <td><span className="arn">{i.instance_id}</span></td>
@@ -4645,6 +5275,939 @@ function RDSView({notify}) {
   );
 }
 
+const sqsRowsToTags = (rows = []) => rows.reduce((acc, row) => {
+  const key = (row.key || '').trim();
+  const value = (row.value || '').trim();
+  if (key) acc[key] = value;
+  return acc;
+}, {});
+
+const sqsRedrivePolicyFromForm = (arn, maxReceiveCount) => {
+  const target = (arn || '').trim();
+  if (!target) return {};
+  return {
+    deadLetterTargetArn: target,
+    maxReceiveCount: Number(maxReceiveCount) || 5,
+  };
+};
+
+function SQSApiDocsPanel() {
+  const [showApiDocs, setShowApiDocs] = useState(false);
+  const [docAction, setDocAction] = useState('CreateQueue');
+  const docs = useMemo(() => ([
+    {
+      action: 'CreateQueue',
+      request: `POST /api/sqs/aws
+Action=CreateQueue&QueueName=my-queue&Version=2012-11-05`,
+      response: `<CreateQueueResponse xmlns="http://queue.amazonaws.com/doc/2012-11-05/">
+  <CreateQueueResult>
+    <QueueUrl>http://127.0.0.1:9000/api/sqs/queues/my-queue</QueueUrl>
+  </CreateQueueResult>
+  <ResponseMetadata><RequestId>...</RequestId></ResponseMetadata>
+</CreateQueueResponse>`,
+      summary: 'Creates a standard or FIFO queue and returns the simulator queue URL.',
+    },
+    {
+      action: 'ListQueues',
+      request: `GET /sqs?Action=ListQueues&Version=2012-11-05`,
+      response: `<ListQueuesResponse xmlns="http://queue.amazonaws.com/doc/2012-11-05/">
+  <ListQueuesResult>
+    <QueueUrl>http://127.0.0.1:9000/api/sqs/queues/my-queue</QueueUrl>
+  </ListQueuesResult>
+  <ResponseMetadata><RequestId>...</RequestId></ResponseMetadata>
+</ListQueuesResponse>`,
+      summary: 'Lists queues in the simulator control plane.',
+    },
+    {
+      action: 'GetQueueUrl',
+      request: `GET /sqs?Action=GetQueueUrl&QueueName=my-queue&Version=2012-11-05`,
+      response: `<GetQueueUrlResponse xmlns="http://queue.amazonaws.com/doc/2012-11-05/">
+  <GetQueueUrlResult>
+    <QueueUrl>http://127.0.0.1:9000/api/sqs/queues/my-queue</QueueUrl>
+  </GetQueueUrlResult>
+  <ResponseMetadata><RequestId>...</RequestId></ResponseMetadata>
+</GetQueueUrlResponse>`,
+      summary: 'Returns the queue URL for a named queue.',
+    },
+    {
+      action: 'SendMessage',
+      request: `POST /sqs?Action=SendMessage&QueueUrl=http://127.0.0.1:9000/api/sqs/queues/my-queue&MessageBody=hello&Version=2012-11-05`,
+      response: `<SendMessageResponse xmlns="http://queue.amazonaws.com/doc/2012-11-05/">
+  <SendMessageResult>
+    <MessageId>msg-...</MessageId>
+    <MD5OfMessageBody>...</MD5OfMessageBody>
+  </SendMessageResult>
+  <ResponseMetadata><RequestId>...</RequestId></ResponseMetadata>
+</SendMessageResponse>`,
+      summary: 'Places a message onto the queue.',
+    },
+    {
+      action: 'ReceiveMessage',
+      request: `POST /sqs?Action=ReceiveMessage&QueueUrl=http://127.0.0.1:9000/api/sqs/queues/my-queue&MaxNumberOfMessages=1&Version=2012-11-05`,
+      response: `<ReceiveMessageResponse xmlns="http://queue.amazonaws.com/doc/2012-11-05/">
+  <ReceiveMessageResult>
+    <Message>
+      <MessageId>msg-...</MessageId>
+      <ReceiptHandle>rhdl-...</ReceiptHandle>
+      <Body>hello</Body>
+    </Message>
+  </ReceiveMessageResult>
+  <ResponseMetadata><RequestId>...</RequestId></ResponseMetadata>
+</ReceiveMessageResponse>`,
+      summary: 'Receives available messages and makes them temporarily invisible.',
+    },
+    {
+      action: 'GetQueueAttributes',
+      request: `GET /sqs?Action=GetQueueAttributes&QueueUrl=http://127.0.0.1:9000/api/sqs/queues/my-queue&AttributeName=All&Version=2012-11-05`,
+      response: `<GetQueueAttributesResponse xmlns="http://queue.amazonaws.com/doc/2012-11-05/">
+  <GetQueueAttributesResult>
+    <Attribute><Name>VisibilityTimeout</Name><Value>30</Value></Attribute>
+  </GetQueueAttributesResult>
+  <ResponseMetadata><RequestId>...</RequestId></ResponseMetadata>
+</GetQueueAttributesResponse>`,
+      summary: 'Returns the queue attribute set.',
+    },
+    {
+      action: 'SetQueueAttributes',
+      request: `POST /sqs?Action=SetQueueAttributes&QueueUrl=http://127.0.0.1:9000/api/sqs/queues/my-queue&Attribute.1.Name=VisibilityTimeout&Attribute.1.Value=45&Version=2012-11-05`,
+      response: `<SetQueueAttributesResponse xmlns="http://queue.amazonaws.com/doc/2012-11-05/">
+  <SetQueueAttributesResult />
+  <ResponseMetadata><RequestId>...</RequestId></ResponseMetadata>
+</SetQueueAttributesResponse>`,
+      summary: 'Updates queue attributes such as visibility timeout and retention period.',
+    },
+    {
+      action: 'PurgeQueue',
+      request: `POST /sqs?Action=PurgeQueue&QueueUrl=http://127.0.0.1:9000/api/sqs/queues/my-queue&Version=2012-11-05`,
+      response: `<PurgeQueueResponse xmlns="http://queue.amazonaws.com/doc/2012-11-05/">
+  <PurgeQueueResult />
+  <ResponseMetadata><RequestId>...</RequestId></ResponseMetadata>
+</PurgeQueueResponse>`,
+      summary: 'Removes all messages from the queue.',
+    },
+  ]), []);
+  const selected = docs.find(d => d.action === docAction) || docs[0];
+
+  return (
+    <>
+      {!showApiDocs && (
+        <button className="vpc-doc-toggle" onClick={() => setShowApiDocs(true)}>
+          <span className="vpc-doc-toggle-label">API Documentation</span>
+        </button>
+      )}
+      {showApiDocs && (
+        <aside className="vpc-doc-drawer" aria-label="Amazon SQS API Reference">
+          <div className="vpc-doc-drawer-head">
+            <div style={{minWidth:0,flex:1}}>
+              <div className="vpc-doc-drawer-title">Amazon SQS API Reference</div>
+              <div className="vpc-doc-drawer-sub">Amazon SQS uses the Query API contract. Try one request/response pair at a time from Postman or curl.</div>
+            </div>
+            <button className="vpc-doc-drawer-close" onClick={() => setShowApiDocs(false)}>Close</button>
+          </div>
+          <div className="vpc-doc-drawer-body">
+            <div className="ec2-docs-note" style={{marginBottom:12}}>Select one SQS request/response pair at a time.</div>
+            <div className="ec2-docs-contents" style={{marginTop:0}}>
+              <h3>Contents</h3>
+              <div className="ec2-docs-links">
+                {docs.map(d => (
+                  <button key={d.action} className="ec2-docs-link" type="button" onClick={() => setDocAction(d.action)} style={{background:'none',border:'none',padding:0}}>
+                    {d.action}
+                  </button>
+                ))}
+              </div>
+            </div>
+            <div className="ec2-docs-section" style={{borderTop:'none',paddingTop:0,marginTop:16}}>
+              <h3>Request and response</h3>
+              <div className="ec2-docs-note">{selected.summary}</div>
+              <select className="ec2-doc-select" value={docAction} onChange={e => setDocAction(e.target.value)}>
+                {docs.map(d => <option key={d.action} value={d.action}>{d.action}</option>)}
+              </select>
+              <div className="ec2-docs-request">
+                <div className="ec2-docs-block">
+                  <div className="ec2-docs-block-title">Request</div>
+                  <pre className="ec2-docs-code">{selected.request}</pre>
+                </div>
+                <div className="ec2-docs-block">
+                  <div className="ec2-docs-block-title">Response</div>
+                  {selected.response.trim().startsWith('<') ? renderXmlSnippet(selected.response) : <pre className="ec2-docs-code">{selected.response}</pre>}
+                </div>
+              </div>
+            </div>
+          </div>
+        </aside>
+      )}
+    </>
+  );
+}
+
+function CreateSQSView({onBack, onDone, notify}) {
+  const [form, setForm] = useState({
+    queue_name: 'my-queue',
+    queue_type: 'standard',
+    visibility_timeout: 30,
+    receive_wait_time_seconds: 0,
+    message_retention_period: 345600,
+    max_message_size: 262144,
+    delay_seconds: 0,
+    content_based_deduplication: false,
+    dead_letter_target_arn: '',
+    max_receive_count: '5',
+  });
+  const [tags, setTags] = useState([{key: '', value: ''}]);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState('');
+
+  const setQueueType = (queueType) => {
+    setForm(prev => {
+      const baseName = (prev.queue_name || 'my-queue').replace(/\.fifo$/i, '') || 'my-queue';
+      return {
+        ...prev,
+        queue_type: queueType,
+        queue_name: queueType === 'fifo' ? `${baseName}.fifo` : baseName,
+        content_based_deduplication: queueType === 'fifo' ? prev.content_based_deduplication : false,
+      };
+    });
+  };
+
+  const submit = async () => {
+    const queueName = (form.queue_name || '').trim();
+    if (!queueName) {
+      setErr('Queue name is required');
+      return;
+    }
+    setBusy(true);
+    setErr('');
+    try {
+      const tagMap = sqsRowsToTags(tags);
+      const redrive_policy = sqsRedrivePolicyFromForm(form.dead_letter_target_arn, form.max_receive_count);
+      const created = await SQS.create({
+        queue_name: queueName,
+        fifo_queue: form.queue_type === 'fifo',
+        content_based_deduplication: form.queue_type === 'fifo' && !!form.content_based_deduplication,
+        visibility_timeout: Number(form.visibility_timeout) || 30,
+        receive_wait_time_seconds: Number(form.receive_wait_time_seconds) || 0,
+        message_retention_period: Number(form.message_retention_period) || 345600,
+        max_message_size: Number(form.max_message_size) || 262144,
+        delay_seconds: Number(form.delay_seconds) || 0,
+        redrive_policy,
+        tags: tagMap,
+      });
+      onDone(created);
+    } catch (e) {
+      setErr(e.message);
+      notify(e.message, 'error');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="panel">
+      <div className="vpc-page-head">
+        <div className="bc" style={{marginBottom:8}}>
+          <span>Amazon SQS</span><span className="bc-sep">›</span><a onClick={onBack}>Queues</a><span className="bc-sep">›</span><span>Create queue</span>
+        </div>
+        <div className="vpc-page-title">Create queue</div>
+        <div className="vpc-page-sub">Create an SQS queue with standard or FIFO semantics, then send and receive messages from the separate details view.</div>
+      </div>
+      <div className="vpc-create-wrap">
+        <div className="vpc-create-card">
+          <div className="vpc-create-section">
+            <div className="vpc-detail-section-title">Queue settings</div>
+            <div className="vpc-kv-grid">
+              <div className="fg" style={{gridColumn:'1 / -1'}}>
+                <label className="fl">Queue name</label>
+                <input className="fi" value={form.queue_name} onChange={e => setForm(prev => ({...prev, queue_name: e.target.value}))} placeholder="my-queue" />
+              </div>
+            </div>
+            <div className="vpc-choice-grid vpc-choice-grid-3" style={{marginTop:12}}>
+              <label className={`vpc-choice-card ${form.queue_type === 'standard' ? 'selected' : ''}`}>
+                <input type="radio" name="sqsQueueType" checked={form.queue_type === 'standard'} onChange={() => setQueueType('standard')} />
+                <div>
+                  <div className="vpc-choice-title">Standard</div>
+                  <div className="vpc-choice-desc">High-throughput queue with at-least-once delivery semantics.</div>
+                </div>
+              </label>
+              <label className={`vpc-choice-card ${form.queue_type === 'fifo' ? 'selected' : ''}`}>
+                <input type="radio" name="sqsQueueType" checked={form.queue_type === 'fifo'} onChange={() => setQueueType('fifo')} />
+                <div>
+                  <div className="vpc-choice-title">FIFO</div>
+                  <div className="vpc-choice-desc">Preserves ordering within message groups and supports deduplication.</div>
+                </div>
+              </label>
+              <label className={`vpc-choice-card ${form.content_based_deduplication ? 'selected' : ''}`}>
+                <input type="checkbox" checked={form.content_based_deduplication} disabled={form.queue_type !== 'fifo'} onChange={e => setForm(prev => ({...prev, content_based_deduplication: e.target.checked}))} />
+                <div>
+                  <div className="vpc-choice-title">Content-based deduplication</div>
+                  <div className="vpc-choice-desc">Available on FIFO queues; simulator derives a deduplication key from the message body.</div>
+                </div>
+              </label>
+            </div>
+          </div>
+
+          <div className="vpc-create-section">
+            <div className="vpc-detail-section-title">Delivery and visibility</div>
+            <div className="vpc-kv-grid">
+              <div className="fg"><label className="fl">Visibility timeout (seconds)</label><input className="fi" type="number" min="0" value={form.visibility_timeout} onChange={e => setForm(prev => ({...prev, visibility_timeout: Number(e.target.value || 30)}))} /></div>
+              <div className="fg"><label className="fl">Receive wait time (seconds)</label><input className="fi" type="number" min="0" value={form.receive_wait_time_seconds} onChange={e => setForm(prev => ({...prev, receive_wait_time_seconds: Number(e.target.value || 0)}))} /></div>
+              <div className="fg"><label className="fl">Message retention period (seconds)</label><input className="fi" type="number" min="60" value={form.message_retention_period} onChange={e => setForm(prev => ({...prev, message_retention_period: Number(e.target.value || 345600)}))} /></div>
+              <div className="fg"><label className="fl">Maximum message size (bytes)</label><input className="fi" type="number" min="1024" value={form.max_message_size} onChange={e => setForm(prev => ({...prev, max_message_size: Number(e.target.value || 262144)}))} /></div>
+              <div className="fg"><label className="fl">Delivery delay (seconds)</label><input className="fi" type="number" min="0" value={form.delay_seconds} onChange={e => setForm(prev => ({...prev, delay_seconds: Number(e.target.value || 0)}))} /></div>
+            </div>
+          </div>
+
+          <div className="vpc-create-section">
+            <div className="vpc-detail-section-title">Dead-letter queue</div>
+            <div className="vpc-detail-note">Optional. Route messages here when receive count exceeds the configured threshold.</div>
+            <div className="vpc-kv-grid" style={{marginTop:10}}>
+              <div className="fg">
+                <label className="fl">Dead-letter queue ARN</label>
+                <input className="fi" value={form.dead_letter_target_arn} onChange={e => setForm(prev => ({...prev, dead_letter_target_arn: e.target.value}))} placeholder="arn:aws:sqs:us-east-1:123456789012:my-dlq" />
+              </div>
+              <div className="fg">
+                <label className="fl">Max receive count</label>
+                <input className="fi" type="number" min="1" value={form.max_receive_count} onChange={e => setForm(prev => ({...prev, max_receive_count: e.target.value}))} />
+              </div>
+            </div>
+          </div>
+
+          <div className="vpc-create-section">
+            <div className="vpc-detail-section-title">Tags</div>
+            {tags.map((tag, idx) => (
+              <div className="vpc-create-tag-row" key={idx}>
+                <input className="fi" placeholder="Key" value={tag.key} onChange={e => setTags(rows => rows.map((row, i) => i === idx ? {...row, key: e.target.value} : row))} />
+                <input className="fi" placeholder="Value" value={tag.value} onChange={e => setTags(rows => rows.map((row, i) => i === idx ? {...row, value: e.target.value} : row))} />
+                <button type="button" className="btn btn-s" onClick={() => setTags(rows => rows.filter((_, i) => i !== idx))}>Remove</button>
+              </div>
+            ))}
+            <div className="btn-grp" style={{marginTop:12}}>
+              <button type="button" className="btn btn-s" onClick={() => setTags(rows => [...rows, {key:'', value:''}])}>Add tag</button>
+            </div>
+          </div>
+
+          {err && <div className="ferr" style={{marginTop:12}}>{err}</div>}
+          <div className="vpc-create-footer">
+            <button type="button" className="btn btn-s" onClick={onBack} disabled={busy}>Cancel</button>
+            <button type="button" className="btn btn-p" onClick={submit} disabled={busy}>{busy ? '⏳ Creating…' : 'Create queue'}</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function SQSView({notify}) {
+  const [queues, setQueues] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [page, setPage] = useState('list');
+  const [selectedQueueName, setSelectedQueueName] = useState('');
+  const [selectedQueue, setSelectedQueue] = useState(null);
+  const [detailTab, setDetailTab] = useState('overview');
+  const [search, setSearch] = useState('');
+  const [actionsOpen, setActionsOpen] = useState(false);
+  const [deleteTarget, setDeleteTarget] = useState(null);
+  const [deleteBusy, setDeleteBusy] = useState(false);
+  const [showApiDocs, setShowApiDocs] = useState(false);
+  const [sendBody, setSendBody] = useState('Hello from SQS');
+  const [sendGroupId, setSendGroupId] = useState('group-1');
+  const [sendDedupId, setSendDedupId] = useState('');
+  const [receiveForm, setReceiveForm] = useState({
+    max_number_of_messages: 10,
+    wait_time_seconds: 0,
+    visibility_timeout: 30,
+  });
+  const [receiveResult, setReceiveResult] = useState(null);
+  const [attrDraft, setAttrDraft] = useState({
+    visibility_timeout: 30,
+    receive_wait_time_seconds: 0,
+    message_retention_period: 345600,
+    max_message_size: 262144,
+    delay_seconds: 0,
+    content_based_deduplication: false,
+    dead_letter_target_arn: '',
+    max_receive_count: '5',
+  });
+  const [tagRows, setTagRows] = useState([{key: '', value: ''}]);
+  const actionsRef = useRef(null);
+
+  const loadList = useCallback(async () => {
+    setLoading(true);
+    try {
+      const d = await SQS.list();
+      const list = d.queues || [];
+      setQueues(list);
+      setSelectedQueueName(current => current && list.some(queue => queue.queue_name === current) ? current : (list[0]?.queue_name || ''));
+    } catch (e) {
+      notify(e.message, 'error');
+    } finally {
+      setLoading(false);
+    }
+  }, [notify]);
+
+  const loadDetail = useCallback(async (queueName) => {
+    if (!queueName) {
+      setSelectedQueue(null);
+      return;
+    }
+    try {
+      const d = await SQS.get(queueName);
+      setSelectedQueue(d);
+    } catch (e) {
+      notify(e.message, 'error');
+    }
+  }, [notify]);
+
+  useEffect(() => { loadList(); }, [loadList]);
+  useEffect(() => {
+    if (page === 'create') return;
+    if (!selectedQueueName) return;
+    if (selectedQueue && selectedQueue.queue_name === selectedQueueName) return;
+    loadDetail(selectedQueueName);
+  }, [selectedQueueName, selectedQueue, page, loadDetail]);
+  useEffect(() => {
+    if (!selectedQueue) return;
+    setReceiveResult(null);
+    setSendGroupId(selectedQueue.fifo_queue ? 'group-1' : '');
+    setSendDedupId('');
+    setAttrDraft({
+      visibility_timeout: Number(selectedQueue.visibility_timeout || selectedQueue.attributes?.VisibilityTimeout || 30),
+      receive_wait_time_seconds: Number(selectedQueue.receive_wait_time_seconds || selectedQueue.attributes?.ReceiveMessageWaitTimeSeconds || 0),
+      message_retention_period: Number(selectedQueue.message_retention_period || selectedQueue.attributes?.MessageRetentionPeriod || 345600),
+      max_message_size: Number(selectedQueue.max_message_size || selectedQueue.attributes?.MaximumMessageSize || 262144),
+      delay_seconds: Number(selectedQueue.delay_seconds || selectedQueue.attributes?.DelaySeconds || 0),
+      content_based_deduplication: !!selectedQueue.content_based_deduplication,
+      dead_letter_target_arn: selectedQueue.redrive_policy?.deadLetterTargetArn || '',
+      max_receive_count: selectedQueue.redrive_policy?.maxReceiveCount || '5',
+    });
+    const rows = Object.entries(selectedQueue.tags || {}).map(([key, value]) => ({key, value}));
+    setTagRows(rows.length ? rows : [{key: '', value: ''}]);
+  }, [selectedQueue]);
+  useEffect(() => {
+    if (!actionsOpen) return;
+    const onPointerDown = (event) => {
+      if (actionsRef.current && !actionsRef.current.contains(event.target)) {
+        setActionsOpen(false);
+      }
+    };
+    document.addEventListener('pointerdown', onPointerDown);
+    return () => document.removeEventListener('pointerdown', onPointerDown);
+  }, [actionsOpen]);
+
+  const filteredQueues = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    if (!q) return queues;
+    return queues.filter(queue => [queue.queue_name, queue.queue_url, queue.queue_arn, queue.queue_type, queue.state].join(' ').toLowerCase().includes(q));
+  }, [queues, search]);
+
+  const selectedAttrs = selectedQueue ? selectedQueue.attributes || {} : {};
+  const queueCount = queues.length;
+  const visibleCount = filteredQueues.length;
+
+  const handleCreateDone = async (created) => {
+    setPage('list');
+    notify(`Queue "${created?.queue_name || 'queue'}" created`, 'success');
+    if (created?.queue_name) {
+      setSelectedQueueName(created.queue_name);
+      setSelectedQueue(created);
+    }
+    setDetailTab('overview');
+    await loadList();
+  };
+
+  const handleSelect = (queueName) => {
+    setActionsOpen(false);
+    setSelectedQueueName(queueName);
+    setDetailTab('overview');
+  };
+
+  const openCreate = () => {
+    setActionsOpen(false);
+    setShowApiDocs(false);
+    setDeleteTarget(null);
+    setSelectedQueueName('');
+    setSelectedQueue(null);
+    setDetailTab('overview');
+    setReceiveResult(null);
+    setPage('create');
+  };
+
+  const backToList = () => {
+    setPage('list');
+    setActionsOpen(false);
+  };
+
+  const deleteQueue = async () => {
+    if (!deleteTarget) return;
+    setDeleteBusy(true);
+    try {
+      await SQS.remove(deleteTarget.queue_name);
+      notify(`Queue "${deleteTarget.queue_name}" deleted`, 'success');
+      setDeleteTarget(null);
+      setSelectedQueueName('');
+      setSelectedQueue(null);
+      await loadList();
+    } catch (e) {
+      notify(e.message, 'error');
+    } finally {
+      setDeleteBusy(false);
+    }
+  };
+
+  const saveAttributes = async () => {
+    if (!selectedQueue) return;
+    try {
+      await SQS.update(selectedQueue.queue_name, {
+        visibility_timeout: Number(attrDraft.visibility_timeout) || 30,
+        receive_wait_time_seconds: Number(attrDraft.receive_wait_time_seconds) || 0,
+        message_retention_period: Number(attrDraft.message_retention_period) || 345600,
+        max_message_size: Number(attrDraft.max_message_size) || 262144,
+        delay_seconds: Number(attrDraft.delay_seconds) || 0,
+        content_based_deduplication: !!attrDraft.content_based_deduplication,
+        redrive_policy: sqsRedrivePolicyFromForm(attrDraft.dead_letter_target_arn, attrDraft.max_receive_count),
+      });
+      notify('Queue attributes updated', 'success');
+      await loadDetail(selectedQueue.queue_name);
+      await loadList();
+    } catch (e) {
+      notify(e.message, 'error');
+    }
+  };
+
+  const saveTags = async () => {
+    if (!selectedQueue) return;
+    try {
+      await SQS.update(selectedQueue.queue_name, {tags: sqsRowsToTags(tagRows)});
+      notify('Queue tags updated', 'success');
+      await loadDetail(selectedQueue.queue_name);
+      await loadList();
+    } catch (e) {
+      notify(e.message, 'error');
+    }
+  };
+
+  const sendMessage = async () => {
+    if (!selectedQueue) return notify('Select a queue first', 'error');
+    const body = sendBody.trim();
+    if (!body) return notify('Message body is required', 'error');
+    if (selectedQueue.fifo_queue && !sendGroupId.trim()) return notify('Message group ID is required for FIFO queues', 'error');
+    try {
+      await SQS.send(selectedQueue.queue_name, {
+        message_body: body,
+        message_group_id: selectedQueue.fifo_queue ? sendGroupId.trim() : '',
+        message_deduplication_id: selectedQueue.fifo_queue ? sendDedupId.trim() : '',
+      });
+      notify('Message sent', 'success');
+      await loadDetail(selectedQueue.queue_name);
+      await loadList();
+    } catch (e) {
+      notify(e.message, 'error');
+    }
+  };
+
+  const receiveMessages = async () => {
+    if (!selectedQueue) return notify('Select a queue first', 'error');
+    try {
+      const d = await SQS.receive(selectedQueue.queue_name, {
+        max_number_of_messages: Number(receiveForm.max_number_of_messages) || 1,
+        wait_time_seconds: Number(receiveForm.wait_time_seconds) || 0,
+        visibility_timeout: Number(receiveForm.visibility_timeout) || 30,
+      });
+      setReceiveResult(d);
+      notify(`Received ${d.count || 0} message(s)`, 'success');
+      await loadDetail(selectedQueue.queue_name);
+      await loadList();
+    } catch (e) {
+      notify(e.message, 'error');
+    }
+  };
+
+  const deleteMessage = async (message) => {
+    if (!selectedQueue || !message.receipt_handle) return;
+    try {
+      await SQS.deleteMessage(selectedQueue.queue_name, message.receipt_handle);
+      notify('Message deleted', 'success');
+      await loadDetail(selectedQueue.queue_name);
+      await loadList();
+    } catch (e) {
+      notify(e.message, 'error');
+    }
+  };
+
+  const changeVisibility = async (message) => {
+    if (!selectedQueue || !message.receipt_handle) return;
+    try {
+      await SQS.changeVisibility(selectedQueue.queue_name, message.receipt_handle, {
+        visibility_timeout: Number(receiveForm.visibility_timeout) || 30,
+      });
+      notify('Message visibility updated', 'success');
+      await loadDetail(selectedQueue.queue_name);
+    } catch (e) {
+      notify(e.message, 'error');
+    }
+  };
+
+  const purgeQueue = async () => {
+    if (!selectedQueue) return;
+    try {
+      await SQS.purge(selectedQueue.queue_name);
+      notify('Queue purged', 'success');
+      await loadDetail(selectedQueue.queue_name);
+      await loadList();
+    } catch (e) {
+      notify(e.message, 'error');
+    }
+  };
+
+  const openDelete = () => {
+    if (!selectedQueue) return notify('Select a queue first', 'info');
+    setDeleteTarget(selectedQueue);
+    setActionsOpen(false);
+  };
+
+  const renderOverview = () => {
+    if (!selectedQueue) {
+      return <div className="vpc-detail-empty">Select a queue from the grid to view details.</div>;
+    }
+    const redrive = selectedQueue.redrive_policy || {};
+    return (
+      <>
+        <div className="vpc-detail-section">
+          <div className="vpc-kpi-grid">
+            <div className="vpc-kpi"><strong>{selectedQueue.visible_message_count ?? 0}</strong><span>Visible messages</span></div>
+            <div className="vpc-kpi"><strong>{selectedQueue.in_flight_count ?? 0}</strong><span>In flight</span></div>
+            <div className="vpc-kpi"><strong>{selectedQueue.message_count ?? 0}</strong><span>Total messages</span></div>
+            <div className="vpc-kpi"><strong>{Object.keys(selectedQueue.tags || {}).length}</strong><span>Tags</span></div>
+          </div>
+        </div>
+        <div className="vpc-detail-section">
+          <div className="vpc-detail-section-title">Queue details</div>
+          <div className="rds-detail-grid">
+            <dl className="ec2-kv"><dt>Queue name</dt><dd>{selectedQueue.queue_name}</dd></dl>
+            <dl className="ec2-kv"><dt>Queue type</dt><dd>{selectedQueue.fifo_queue ? 'FIFO' : 'Standard'}</dd></dl>
+            <dl className="ec2-kv"><dt>Queue URL</dt><dd className="ec2-mono">{selectedQueue.queue_url}</dd></dl>
+            <dl className="ec2-kv"><dt>Queue ARN</dt><dd className="ec2-mono">{selectedQueue.queue_arn}</dd></dl>
+            <dl className="ec2-kv"><dt>Visibility timeout</dt><dd>{selectedAttrs.VisibilityTimeout || selectedQueue.visibility_timeout || 30} seconds</dd></dl>
+            <dl className="ec2-kv"><dt>Receive wait time</dt><dd>{selectedAttrs.ReceiveMessageWaitTimeSeconds || selectedQueue.receive_wait_time_seconds || 0} seconds</dd></dl>
+            <dl className="ec2-kv"><dt>Message retention</dt><dd>{selectedAttrs.MessageRetentionPeriod || selectedQueue.message_retention_period || 345600} seconds</dd></dl>
+            <dl className="ec2-kv"><dt>Delay seconds</dt><dd>{selectedAttrs.DelaySeconds || selectedQueue.delay_seconds || 0}</dd></dl>
+            <dl className="ec2-kv"><dt>Content-based dedup</dt><dd>{selectedQueue.fifo_queue ? (selectedQueue.content_based_deduplication ? 'Enabled' : 'Disabled') : 'Not applicable'}</dd></dl>
+            <dl className="ec2-kv"><dt>Dead-letter queue</dt><dd className="ec2-mono">{redrive.deadLetterTargetArn || '—'}</dd></dl>
+            <dl className="ec2-kv"><dt>Max receive count</dt><dd>{redrive.maxReceiveCount || '—'}</dd></dl>
+            <dl className="ec2-kv"><dt>Created</dt><dd>{fmtDate(selectedQueue.created)}</dd></dl>
+            <dl className="ec2-kv"><dt>Last modified</dt><dd>{fmtDate(selectedQueue.last_modified)}</dd></dl>
+          </div>
+        </div>
+      </>
+    );
+  };
+
+  const renderMessages = () => {
+    if (!selectedQueue) return <div className="vpc-detail-empty">Select a queue from the grid to view messages.</div>;
+    const messages = selectedQueue.messages || [];
+    return (
+      <>
+        <div className="vpc-detail-section">
+          <div className="vpc-detail-section-title">Send message</div>
+          <div className="vpc-detail-note">The simulator stores messages in the queue and applies visibility timeout, FIFO ordering, and dead-letter routing rules.</div>
+          <div className="vpc-kv-grid" style={{marginTop:10}}>
+            <div className="fg" style={{gridColumn:'1 / -1'}}>
+              <label className="fl">Message body</label>
+              <textarea className="fi" rows={4} value={sendBody} onChange={e => setSendBody(e.target.value)} />
+            </div>
+            {selectedQueue.fifo_queue && (
+              <>
+                <div className="fg">
+                  <label className="fl">Message group ID</label>
+                  <input className="fi" value={sendGroupId} onChange={e => setSendGroupId(e.target.value)} />
+                </div>
+                <div className="fg">
+                  <label className="fl">Message deduplication ID</label>
+                  <input className="fi" value={sendDedupId} onChange={e => setSendDedupId(e.target.value)} />
+                </div>
+              </>
+            )}
+          </div>
+          <div className="btn-grp" style={{marginTop:10}}>
+            <button className="btn btn-p" onClick={sendMessage}>Send message</button>
+          </div>
+        </div>
+        <div className="vpc-detail-section">
+          <div className="vpc-detail-section-title">Receive messages</div>
+          <div className="vpc-kv-grid">
+            <div className="fg"><label className="fl">Max number of messages</label><input className="fi" type="number" min="1" max="10" value={receiveForm.max_number_of_messages} onChange={e => setReceiveForm(f => ({...f, max_number_of_messages: Number(e.target.value || 1)}))} /></div>
+            <div className="fg"><label className="fl">Wait time (seconds)</label><input className="fi" type="number" min="0" value={receiveForm.wait_time_seconds} onChange={e => setReceiveForm(f => ({...f, wait_time_seconds: Number(e.target.value || 0)}))} /></div>
+            <div className="fg"><label className="fl">Visibility timeout (seconds)</label><input className="fi" type="number" min="0" value={receiveForm.visibility_timeout} onChange={e => setReceiveForm(f => ({...f, visibility_timeout: Number(e.target.value || 30)}))} /></div>
+          </div>
+          <div className="btn-grp" style={{marginTop:10}}>
+            <button className="btn btn-s" onClick={receiveMessages}>Receive messages</button>
+            <button className="btn btn-s" onClick={purgeQueue}>Purge queue</button>
+          </div>
+          {receiveResult && (
+            <div className="vpc-detail-note" style={{marginTop:10}}>Last receive returned {receiveResult.count || 0} message(s).</div>
+          )}
+        </div>
+        <div className="vpc-detail-section">
+          <div className="vpc-detail-section-title">Messages</div>
+          {messages.length ? (
+            <div className="sqs-message-scroll">
+              <table className="tbl vpc-grid sqs-message-grid">
+                <thead>
+                  <tr>
+                    <th><input type="checkbox" disabled aria-label="Select all messages" /></th>
+                    <th>Message ID</th>
+                    <th>Body</th>
+                    <th>Receipt handle</th>
+                    <th>State</th>
+                    <th>Group</th>
+                    <th>Receive count</th>
+                    <th>Visible at</th>
+                    <th>Actions</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {messages.map(message => (
+                    <tr key={message.message_id}>
+                      <td><input type="checkbox" disabled /></td>
+                      <td className="ec2-mono" title={message.message_id}>{message.message_id}</td>
+                      <td title={message.body || ''}><span className="ec2-mono">{String(message.body || '').slice(0, 120) || '—'}</span></td>
+                      <td className="ec2-mono" title={message.receipt_handle || ''}>{message.receipt_handle || '—'}</td>
+                      <td><span className={`tag ${message.in_flight ? 'tgr' : 'tg'}`}>{message.in_flight ? 'In flight' : 'Visible'}</span></td>
+                      <td>{message.group_id || '—'}</td>
+                      <td>{message.receive_count || 0}</td>
+                      <td>{fmtDate(message.visible_at)}</td>
+                      <td>
+                        <div className="btn-grp" style={{justifyContent:'flex-start'}}>
+                          <button className="btn btn-s" onClick={() => deleteMessage(message)} disabled={!message.receipt_handle}>Delete</button>
+                          <button className="btn btn-s" onClick={() => changeVisibility(message)} disabled={!message.receipt_handle}>Visibility</button>
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          ) : <div className="vpc-empty-table">No messages are currently in this queue.</div>}
+        </div>
+      </>
+    );
+  };
+
+  const renderAttributes = () => {
+    if (!selectedQueue) return <div className="vpc-detail-empty">Select a queue from the grid to view attributes.</div>;
+    return (
+      <>
+        <div className="vpc-detail-section">
+          <div className="vpc-detail-section-title">Queue attributes</div>
+          <div className="vpc-kv-grid">
+            <div className="fg"><label className="fl">Visibility timeout (seconds)</label><input className="fi" type="number" min="0" value={attrDraft.visibility_timeout} onChange={e => setAttrDraft(f => ({...f, visibility_timeout: Number(e.target.value || 30)}))} /></div>
+            <div className="fg"><label className="fl">Receive wait time (seconds)</label><input className="fi" type="number" min="0" value={attrDraft.receive_wait_time_seconds} onChange={e => setAttrDraft(f => ({...f, receive_wait_time_seconds: Number(e.target.value || 0)}))} /></div>
+            <div className="fg"><label className="fl">Message retention period (seconds)</label><input className="fi" type="number" min="60" value={attrDraft.message_retention_period} onChange={e => setAttrDraft(f => ({...f, message_retention_period: Number(e.target.value || 345600)}))} /></div>
+            <div className="fg"><label className="fl">Maximum message size (bytes)</label><input className="fi" type="number" min="1024" value={attrDraft.max_message_size} onChange={e => setAttrDraft(f => ({...f, max_message_size: Number(e.target.value || 262144)}))} /></div>
+            <div className="fg"><label className="fl">Delay seconds</label><input className="fi" type="number" min="0" value={attrDraft.delay_seconds} onChange={e => setAttrDraft(f => ({...f, delay_seconds: Number(e.target.value || 0)}))} /></div>
+          </div>
+          <div className="vpc-choice-grid" style={{marginTop:10}}>
+            <label className={`vpc-choice-card ${attrDraft.content_based_deduplication ? 'selected' : ''} ${selectedQueue.fifo_queue ? '' : 'disabled'}`}>
+              <input type="checkbox" checked={attrDraft.content_based_deduplication} disabled={!selectedQueue.fifo_queue} onChange={e => setAttrDraft(f => ({...f, content_based_deduplication: e.target.checked}))} />
+              <div>
+                <div className="vpc-choice-title">Content-based deduplication</div>
+                <div className="vpc-choice-desc">Only applies to FIFO queues. Standard queues ignore this setting.</div>
+              </div>
+            </label>
+          </div>
+        </div>
+        <div className="vpc-detail-section">
+          <div className="vpc-detail-section-title">Dead-letter queue</div>
+          <div className="vpc-kv-grid">
+            <div className="fg">
+              <label className="fl">Dead-letter queue ARN</label>
+              <input className="fi" value={attrDraft.dead_letter_target_arn} onChange={e => setAttrDraft(f => ({...f, dead_letter_target_arn: e.target.value}))} placeholder="arn:aws:sqs:us-east-1:123456789012:my-dlq" />
+            </div>
+            <div className="fg">
+              <label className="fl">Max receive count</label>
+              <input className="fi" type="number" min="1" value={attrDraft.max_receive_count} onChange={e => setAttrDraft(f => ({...f, max_receive_count: e.target.value}))} />
+            </div>
+          </div>
+          <div className="btn-grp" style={{marginTop:10}}>
+            <button className="btn btn-p" onClick={saveAttributes}>Save attributes</button>
+          </div>
+        </div>
+      </>
+    );
+  };
+
+  const renderTags = () => {
+    if (!selectedQueue) return <div className="vpc-detail-empty">Select a queue from the grid to view tags.</div>;
+    return (
+      <>
+        <div className="vpc-detail-section">
+          <div className="vpc-detail-section-title">Tags</div>
+          <div className="vpc-detail-note">Use tags to filter and organize queue resources.</div>
+          {tagRows.map((tag, idx) => (
+            <div className="vpc-create-tag-row" key={idx}>
+              <input className="fi" placeholder="Key" value={tag.key} onChange={e => setTagRows(rows => rows.map((row, i) => i === idx ? {...row, key: e.target.value} : row))} />
+              <input className="fi" placeholder="Value" value={tag.value} onChange={e => setTagRows(rows => rows.map((row, i) => i === idx ? {...row, value: e.target.value} : row))} />
+              <button className="btn btn-s" onClick={() => setTagRows(rows => rows.filter((_, i) => i !== idx))}>Remove</button>
+            </div>
+          ))}
+          <div className="btn-grp" style={{marginTop:12}}>
+            <button className="btn btn-s" onClick={() => setTagRows(rows => [...rows, {key:'', value:''}])}>Add tag</button>
+            <button className="btn btn-p" onClick={saveTags}>Save tags</button>
+          </div>
+        </div>
+      </>
+    );
+  };
+
+  if (page === 'create') {
+    return (
+      <>
+        <SQSApiDocsPanel />
+        <CreateSQSView onBack={backToList} onDone={handleCreateDone} notify={notify} />
+      </>
+    );
+  }
+
+  return (
+    <>
+      <SQSApiDocsPanel />
+      <div className="panel">
+        <div className="vpc-page-head">
+          <div className="bc" style={{marginBottom:8}}>
+            <span>Amazon SQS</span><span className="bc-sep">›</span><span>Queues</span>
+          </div>
+          <div className="vpc-page-title">Queues</div>
+          <div className="vpc-page-sub">Create, inspect, and manage standard and FIFO queues using an AWS-style list and separate detail view.</div>
+        </div>
+
+        <div className="vpc-vpcs-toolbar">
+          <div className="vpc-vpcs-toolbar-left">
+            <input
+              className="fi vpc-search"
+              value={search}
+              onChange={e => setSearch(e.target.value)}
+              placeholder="Find queues by attribute or tag"
+            />
+            <div className="vpc-summary">
+              <div className="vpc-summary-count">Your queues ({visibleCount}/{queueCount})</div>
+              <a className="vpc-summary-info" href="#" onClick={e => e.preventDefault()}>Info</a>
+              <div className="vpc-summary-updated">Last updated {relativeTime(selectedQueue?.last_modified || queues[0]?.last_modified || new Date().toISOString())}</div>
+            </div>
+          </div>
+          <div className="vpc-vpcs-toolbar-right">
+              <button type="button" className="btn btn-s" onClick={() => { setActionsOpen(false); loadList(); }}>↻</button>
+              <div className="vpc-actions-wrap" ref={actionsRef}>
+              <button type="button" className="btn btn-s" onClick={(e) => { e.stopPropagation(); setActionsOpen(v => !v); }}>Actions ▾</button>
+              {actionsOpen && (
+                <div className="vpc-actions-menu">
+                  <button type="button" className="vpc-actions-item" onClick={() => { setActionsOpen(false); loadList(); }}>Refresh</button>
+                  <button type="button" className="vpc-actions-item" onClick={openCreate}>Create queue</button>
+                  <button type="button" className="vpc-actions-item" onClick={openDelete} disabled={!selectedQueue}>Delete selected queue</button>
+                </div>
+              )}
+            </div>
+            <button type="button" className="btn btn-p" onClick={openCreate}>Create queue</button>
+          </div>
+        </div>
+
+        <div className="sqs-grid-wrap">
+          {loading && !queues.length ? (
+            <div className="ld">Loading queues…</div>
+          ) : filteredQueues.length ? (
+            <table className="tbl vpc-grid sqs-grid">
+              <colgroup>
+                <col style={{width:'4%'}} />
+                <col style={{width:'13%'}} />
+                <col style={{width:'35%'}} />
+                <col style={{width:'10%'}} />
+                <col style={{width:'7%'}} />
+                <col style={{width:'7%'}} />
+                <col style={{width:'24%'}} />
+              </colgroup>
+              <thead>
+                <tr>
+                  <th style={{width:'4%'}}><input type="checkbox" disabled aria-label="Select all queues" /></th>
+                  <th style={{width:'13%'}}>Name</th>
+                  <th style={{width:'35%'}}>Queue URL</th>
+                  <th style={{width:'10%'}}>Type</th>
+                  <th style={{width:'7%'}}>Visible</th>
+                  <th style={{width:'7%'}}>In flight</th>
+                  <th style={{width:'24%'}}>Created</th>
+                </tr>
+              </thead>
+              <tbody>
+                {filteredQueues.map(queue => (
+                  <tr key={queue.queue_name} className={selectedQueueName === queue.queue_name ? 'active' : ''} onClick={() => handleSelect(queue.queue_name)}>
+                    <td style={{width:'4%'}}><input type="checkbox" checked={selectedQueueName === queue.queue_name} onChange={() => handleSelect(queue.queue_name)} /></td>
+                    <td title={queue.queue_name} style={{width:'13%'}}><span className="vpc-grid-name">{queue.queue_name}</span></td>
+                    <td title={queue.queue_url} style={{width:'35%'}}><span className="ec2-mono">{queue.queue_url}</span></td>
+                    <td style={{width:'10%'}}><span className={`tag ${queue.queue_type === 'fifo' ? 'tgr' : 'tg'}`}>{queue.queue_type === 'fifo' ? 'FIFO' : 'Standard'}</span></td>
+                    <td style={{width:'7%'}}>{queue.visible_message_count ?? 0}</td>
+                    <td style={{width:'7%'}}>{queue.in_flight_count ?? 0}</td>
+                    <td style={{width:'24%'}}>{fmtDate(queue.created)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          ) : (
+            <div className="empty">
+              <div className="empty-t">{search ? 'No matching queues' : 'No queues yet'}</div>
+              <div className="empty-d">{search ? 'Try a different search term.' : 'Create a queue to get started.'}</div>
+            </div>
+          )}
+        </div>
+
+        <div className="vpc-detail-wrap">
+          <div className="vpc-detail-panel">
+            {selectedQueue ? (
+              <>
+                <div className="vpc-detail-banner">
+                  <div className="vpc-detail-name">{selectedQueue.queue_name}</div>
+                  <div className="vpc-detail-meta">{selectedQueue.queue_arn} · {selectedQueue.queue_type === 'fifo' ? 'FIFO' : 'Standard'} · {selectedQueue.queue_url}</div>
+                </div>
+                <div className="vpc-detail-tabs">
+                  <div className="tabs ec2-subtabs">
+                    {[
+                      ['overview', 'Overview'],
+                      ['messages', 'Messages'],
+                      ['attributes', 'Attributes'],
+                      ['tags', 'Tags'],
+                    ].map(([key, label]) => (
+                      <div key={key} className={`tab ${detailTab === key ? 'active' : ''}`} onClick={() => setDetailTab(key)}>{label}</div>
+                    ))}
+                  </div>
+                </div>
+                <div className="vpc-detail-body">
+                  {detailTab === 'overview' ? renderOverview()
+                    : detailTab === 'messages' ? renderMessages()
+                    : detailTab === 'attributes' ? renderAttributes()
+                    : renderTags()}
+                </div>
+              </>
+            ) : (
+              <div className="vpc-detail-body">
+                <div className="vpc-detail-empty">Select a queue from the grid to show the separate details view.</div>
+              </div>
+            )}
+          </div>
+        </div>
+
+        {deleteTarget && (
+          <ConfirmDelete
+            title="Delete queue"
+            lines={[
+              `You are about to delete queue "${deleteTarget.queue_name}".`,
+              'The simulator will remove the queue and all messages in it.',
+            ]}
+            onConfirm={deleteQueue}
+            onClose={() => setDeleteTarget(null)}
+            busy={deleteBusy}
+          />
+        )}
+      </div>
+    </>
+  );
+}
+
 function APIGatewayApiDocsPanel() {
   const [showApiDocs, setShowApiDocs] = useState(false);
   const [docAction, setDocAction] = useState('CreateRestApi');
@@ -5124,31 +6687,33 @@ function APIGatewayView({notify}) {
           <div className="vpc-detail-section-title">Resources</div>
           <div className="vpc-detail-note">Select a resource row to use it as the parent for the next route.</div>
           {resourceRows.length ? (
-            <table className="tbl vpc-grid">
-              <thead>
-                <tr>
-                  <th><input type="checkbox" disabled aria-label="Select all resources" /></th>
-                  <th>Path</th>
-                  <th>Resource ID</th>
-                  <th>Parent</th>
-                  <th>Methods</th>
-                </tr>
-              </thead>
-              <tbody>
-                {resourceRows.map(resource => {
-                  const methods = routeRows.filter(r => r.resource_id === resource.resource_id).map(r => r.http_method).join(', ') || '—';
-                  return (
-                    <tr key={resource.resource_id} className={selectedResourceId === resource.resource_id ? 'active' : ''} onClick={() => { setSelectedResourceId(resource.resource_id); setRouteForm(f => ({...f, parent_id: resource.resource_id})); }}>
-                      <td><input type="checkbox" checked={selectedResourceId === resource.resource_id} onChange={() => { setSelectedResourceId(resource.resource_id); setRouteForm(f => ({...f, parent_id: resource.resource_id})); }} /></td>
-                      <td className="ec2-mono">{resource.path || '/'}</td>
-                      <td className="ec2-mono">{resource.resource_id}</td>
-                      <td className="ec2-mono">{resource.parent_id || '—'}</td>
-                      <td>{methods}</td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
+            <div className="apigw-resource-scroll">
+              <table className="tbl vpc-grid">
+                <thead>
+                  <tr>
+                    <th><input type="checkbox" disabled aria-label="Select all resources" /></th>
+                    <th>Path</th>
+                    <th>Resource ID</th>
+                    <th>Parent</th>
+                    <th>Methods</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {resourceRows.map(resource => {
+                    const methods = routeRows.filter(r => r.resource_id === resource.resource_id).map(r => r.http_method).join(', ') || '—';
+                    return (
+                      <tr key={resource.resource_id} className={selectedResourceId === resource.resource_id ? 'active' : ''} onClick={() => { setSelectedResourceId(resource.resource_id); setRouteForm(f => ({...f, parent_id: resource.resource_id})); }}>
+                        <td><input type="checkbox" checked={selectedResourceId === resource.resource_id} onChange={() => { setSelectedResourceId(resource.resource_id); setRouteForm(f => ({...f, parent_id: resource.resource_id})); }} /></td>
+                        <td className="ec2-mono">{resource.path || '/'}</td>
+                        <td className="ec2-mono">{resource.resource_id}</td>
+                        <td className="ec2-mono">{resource.parent_id || '—'}</td>
+                        <td>{methods}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
           ) : <div className="vpc-empty-table">No resources yet.</div>}
         </div>
         <div className="vpc-detail-section">
@@ -5401,7 +6966,7 @@ function APIGatewayView({notify}) {
           </div>
         </div>
 
-        <div className="vpc-grid-wrap">
+        <div className="vpc-grid-wrap apigw-list-scroll">
           {loading && !apis.length ? (
             <div className="ld">Loading APIs…</div>
           ) : filteredApis.length ? (
@@ -5484,6 +7049,968 @@ function APIGatewayView({notify}) {
             lines={[
               `You are about to delete API "${deleteTarget.name}".`,
               'The simulator will remove the API, routes, stages, and deployments.',
+            ]}
+            onConfirm={doDelete}
+            onClose={() => setDeleteTarget(null)}
+            busy={deleteBusy}
+          />
+        )}
+      </div>
+    </>
+  );
+}
+
+function LambdaApiDocsPanel() {
+  const [showApiDocs, setShowApiDocs] = useState(false);
+  const [docAction, setDocAction] = useState('CreateFunction');
+  const docs = useMemo(() => ([
+    {
+      action: 'CreateFunction',
+      request: `POST /api/lambda/functions
+{
+  "function_name": "hello-lambda",
+  "runtime": "python3.12",
+  "handler": "lambda_function.lambda_handler",
+  "description": "Hello world function",
+  "role": "arn:aws:iam::123456789012:role/service-role/cloudlearn-lambda-basic-execution",
+  "timeout": 3,
+  "memory_size": 128,
+  "code": "def lambda_handler(event, context):\\n    return {\\"message\\": \\"hello\\", \\"event\\": event}\\n"
+}`,
+      response: `{
+  "function_name": "hello-lambda",
+  "function_arn": "arn:aws:lambda:us-east-1:123456789012:function:hello-lambda",
+  "runtime": "python3.12",
+  "handler": "lambda_function.lambda_handler",
+  "state": "Active"
+}`,
+      summary: 'Creates a Lambda function with inline Python code and basic execution settings.',
+    },
+    {
+      action: 'ListFunctions',
+      request: `GET /api/lambda/functions`,
+      response: `{
+  "count": 1,
+  "functions": [
+    {
+      "function_name": "hello-lambda",
+      "runtime": "python3.12",
+      "handler": "lambda_function.lambda_handler",
+      "invocation_count": 0
+    }
+  ]
+}`,
+      summary: 'Lists Lambda functions in the simulator control plane.',
+    },
+    {
+      action: 'UpdateFunctionCode',
+      request: `PUT /api/lambda/functions/hello-lambda/code
+{
+  "code": "def lambda_handler(event, context):\\n    return {\\"message\\": \\"updated\\"}\\n"
+}`,
+      response: `{
+  "function_name": "hello-lambda",
+  "last_modified": "2026-05-19T12:00:00.000Z"
+}`,
+      summary: 'Replaces the inline code for an existing function.',
+    },
+    {
+      action: 'UpdateFunctionConfiguration',
+      request: `PUT /api/lambda/functions/hello-lambda/configuration
+{
+  "timeout": 5,
+  "memory_size": 256,
+  "description": "Updated description"
+}`,
+      response: `{
+  "function_name": "hello-lambda",
+  "timeout": 5,
+  "memory_size": 256
+}`,
+      summary: 'Updates runtime settings, handler, role, and memory/timeout values.',
+    },
+    {
+      action: 'Invoke',
+      request: `POST /api/lambda/functions/hello-lambda/invoke
+{
+  "invocation_type": "RequestResponse",
+  "payload": {
+    "message": "hello"
+  }
+}`,
+      response: `{
+  "status": "success",
+  "payload": {
+    "message": "Hello from Lambda"
+  }
+}`,
+      summary: 'Invokes the function synchronously from the simulator UI or Postman.',
+    },
+    {
+      action: 'PublishVersion',
+      request: `POST /api/lambda/functions/hello-lambda/versions
+{
+  "description": "Release 1"
+}`,
+      response: `{
+  "version": {
+    "version": "1",
+    "state": "Active"
+  }
+}`,
+      summary: 'Publishes the current $LATEST code as a numbered version.',
+    },
+    {
+      action: 'GetPolicy',
+      request: `GET /api/lambda/functions/hello-lambda/policy`,
+      response: `{
+  "RevisionId": "r-abc123",
+  "Policy": "{\\"Version\\":\\"2012-10-17\\",\\"Statement\\":[...]}"
+}`,
+      summary: 'Returns the resource-based policy attached to the function.',
+    },
+    {
+      action: 'AddPermission',
+      request: `POST /api/lambda/functions/hello-lambda/policy
+{
+  "statement_id": "AllowS3Invoke",
+  "action": "lambda:InvokeFunction",
+  "principal": "s3.amazonaws.com",
+  "source_arn": "arn:aws:s3:::my-bucket",
+  "source_account": "123456789012"
+}`,
+      response: `{
+  "statement": {
+    "statement_id": "AllowS3Invoke",
+    "principal": "s3.amazonaws.com",
+    "source_arn": "arn:aws:s3:::my-bucket"
+  },
+  "RevisionId": "r-def456"
+}`,
+      summary: 'Allows a service such as S3 to invoke the function through a resource policy.',
+    },
+    {
+      action: 'RemovePermission',
+      request: `DELETE /api/lambda/functions/hello-lambda/policy/AllowS3Invoke`,
+      response: `{
+  "deleted": true
+}`,
+      summary: 'Removes a single statement from the function policy.',
+    },
+  ]), []);
+  const selected = docs.find(d => d.action === docAction) || docs[0];
+
+  return (
+    <>
+      {!showApiDocs && (
+        <button className="vpc-doc-toggle" onClick={() => setShowApiDocs(true)}>
+          <span className="vpc-doc-toggle-label">API Documentation</span>
+        </button>
+      )}
+      {showApiDocs && (
+        <aside className="vpc-doc-drawer" aria-label="Amazon Lambda API Reference">
+          <div className="vpc-doc-drawer-head">
+            <div style={{minWidth:0,flex:1}}>
+              <div className="vpc-doc-drawer-title">Amazon Lambda API Reference</div>
+              <div className="vpc-doc-drawer-sub">Create functions, update code, invoke test events, and publish versions from the same simulator control plane.</div>
+            </div>
+            <button className="vpc-doc-drawer-close" onClick={() => setShowApiDocs(false)}>Close</button>
+          </div>
+          <div className="vpc-doc-drawer-body">
+            <div className="ec2-docs-note" style={{marginBottom:12}}>Select one Lambda request/response pair at a time.</div>
+            <div className="ec2-docs-contents" style={{marginTop:0}}>
+              <h3>Contents</h3>
+              <div className="ec2-docs-links">
+                {docs.map(d => (
+                  <button key={d.action} className="ec2-docs-link" type="button" onClick={() => setDocAction(d.action)} style={{background:'none',border:'none',padding:0}}>
+                    {d.action}
+                  </button>
+                ))}
+              </div>
+            </div>
+            <div className="ec2-docs-section" style={{borderTop:'none',paddingTop:0,marginTop:16}}>
+              <h3>Request and response</h3>
+              <div className="ec2-docs-note">{selected.summary}</div>
+              <select className="ec2-doc-select" value={docAction} onChange={e => setDocAction(e.target.value)}>
+                {docs.map(d => <option key={d.action} value={d.action}>{d.action}</option>)}
+              </select>
+              <div className="ec2-docs-request">
+                <div className="ec2-docs-block">
+                  <div className="ec2-docs-block-title">Request</div>
+                  <pre className="ec2-docs-code">{selected.request}</pre>
+                </div>
+                <div className="ec2-docs-block">
+                  <div className="ec2-docs-block-title">Response</div>
+                  <pre className="ec2-docs-code">{selected.response}</pre>
+                </div>
+              </div>
+            </div>
+          </div>
+        </aside>
+      )}
+    </>
+  );
+}
+
+function CreateLambdaView({onBack, onDone, notify}) {
+  const [functionName, setFunctionName] = useState('hello-lambda');
+  const [runtime, setRuntime] = useState('python3.12');
+  const [handler, setHandler] = useState('lambda_function.lambda_handler');
+  const [description, setDescription] = useState('Hello world Lambda');
+  const [role, setRole] = useState('arn:aws:iam::123456789012:role/service-role/cloudlearn-lambda-basic-execution');
+  const [timeout, setTimeoutVal] = useState(3);
+  const [memorySize, setMemorySize] = useState(128);
+  const [code, setCode] = useState(lambdaDefaultCode('hello-lambda'));
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState('');
+
+  const submit = async () => {
+    if (!functionName.trim()) {
+      setErr('Function name is required');
+      return;
+    }
+    if (!code.trim()) {
+      setErr('Inline code is required');
+      return;
+    }
+    setBusy(true);
+    setErr('');
+    try {
+      const created = await Lambda.create({
+        function_name: functionName.trim(),
+        runtime,
+        handler,
+        role,
+        description,
+        timeout: Number(timeout) || 3,
+        memory_size: Number(memorySize) || 128,
+        code,
+        environment: {},
+      });
+      onDone(created);
+    } catch (e) {
+      setErr(e.message);
+      notify(e.message, 'error');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="panel">
+      <div className="vpc-page-head">
+        <div className="bc" style={{marginBottom:8}}>
+          <span>Lambda</span><span className="bc-sep">›</span><a onClick={onBack}>Functions</a><span className="bc-sep">›</span><span>Create function</span>
+        </div>
+        <div className="vpc-page-title">Create function</div>
+        <div className="vpc-page-sub">Create a lightweight Lambda function with inline code, then invoke it or attach S3 notifications to it.</div>
+      </div>
+      <div className="vpc-create-wrap">
+        <div className="vpc-create-card">
+          <div className="vpc-create-section">
+            <div className="vpc-detail-section-title">Function settings</div>
+            <div className="vpc-kv-grid">
+              <div className="fg">
+                <label className="fl">Function name</label>
+                <input className="fi" value={functionName} onChange={e => setFunctionName(e.target.value)} placeholder="hello-lambda" />
+              </div>
+              <div className="fg">
+                <label className="fl">Runtime</label>
+                <select className="fi" value={runtime} onChange={e => setRuntime(e.target.value)}>
+                  <option value="python3.12">Python 3.12</option>
+                  <option value="python3.11">Python 3.11</option>
+                </select>
+              </div>
+              <div className="fg">
+                <label className="fl">Handler</label>
+                <input className="fi" value={handler} onChange={e => setHandler(e.target.value)} placeholder="lambda_function.lambda_handler" />
+              </div>
+              <div className="fg">
+                <label className="fl">Execution role</label>
+                <input className="fi" value={role} onChange={e => setRole(e.target.value)} />
+              </div>
+              <div className="fg">
+                <label className="fl">Timeout (seconds)</label>
+                <input className="fi" type="number" min="1" value={timeout} onChange={e => setTimeoutVal(e.target.value)} />
+              </div>
+              <div className="fg">
+                <label className="fl">Memory size (MB)</label>
+                <input className="fi" type="number" min="128" step="64" value={memorySize} onChange={e => setMemorySize(e.target.value)} />
+              </div>
+              <div className="fg" style={{gridColumn:'1 / -1'}}>
+                <label className="fl">Description</label>
+                <input className="fi" value={description} onChange={e => setDescription(e.target.value)} />
+              </div>
+            </div>
+          </div>
+          <div className="vpc-create-section">
+            <div className="vpc-detail-section-title">Function code</div>
+            <div className="vpc-detail-note">The simulator stores inline Python code and executes it in a separate subprocess.</div>
+            <textarea
+              className="fi ec2-mono"
+              style={{minHeight:280,fontFamily:'Consolas, "Courier New", monospace'}}
+              value={code}
+              onChange={e => setCode(e.target.value)}
+            />
+          </div>
+          {err && <div className="ferr" style={{marginTop:8}}>{err}</div>}
+          <div className="vpc-create-footer">
+            <button className="btn btn-s" onClick={onBack} disabled={busy}>Cancel</button>
+            <button className="btn btn-p" onClick={submit} disabled={busy}>{busy ? '⏳ Creating…' : 'Create function'}</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function LambdaView({notify}) {
+  const [functions, setFunctions] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [selectedFunctionName, setSelectedFunctionName] = useState('');
+  const [selectedFunction, setSelectedFunction] = useState(null);
+  const [query, setQuery] = useState('');
+  const [detailTab, setDetailTab] = useState('overview');
+  const [showCreate, setShowCreate] = useState(false);
+  const [actionsOpen, setActionsOpen] = useState(false);
+  const [deleteTarget, setDeleteTarget] = useState(null);
+  const [deleteBusy, setDeleteBusy] = useState(false);
+  const [codeDraft, setCodeDraft] = useState('');
+  const [configDraft, setConfigDraft] = useState({
+    runtime: 'python3.12',
+    handler: 'lambda_function.lambda_handler',
+    role: 'arn:aws:iam::123456789012:role/service-role/cloudlearn-lambda-basic-execution',
+    description: '',
+    timeout: 3,
+    memory_size: 128,
+  });
+  const [testPayload, setTestPayload] = useState(JSON.stringify({message: 'hello from Lambda'}, null, 2));
+  const [invokeType, setInvokeType] = useState('RequestResponse');
+  const [invokeBusy, setInvokeBusy] = useState(false);
+  const [invokeResult, setInvokeResult] = useState(null);
+  const [publishDescription, setPublishDescription] = useState('');
+  const [permissionDraft, setPermissionDraft] = useState({
+    statement_id: 'AllowS3Invoke',
+    action: 'lambda:InvokeFunction',
+    principal: 's3.amazonaws.com',
+    source_arn: 'arn:aws:s3:::my-bucket',
+    source_account: '123456789012',
+  });
+  const actionsRef = useRef(null);
+
+  const loadList = useCallback(async () => {
+    setLoading(true);
+    try {
+      const d = await Lambda.list();
+      setFunctions(d.functions || []);
+    } catch (e) {
+      notify(e.message, 'error');
+    } finally {
+      setLoading(false);
+    }
+  }, [notify]);
+
+  const loadDetail = useCallback(async (name) => {
+    if (!name) {
+      setSelectedFunction(null);
+      return;
+    }
+    try {
+      const d = await Lambda.get(name);
+      setSelectedFunction(d);
+    } catch (e) {
+      notify(e.message, 'error');
+    }
+  }, [notify]);
+
+  useEffect(() => { loadList(); }, [loadList]);
+  useEffect(() => { loadDetail(selectedFunctionName); }, [selectedFunctionName, loadDetail]);
+  useEffect(() => {
+    if (!selectedFunction) return;
+    setCodeDraft(selectedFunction.code || lambdaDefaultCode(selectedFunction.function_name));
+    setConfigDraft({
+      runtime: selectedFunction.runtime || 'python3.12',
+      handler: selectedFunction.handler || 'lambda_function.lambda_handler',
+      role: selectedFunction.role || 'arn:aws:iam::123456789012:role/service-role/cloudlearn-lambda-basic-execution',
+      description: selectedFunction.description || '',
+      timeout: selectedFunction.timeout || 3,
+      memory_size: selectedFunction.memory_size || 128,
+    });
+    setPublishDescription('');
+    setInvokeResult(null);
+    setPermissionDraft(f => ({
+      ...f,
+      statement_id: 'AllowS3Invoke',
+      action: 'lambda:InvokeFunction',
+      principal: 's3.amazonaws.com',
+      source_arn: 'arn:aws:s3:::my-bucket',
+      source_account: '123456789012',
+    }));
+  }, [selectedFunction]);
+  useEffect(() => {
+    if (!actionsOpen) return;
+    const onPointerDown = (event) => {
+      if (actionsRef.current && !actionsRef.current.contains(event.target)) {
+        setActionsOpen(false);
+      }
+    };
+    document.addEventListener('pointerdown', onPointerDown);
+    return () => document.removeEventListener('pointerdown', onPointerDown);
+  }, [actionsOpen]);
+
+  const filteredFunctions = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return functions;
+    return functions.filter(fn => [fn.function_name, fn.runtime, fn.handler, fn.description, fn.state].join(' ').toLowerCase().includes(q));
+  }, [functions, query]);
+
+  const handleSelect = (name) => {
+    setActionsOpen(false);
+    setSelectedFunctionName(name);
+    setDetailTab('overview');
+  };
+
+  const openCreate = () => {
+    setShowCreate(true);
+    setActionsOpen(false);
+  };
+
+  const handleCreateDone = (created) => {
+    setShowCreate(false);
+    notify(`Function "${created?.function_name || 'function'}" created`, 'success');
+    if (created?.function_name) {
+      setSelectedFunctionName(created.function_name);
+      loadList();
+    }
+  };
+
+  const doDelete = async () => {
+    if (!deleteTarget) return;
+    setDeleteBusy(true);
+    try {
+      await Lambda.remove(deleteTarget.function_name);
+      notify(`Function "${deleteTarget.function_name}" deleted`, 'success');
+      setDeleteTarget(null);
+      setSelectedFunctionName('');
+      setSelectedFunction(null);
+      loadList();
+    } catch (e) {
+      notify(e.message, 'error');
+    } finally {
+      setDeleteBusy(false);
+    }
+  };
+
+  const saveCode = async () => {
+    if (!selectedFunction) return;
+    try {
+      await Lambda.updateCode(selectedFunction.function_name, {code: codeDraft});
+      notify('Function code updated', 'success');
+      await loadDetail(selectedFunction.function_name);
+      loadList();
+    } catch (e) {
+      notify(e.message, 'error');
+    }
+  };
+
+  const saveConfig = async () => {
+    if (!selectedFunction) return;
+    try {
+      await Lambda.updateConfig(selectedFunction.function_name, {
+        ...configDraft,
+        timeout: Number(configDraft.timeout) || 3,
+        memory_size: Number(configDraft.memory_size) || 128,
+      });
+      notify('Function configuration updated', 'success');
+      await loadDetail(selectedFunction.function_name);
+      loadList();
+    } catch (e) {
+      notify(e.message, 'error');
+    }
+  };
+
+  const runInvoke = async () => {
+    if (!selectedFunction) return;
+    setInvokeBusy(true);
+    try {
+      let parsed;
+      try {
+        parsed = testPayload.trim() ? JSON.parse(testPayload) : {};
+      } catch {
+        throw new Error('Event payload must be valid JSON');
+      }
+      const res = await Lambda.invoke(selectedFunction.function_name, {
+        invocation_type: invokeType,
+        payload: parsed,
+      });
+      setInvokeResult(res);
+      notify(invokeType === 'Event' ? 'Invocation queued' : 'Function invoked', 'success');
+      await loadDetail(selectedFunction.function_name);
+      loadList();
+    } catch (e) {
+      notify(e.message, 'error');
+    } finally {
+      setInvokeBusy(false);
+    }
+  };
+
+  const publishVersion = async () => {
+    if (!selectedFunction) return;
+    try {
+      const res = await Lambda.publishVersion(selectedFunction.function_name, {description: publishDescription});
+      notify(`Version ${res?.version?.version || 'published'} created`, 'success');
+      await loadDetail(selectedFunction.function_name);
+      loadList();
+    } catch (e) {
+      notify(e.message, 'error');
+    }
+  };
+
+  const addPermission = async () => {
+    if (!selectedFunction) return;
+    try {
+      const payload = {
+        statement_id: (permissionDraft.statement_id || '').trim(),
+        action: (permissionDraft.action || 'lambda:InvokeFunction').trim() || 'lambda:InvokeFunction',
+        principal: (permissionDraft.principal || '').trim(),
+        source_arn: (permissionDraft.source_arn || '').trim(),
+        source_account: (permissionDraft.source_account || '').trim(),
+      };
+      if (!payload.principal) {
+        throw new Error('Principal is required');
+      }
+      await Lambda.addPermission(selectedFunction.function_name, payload);
+      notify('Permission added', 'success');
+      await loadDetail(selectedFunction.function_name);
+      loadList();
+    } catch (e) {
+      notify(e.message, 'error');
+    }
+  };
+
+  const removePermission = async (statementId) => {
+    if (!selectedFunction || !statementId) return;
+    try {
+      await Lambda.removePermission(selectedFunction.function_name, statementId);
+      notify('Permission removed', 'success');
+      await loadDetail(selectedFunction.function_name);
+      loadList();
+    } catch (e) {
+      notify(e.message, 'error');
+    }
+  };
+
+  const selectedTriggers = selectedFunction?.triggers || [];
+  const selectedVersions = selectedFunction?.versions || [];
+  const selectedInvocations = selectedFunction?.invocations || [];
+  const selectedPermissions = selectedFunction?.permissions || [];
+  const visibleCount = filteredFunctions.length;
+  const totalCount = functions.length;
+
+  const renderOverview = () => {
+    if (!selectedFunction) return <div className="vpc-detail-empty">Select a function from the grid to show the separate details view.</div>;
+    return (
+      <>
+        <div className="vpc-detail-section">
+          <div className="vpc-detail-section-title">Function summary</div>
+          <div className="vpc-kpi-grid">
+            <div className="vpc-kpi"><strong>{selectedFunction.state || 'Active'}</strong><span>Status</span></div>
+            <div className="vpc-kpi"><strong>{selectedFunction.runtime || 'python3.12'}</strong><span>Runtime</span></div>
+            <div className="vpc-kpi"><strong>{selectedFunction.timeout || 3}s</strong><span>Timeout</span></div>
+            <div className="vpc-kpi"><strong>{selectedFunction.memory_size || 128} MB</strong><span>Memory</span></div>
+            <div className="vpc-kpi"><strong>{selectedFunction.policy_statement_count || 0}</strong><span>Policy statements</span></div>
+          </div>
+        </div>
+        <div className="vpc-detail-section">
+          <div className="vpc-detail-section-title">Configuration</div>
+          <table className="vpc-simple-table">
+            <thead><tr><th>Field</th><th>Value</th></tr></thead>
+            <tbody>
+              <tr><td>Function ARN</td><td className="ec2-mono">{selectedFunction.function_arn}</td></tr>
+              <tr><td>Handler</td><td className="ec2-mono">{selectedFunction.handler}</td></tr>
+              <tr><td>Execution role</td><td className="ec2-mono">{selectedFunction.role || '—'}</td></tr>
+              <tr><td>Description</td><td>{selectedFunction.description || '—'}</td></tr>
+              <tr><td>Created</td><td>{fmtDate(selectedFunction.created)}</td></tr>
+              <tr><td>Last modified</td><td>{fmtDate(selectedFunction.last_modified)}</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div className="vpc-detail-section">
+          <div className="vpc-detail-section-title">Invocation history</div>
+          {selectedInvocations.length ? (
+            <table className="vpc-simple-table">
+              <thead><tr><th>Time</th><th>Type</th><th>Status</th><th>Source</th><th>Result</th></tr></thead>
+              <tbody>
+                {selectedInvocations.slice(0, 10).map(item => (
+                  <tr key={item.id}>
+                    <td>{fmtDate(item.at)}</td>
+                    <td>{item.invocation_type}</td>
+                    <td><span className={`tag ${item.status === 'success' ? 'tg' : item.status === 'accepted' ? 'ty' : 'tgr'}`}>{item.status}</span></td>
+                    <td>{item.source || '—'}</td>
+                    <td className="ec2-mono">{item.response_payload ? JSON.stringify(item.response_payload) : '—'}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          ) : <div className="vpc-empty-table">No invocations yet.</div>}
+        </div>
+      </>
+    );
+  };
+
+  const renderCode = () => {
+    if (!selectedFunction) return <div className="vpc-detail-empty">Select a function from the grid to edit code.</div>;
+    return (
+      <div className="vpc-detail-section">
+        <div className="vpc-detail-section-title">Inline code</div>
+        <div className="vpc-detail-note">The simulator keeps Python code inline and runs it in an isolated subprocess.</div>
+        <textarea
+          className="fi ec2-mono"
+          style={{minHeight:360,fontFamily:'Consolas, "Courier New", monospace'}}
+          value={codeDraft}
+          onChange={e => setCodeDraft(e.target.value)}
+        />
+        <div className="btn-grp" style={{marginTop:10}}>
+          <button className="btn btn-p" onClick={saveCode}>Save code</button>
+        </div>
+      </div>
+    );
+  };
+
+  const renderConfiguration = () => {
+    if (!selectedFunction) return <div className="vpc-detail-empty">Select a function from the grid to edit configuration.</div>;
+    return (
+      <>
+        <div className="vpc-detail-section">
+          <div className="vpc-detail-section-title">Function configuration</div>
+          <div className="vpc-kv-grid">
+            <div className="fg">
+              <label className="fl">Runtime</label>
+              <select className="fi" value={configDraft.runtime} onChange={e => setConfigDraft(f => ({...f, runtime: e.target.value}))}>
+                <option value="python3.12">Python 3.12</option>
+                <option value="python3.11">Python 3.11</option>
+              </select>
+            </div>
+            <div className="fg">
+              <label className="fl">Handler</label>
+              <input className="fi" value={configDraft.handler} onChange={e => setConfigDraft(f => ({...f, handler: e.target.value}))} />
+            </div>
+            <div className="fg">
+              <label className="fl">Execution role</label>
+              <input className="fi" value={configDraft.role} onChange={e => setConfigDraft(f => ({...f, role: e.target.value}))} />
+            </div>
+            <div className="fg">
+              <label className="fl">Timeout (seconds)</label>
+              <input className="fi" type="number" min="1" value={configDraft.timeout} onChange={e => setConfigDraft(f => ({...f, timeout: e.target.value}))} />
+            </div>
+            <div className="fg">
+              <label className="fl">Memory size (MB)</label>
+              <input className="fi" type="number" min="128" step="64" value={configDraft.memory_size} onChange={e => setConfigDraft(f => ({...f, memory_size: e.target.value}))} />
+            </div>
+            <div className="fg" style={{gridColumn:'1 / -1'}}>
+              <label className="fl">Description</label>
+              <input className="fi" value={configDraft.description} onChange={e => setConfigDraft(f => ({...f, description: e.target.value}))} />
+            </div>
+          </div>
+          <div className="btn-grp" style={{marginTop:10}}>
+            <button className="btn btn-p" onClick={saveConfig}>Save configuration</button>
+          </div>
+        </div>
+        <div className="vpc-detail-section">
+          <div className="vpc-detail-section-title">Resource policy</div>
+          <div className="vpc-detail-note">S3 event notifications can invoke this function only when a matching permission statement exists.</div>
+          <div className="vpc-kv-grid" style={{marginBottom:12}}>
+            <div className="fg">
+              <label className="fl">Statement ID</label>
+              <input className="fi" value={permissionDraft.statement_id} onChange={e => setPermissionDraft(f => ({...f, statement_id: e.target.value}))} placeholder="AllowS3Invoke" />
+            </div>
+            <div className="fg">
+              <label className="fl">Action</label>
+              <input className="fi ec2-mono" value={permissionDraft.action} onChange={e => setPermissionDraft(f => ({...f, action: e.target.value}))} placeholder="lambda:InvokeFunction" />
+            </div>
+            <div className="fg">
+              <label className="fl">Principal</label>
+              <input className="fi" value={permissionDraft.principal} onChange={e => setPermissionDraft(f => ({...f, principal: e.target.value}))} placeholder="s3.amazonaws.com" />
+            </div>
+            <div className="fg">
+              <label className="fl">Source ARN</label>
+              <input className="fi ec2-mono" value={permissionDraft.source_arn} onChange={e => setPermissionDraft(f => ({...f, source_arn: e.target.value}))} placeholder="arn:aws:s3:::my-bucket" />
+            </div>
+            <div className="fg" style={{gridColumn:'1 / -1'}}>
+              <label className="fl">Source account</label>
+              <input className="fi ec2-mono" value={permissionDraft.source_account} onChange={e => setPermissionDraft(f => ({...f, source_account: e.target.value}))} placeholder="123456789012" />
+            </div>
+          </div>
+          <div className="btn-grp" style={{marginBottom:14}}>
+            <button className="btn btn-p" onClick={addPermission}>Add permission</button>
+          </div>
+          {selectedPermissions.length ? (
+            <table className="vpc-simple-table">
+              <thead><tr><th>Statement ID</th><th>Principal</th><th>Action</th><th>Source ARN</th><th>Source Account</th><th></th></tr></thead>
+              <tbody>
+                {selectedPermissions.map(permission => (
+                  <tr key={permission.statement_id}>
+                    <td className="ec2-mono">{permission.statement_id}</td>
+                    <td>{permission.principal || '—'}</td>
+                    <td className="ec2-mono">{permission.action || 'lambda:InvokeFunction'}</td>
+                    <td className="ec2-mono">{permission.source_arn || '—'}</td>
+                    <td className="ec2-mono">{permission.source_account || '—'}</td>
+                    <td style={{textAlign:'right'}}>
+                      <button className="btn-lnk red" type="button" onClick={() => removePermission(permission.statement_id)}>Remove</button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          ) : <div className="vpc-empty-table">No invoke permissions are configured yet.</div>}
+        </div>
+      </>
+    );
+  };
+
+  const renderTriggers = () => {
+    if (!selectedFunction) return <div className="vpc-detail-empty">Select a function from the grid to see triggers.</div>;
+    return (
+      <div className="vpc-detail-section">
+        <div className="vpc-detail-section-title">Triggers</div>
+        <div className="vpc-detail-note">S3 bucket notifications that target this function appear here. Add a matching resource policy before expecting delivery.</div>
+        {selectedTriggers.length ? (
+          <table className="vpc-simple-table">
+            <thead><tr><th>Source</th><th>Bucket</th><th>Events</th><th>Filters</th><th>Target</th></tr></thead>
+            <tbody>
+              {selectedTriggers.map((trigger, idx) => (
+                <tr key={`${trigger.bucket}-${idx}`}>
+                  <td>{trigger.source}</td>
+                  <td>{trigger.bucket}</td>
+                  <td>{(trigger.event_types || []).join(', ') || '—'}</td>
+                  <td className="ec2-mono">{[trigger.prefix ? `prefix=${trigger.prefix}` : '', trigger.suffix ? `suffix=${trigger.suffix}` : ''].filter(Boolean).join(' · ') || '—'}</td>
+                  <td className="ec2-mono">{trigger.destination || '—'}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        ) : <div className="vpc-empty-table">No S3 notifications currently target this function.</div>}
+      </div>
+    );
+  };
+
+  const renderVersions = () => {
+    if (!selectedFunction) return <div className="vpc-detail-empty">Select a function from the grid to view versions.</div>;
+    return (
+      <div className="vpc-detail-section">
+        <div className="vpc-detail-section-title">Versions</div>
+        <div className="vpc-detail-note">Publish the current $LATEST code into a numbered version.</div>
+        <div className="vpc-kv-grid" style={{marginBottom:12}}>
+          <div className="fg" style={{gridColumn:'1 / -1'}}>
+            <label className="fl">Version description</label>
+            <input className="fi" value={publishDescription} onChange={e => setPublishDescription(e.target.value)} placeholder="Release note" />
+          </div>
+        </div>
+        <div className="btn-grp" style={{marginBottom:14}}>
+          <button className="btn btn-p" onClick={publishVersion}>Publish version</button>
+        </div>
+        {selectedVersions.length ? (
+          <table className="vpc-simple-table">
+            <thead><tr><th>Version</th><th>Description</th><th>State</th><th>Code SHA256</th><th>Created</th></tr></thead>
+            <tbody>
+              {selectedVersions.map(version => (
+                <tr key={`${version.version}-${version.created}`}>
+                  <td className="ec2-mono">{version.version}</td>
+                  <td>{version.description || '—'}</td>
+                  <td><span className={`tag ${version.is_latest ? 'tg' : 'tb2'}`}>{version.state || 'Active'}</span></td>
+                  <td className="ec2-mono">{version.code_sha256 || '—'}</td>
+                  <td>{fmtDate(version.created)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        ) : <div className="vpc-empty-table">No versions have been published yet.</div>}
+      </div>
+    );
+  };
+
+  const renderInvocations = () => {
+    if (!selectedFunction) return <div className="vpc-detail-empty">Select a function from the grid to test invocations.</div>;
+    return (
+      <>
+        <div className="vpc-detail-section">
+          <div className="vpc-detail-section-title">Test invocation</div>
+          <div className="vpc-kv-grid">
+            <div className="fg">
+              <label className="fl">Invocation type</label>
+              <select className="fi" value={invokeType} onChange={e => setInvokeType(e.target.value)}>
+                <option value="RequestResponse">RequestResponse</option>
+                <option value="Event">Event</option>
+              </select>
+            </div>
+            <div className="fg" style={{gridColumn:'1 / -1'}}>
+              <label className="fl">Event payload</label>
+              <textarea className="fi ec2-mono" style={{minHeight:180,fontFamily:'Consolas, "Courier New", monospace'}} value={testPayload} onChange={e => setTestPayload(e.target.value)} />
+            </div>
+          </div>
+          <div className="btn-grp" style={{marginTop:10}}>
+            <button className="btn btn-p" onClick={runInvoke} disabled={invokeBusy}>{invokeBusy ? 'Invoking…' : 'Invoke function'}</button>
+          </div>
+          {invokeResult && (
+            <div style={{marginTop:14}}>
+              <div className="vpc-detail-section-title" style={{marginBottom:8}}>Last response</div>
+              <pre className="ec2-docs-code">{JSON.stringify(invokeResult, null, 2)}</pre>
+            </div>
+          )}
+        </div>
+        <div className="vpc-detail-section">
+          <div className="vpc-detail-section-title">Invocations</div>
+          {selectedInvocations.length ? (
+            <table className="vpc-simple-table">
+              <thead><tr><th>Time</th><th>Type</th><th>Status</th><th>Source</th><th>Result</th></tr></thead>
+              <tbody>
+                {selectedInvocations.map(item => (
+                  <tr key={item.id}>
+                    <td>{fmtDate(item.at)}</td>
+                    <td>{item.invocation_type}</td>
+                    <td><span className={`tag ${item.status === 'success' ? 'tg' : item.status === 'accepted' ? 'ty' : 'tgr'}`}>{item.status}</span></td>
+                    <td>{item.source || '—'}</td>
+                    <td className="ec2-mono">{item.response_payload ? JSON.stringify(item.response_payload) : '—'}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          ) : <div className="vpc-empty-table">No invocations yet.</div>}
+        </div>
+      </>
+    );
+  };
+
+  if (showCreate) {
+    return (
+      <>
+        <LambdaApiDocsPanel />
+        <CreateLambdaView onBack={() => setShowCreate(false)} onDone={handleCreateDone} notify={notify} />
+      </>
+    );
+  }
+
+  return (
+    <>
+      <LambdaApiDocsPanel />
+      <div className="panel">
+        <div className="vpc-page-head">
+          <div className="bc" style={{marginBottom:8}}>
+            <span>Lambda</span><span className="bc-sep">›</span><span>Functions</span>
+          </div>
+          <div className="vpc-page-title">Functions</div>
+          <div className="vpc-page-sub">Create, manage, invoke, and version Lambda functions with a lightweight AWS-style control plane.</div>
+        </div>
+        <div className="vpc-vpcs-toolbar">
+          <div className="vpc-vpcs-toolbar-left">
+            <input className="fi vpc-search" value={query} onChange={e => setQuery(e.target.value)} placeholder="Find functions by name, runtime, handler, or description" />
+            <div className="vpc-summary">
+              <div className="vpc-summary-count">Your functions ({visibleCount}/{totalCount})</div>
+              <a className="vpc-summary-info" href="#" onClick={e => e.preventDefault()}>Info</a>
+              <div className="vpc-summary-updated">Last updated {relativeTime(selectedFunction?.created || functions[0]?.created || '')}</div>
+            </div>
+          </div>
+          <div className="vpc-vpcs-toolbar-right">
+            <button className="btn btn-s" onClick={() => { setActionsOpen(false); loadList(); }}>↻</button>
+            <div className="vpc-actions-wrap" ref={actionsRef}>
+              <button className="btn btn-s" onClick={(e) => { e.stopPropagation(); setActionsOpen(v => !v); }}>Actions ▾</button>
+              {actionsOpen && (
+                <div className="vpc-actions-menu">
+                  <button className="vpc-actions-item" onClick={() => { setActionsOpen(false); loadList(); }}>Refresh</button>
+                  <button className="vpc-actions-item" onClick={() => { setActionsOpen(false); openCreate(); }}>Create function</button>
+                  <button className="vpc-actions-item" onClick={() => { if (selectedFunction) { setActionsOpen(false); setDeleteTarget(selectedFunction); } }} disabled={!selectedFunction}>Delete selected function</button>
+                </div>
+              )}
+            </div>
+            <button className="btn btn-p" onClick={openCreate}>Create function</button>
+          </div>
+        </div>
+
+        <div className="vpc-grid-wrap">
+          {loading && !functions.length ? (
+            <div className="ld">Loading functions…</div>
+          ) : filteredFunctions.length ? (
+            <table className="tbl vpc-grid lambda-grid">
+              <thead>
+                <tr>
+                  <th><input type="checkbox" disabled aria-label="Select all functions" /></th>
+                  <th>Name</th>
+                  <th>Runtime</th>
+                  <th>Handler</th>
+                  <th>Status</th>
+                  <th>Versions</th>
+                  <th>Triggers</th>
+                  <th>Created</th>
+                </tr>
+              </thead>
+              <tbody>
+                {filteredFunctions.map(fn => (
+                  <tr key={fn.function_name} className={selectedFunctionName === fn.function_name ? 'active' : ''} onClick={() => handleSelect(fn.function_name)}>
+                    <td><input type="checkbox" checked={selectedFunctionName === fn.function_name} onChange={() => handleSelect(fn.function_name)} /></td>
+                    <td title={fn.function_name}><span className="vpc-grid-name">{fn.function_name}</span></td>
+                    <td>{fn.runtime}</td>
+                    <td className="ec2-mono">{fn.handler}</td>
+                    <td><span className={`tag ${fn.state === 'Active' ? 'tg' : 'tgr'}`}>{fn.state || 'Active'}</span></td>
+                    <td>{fn.version_count || 0}</td>
+                    <td>{fn.trigger_count || 0}</td>
+                    <td>{fmtDate(fn.created)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          ) : (
+            <div className="empty">
+              <div className="empty-t">{query ? 'No matching functions' : 'No functions yet'}</div>
+              <div className="empty-d">{query ? 'Try a different search term.' : 'Create a Lambda function to get started.'}</div>
+            </div>
+          )}
+        </div>
+
+        <div className="vpc-detail-wrap">
+          <div className="vpc-detail-panel">
+            {selectedFunction ? (
+              <>
+                <div className="vpc-detail-banner">
+                  <div className="vpc-detail-name">{selectedFunction.function_name}</div>
+                  <div className="vpc-detail-meta">{selectedFunction.function_arn} · {selectedFunction.runtime} · {selectedFunction.handler}</div>
+                </div>
+                <div className="vpc-detail-tabs">
+                  <div className="tabs ec2-subtabs">
+                    {[
+                      ['overview', 'Overview'],
+                      ['code', 'Code'],
+                      ['configuration', 'Configuration'],
+                      ['triggers', 'Triggers'],
+                      ['versions', 'Versions'],
+                      ['invocations', 'Invocations'],
+                    ].map(([k, label]) => (
+                      <div key={k} className={`tab ${detailTab === k ? 'active' : ''}`} onClick={() => setDetailTab(k)}>{label}</div>
+                    ))}
+                  </div>
+                </div>
+                <div className="vpc-detail-body">
+                  {detailTab === 'overview' ? renderOverview()
+                    : detailTab === 'code' ? renderCode()
+                    : detailTab === 'configuration' ? renderConfiguration()
+                    : detailTab === 'triggers' ? renderTriggers()
+                    : detailTab === 'versions' ? renderVersions()
+                    : renderInvocations()}
+                </div>
+              </>
+            ) : (
+              <div className="vpc-detail-body">
+                <div className="vpc-detail-empty">Select a function from the grid to show the separate details view.</div>
+              </div>
+            )}
+          </div>
+        </div>
+
+        {deleteTarget && (
+          <ConfirmDelete
+            title="Delete function"
+            lines={[
+              `You are about to delete function "${deleteTarget.function_name}".`,
+              'The simulator will remove the function, code, versions, and invocation history.',
             ]}
             onConfirm={doDelete}
             onClose={() => setDeleteTarget(null)}
@@ -5593,6 +8120,9 @@ function ObjectsView({bucket, onBack, notify}) {
   const [tab, setTab]         = useState('objects');
   const [versioningMode, setVersioningMode] = useState(bucket.versioning || 'Disabled');
   const [showVersions, setShowVersions] = useState(false);
+  const [notificationState, setNotificationState] = useState({eventBridgeEnabled:false, topicConfigurations:[], queueConfigurations:[], cloudFunctionConfigurations:[], deliveries:[], updatedAt:''});
+  const [notificationDraft, setNotificationDraft] = useState({event_bridge_enabled:false, rules:[{id:'', destination_type:'TopicConfiguration', destination:'', events_text:'s3:ObjectCreated:*', prefix:'', suffix:''}]});
+  const [notificationBusy, setNotificationBusy] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -5631,6 +8161,28 @@ function ObjectsView({bucket, onBack, notify}) {
   useEffect(() => {
     if (versioningMode === 'Disabled') setShowVersions(false);
   }, [versioningMode]);
+  useEffect(() => {
+    let alive = true;
+    S3.getNotifications(bucket.name)
+      .then(d => {
+        if (!alive) return;
+        setNotificationState(d || {eventBridgeEnabled:false, topicConfigurations:[], queueConfigurations:[], cloudFunctionConfigurations:[], deliveries:[], updatedAt:''});
+        const rules = [];
+        for (const rule of d.topicConfigurations || []) rules.push({id: rule.id || '', destination_type: 'TopicConfiguration', destination: rule.topic || '', events_text: (rule.events || []).join(', ') || 's3:ObjectCreated:*', prefix: rule.prefix || '', suffix: rule.suffix || ''});
+        for (const rule of d.queueConfigurations || []) rules.push({id: rule.id || '', destination_type: 'QueueConfiguration', destination: rule.queue || '', events_text: (rule.events || []).join(', ') || 's3:ObjectCreated:*', prefix: rule.prefix || '', suffix: rule.suffix || ''});
+        for (const rule of d.cloudFunctionConfigurations || []) rules.push({id: rule.id || '', destination_type: 'CloudFunctionConfiguration', destination: rule.cloudFunction || '', events_text: (rule.events || []).join(', ') || 's3:ObjectCreated:*', prefix: rule.prefix || '', suffix: rule.suffix || ''});
+        setNotificationDraft({
+          event_bridge_enabled: !!d.eventBridgeEnabled,
+          rules: rules.length ? rules : [{id:'', destination_type:'TopicConfiguration', destination:'', events_text:'s3:ObjectCreated:*', prefix:'', suffix:''}],
+        });
+      })
+      .catch(() => {
+        if (!alive) return;
+        setNotificationState({eventBridgeEnabled:false, topicConfigurations:[], queueConfigurations:[], cloudFunctionConfigurations:[], deliveries:[], updatedAt:''});
+        setNotificationDraft({event_bridge_enabled:false, rules:[{id:'', destination_type:'TopicConfiguration', destination:'', events_text:'s3:ObjectCreated:*', prefix:'', suffix:''}]});
+      });
+    return () => { alive = false; };
+  }, [bucket.name]);
   const saveVersioning = async () => {
     try {
       const d = await S3.setVersioning(bucket.name, versioningMode);
@@ -5639,6 +8191,64 @@ function ObjectsView({bucket, onBack, notify}) {
       load();
     } catch (e) {
       notify(e.message, 'error');
+    }
+  };
+  const updateNotificationRule = (idx, key, value) => {
+    setNotificationDraft(prev => ({
+      ...prev,
+      rules: prev.rules.map((rule, i) => i === idx ? {...rule, [key]: value} : rule),
+    }));
+  };
+  const addNotificationRule = () => {
+    setNotificationDraft(prev => ({
+      ...prev,
+      rules: [...prev.rules, {id:'', destination_type:'TopicConfiguration', destination:'', events_text:'s3:ObjectCreated:*', prefix:'', suffix:''}],
+    }));
+  };
+  const removeNotificationRule = (idx) => {
+    setNotificationDraft(prev => {
+      const next = prev.rules.filter((_, i) => i !== idx);
+      return {...prev, rules: next.length ? next : [{id:'', destination_type:'TopicConfiguration', destination:'', events_text:'s3:ObjectCreated:*', prefix:'', suffix:''}]};
+    });
+  };
+  const saveNotifications = async () => {
+    setNotificationBusy(true);
+    try {
+      const payload = {
+        event_bridge_enabled: !!notificationDraft.event_bridge_enabled,
+        rules: (notificationDraft.rules || []).map(rule => ({
+          id: (rule.id || '').trim(),
+          destination_type: rule.destination_type || 'TopicConfiguration',
+          destination: (rule.destination || '').trim(),
+          events: (rule.events_text || '').split(',').map(s => s.trim()).filter(Boolean),
+          prefix: (rule.prefix || '').trim(),
+          suffix: (rule.suffix || '').trim(),
+        })).filter(rule => rule.destination || rule.events.length || rule.prefix || rule.suffix),
+      };
+      await S3.setNotifications(bucket.name, payload);
+      const fresh = await S3.getNotifications(bucket.name);
+      setNotificationState(fresh);
+      notify(`Bucket notifications updated`, 'success');
+      await load();
+    } catch (e) {
+      notify(e.message, 'error');
+    } finally {
+      setNotificationBusy(false);
+    }
+  };
+  const clearNotifications = async () => {
+    setNotificationBusy(true);
+    try {
+      await S3.clearNotifications(bucket.name);
+      const fresh = await S3.getNotifications(bucket.name);
+      setNotificationState(fresh);
+      setNotificationDraft({event_bridge_enabled:false, rules:[{id:'', destination_type:'TopicConfiguration', destination:'', events_text:'s3:ObjectCreated:*', prefix:'', suffix:''}]});
+      notify('Bucket notifications cleared', 'success');
+      await load();
+    } catch (e) {
+      notify(e.message, 'error');
+    } finally {
+      setNotificationBusy(false);
     }
   };
   const showVersionSwitch = versioningMode !== 'Disabled';
@@ -5769,6 +8379,83 @@ function ObjectsView({bucket, onBack, notify}) {
             <div className="btn-grp" style={{margin:'12px 0 18px'}}>
               <button className="btn btn-p" onClick={saveVersioning}>Save changes</button>
             </div>
+            <div className="vpc-detail-section" style={{marginBottom:16}}>
+              <div className="vpc-detail-section-title">Event notifications</div>
+              <div className="vpc-detail-note">Configure bucket events for SNS, SQS, Lambda, or EventBridge. The simulator records deliveries and emits a test event when you save the notification config.</div>
+              <label className="s3-switch" style={{marginTop:12}}>
+                <input type="checkbox" checked={notificationDraft.event_bridge_enabled} onChange={e=>setNotificationDraft(prev => ({...prev, event_bridge_enabled: e.target.checked}))} />
+                <span className="s3-switch-ui" aria-hidden="true" />
+                <span className="s3-switch-label">Enable EventBridge</span>
+              </label>
+              <div style={{marginTop:14, display:'grid', gap:12}}>
+                {notificationDraft.rules.map((rule, idx) => (
+                  <div key={idx} className="vpc-panel" style={{background:'#fafafa'}}>
+                    <div className="vpc-detail-section-title" style={{marginBottom:8}}>Rule {idx + 1}</div>
+                    <div className="vpc-kv-grid">
+                      <div className="fg">
+                        <label className="fl">Destination type</label>
+                        <select className="fi" value={rule.destination_type} onChange={e=>updateNotificationRule(idx, 'destination_type', e.target.value)}>
+                          <option value="TopicConfiguration">SNS topic</option>
+                          <option value="QueueConfiguration">SQS queue</option>
+                          <option value="CloudFunctionConfiguration">Lambda function</option>
+                        </select>
+                      </div>
+                      <div className="fg">
+                        <label className="fl">Destination ARN / target</label>
+                        <input className="fi" value={rule.destination} onChange={e=>updateNotificationRule(idx, 'destination', e.target.value)} placeholder="arn:aws:sns:us-east-1:123456789012:my-topic" />
+                      </div>
+                      <div className="fg">
+                        <label className="fl">Event types</label>
+                        <input className="fi" value={rule.events_text} onChange={e=>updateNotificationRule(idx, 'events_text', e.target.value)} placeholder="s3:ObjectCreated:*" />
+                        <div className="fh">Comma-separated. Examples: <span className="ec2-mono">s3:ObjectCreated:*</span>, <span className="ec2-mono">s3:ObjectRemoved:*</span>, <span className="ec2-mono">s3:TestEvent</span></div>
+                      </div>
+                      <div className="fg">
+                        <label className="fl">Prefix filter</label>
+                        <input className="fi" value={rule.prefix} onChange={e=>updateNotificationRule(idx, 'prefix', e.target.value)} placeholder="images/" />
+                      </div>
+                      <div className="fg">
+                        <label className="fl">Suffix filter</label>
+                        <input className="fi" value={rule.suffix} onChange={e=>updateNotificationRule(idx, 'suffix', e.target.value)} placeholder=".jpg" />
+                      </div>
+                      <div className="fg">
+                        <label className="fl">Rule ID</label>
+                        <input className="fi" value={rule.id} onChange={e=>updateNotificationRule(idx, 'id', e.target.value)} placeholder="image-topic" />
+                      </div>
+                    </div>
+                    <div className="btn-grp" style={{marginTop:10}}>
+                      <button className="btn btn-s" onClick={()=>removeNotificationRule(idx)} disabled={notificationBusy}>Remove rule</button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+              <div className="btn-grp" style={{marginTop:12}}>
+                <button className="btn btn-s" onClick={addNotificationRule} disabled={notificationBusy}>Add rule</button>
+                <button className="btn btn-p" onClick={saveNotifications} disabled={notificationBusy}>{notificationBusy ? 'Saving…' : 'Save notifications'}</button>
+                <button className="btn btn-d" onClick={clearNotifications} disabled={notificationBusy}>Clear notifications</button>
+              </div>
+              <div className="fh" style={{marginTop:8}}>
+                Current config: {notificationState.eventBridgeEnabled ? 'EventBridge enabled' : 'EventBridge disabled'} · {notificationState.deliveries?.length || 0} delivery record(s)
+              </div>
+              {notificationState.deliveries && notificationState.deliveries.length > 0 && (
+                <div style={{marginTop:16}}>
+                  <div className="vpc-detail-section-title" style={{marginBottom:8}}>Recent deliveries</div>
+                  <table className="vpc-simple-table">
+                    <thead><tr><th>Time</th><th>Event</th><th>Destination</th><th>Key</th><th>Status</th></tr></thead>
+                    <tbody>
+                      {notificationState.deliveries.slice().reverse().slice(0, 10).map(delivery => (
+                        <tr key={delivery.id}>
+                          <td>{fmtDate(delivery.at)}</td>
+                          <td className="ec2-mono">{delivery.event_name}</td>
+                          <td>{delivery.destination_type} · <span className="ec2-mono">{delivery.destination || '—'}</span></td>
+                          <td className="ec2-mono">{delivery.key || '—'}</td>
+                          <td><span className="tag tg">{delivery.status}</span></td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
             <table className="ptbl"><tbody>
               {[['Bucket name',bucket.name],['AWS Region',bucket.region],['ARN',bucket.arn],
                 ['Creation date',fmtDate(bucket.created)],['Versioning',versioningMode],
@@ -5829,16 +8516,21 @@ function App() {
     dashboard: 'AWS Management Console',
     iam: 'IAM',
     ec2: 'Amazon EC2',
+    sqs: 'Amazon SQS',
     vpc: 'Amazon VPC',
     rds: 'Amazon RDS',
+    lambda: 'AWS Lambda',
     apigateway: 'Amazon API Gateway',
     's3-buckets': 'Amazon S3',
     's3-objects': 'Amazon S3',
   };
   const navItems = [
     ['Overview', 'dashboard'],
+    ['IAM', 'iam'],
     ['EC2', 'ec2'],
+    ['SQS', 'sqs'],
     ['RDS', 'rds'],
+    ['Lambda', 'lambda'],
     ['VPC', 'vpc'],
     ['API Gateway', 'apigateway'],
     ['S3', 's3-buckets'],
@@ -5924,8 +8616,12 @@ function App() {
                 ? <IAMView notify={notify}/>
               : view==='ec2'
                 ? <EC2View notify={notify}/>
+              : view==='sqs'
+                ? <SQSView notify={notify}/>
               : view==='rds'
                 ? <RDSView notify={notify}/>
+              : view==='lambda'
+                ? <LambdaView notify={notify}/>
               : view==='apigateway'
                 ? <APIGatewayView notify={notify}/>
               : view==='vpc'
