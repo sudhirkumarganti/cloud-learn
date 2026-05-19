@@ -133,6 +133,8 @@
     .ec2-chip.stopped{background:#fff4ec;color:#9a3900}
     .ec2-chip.pending{background:#fdebd0;color:#eb5f07}
     .ec2-chip.terminated{background:#eaeded;color:#687078}
+    .ec2-chip.paused{background:#e8f5fb;color:#0073bb}
+    .ec2-chip.archived{background:#f2f3f3;color:#687078}
     .ec2-mono{font-family:Consolas,"Courier New",monospace;font-size:12px}
     .ec2-docs{padding:18px 20px 20px}
     .ec2-docs-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:14px}
@@ -553,6 +555,17 @@
     .home-card-list{display:grid;gap:8px;margin-top:10px}
     .home-card-list button,.home-card-list a{display:flex;align-items:center;justify-content:space-between;text-align:left;width:100%;padding:9px 10px;border:1px solid #eaeded;border-radius:4px;background:#fafafa;color:#16191f;cursor:pointer;font-size:13px;text-decoration:none}
     .home-card-list button:hover,.home-card-list a:hover{background:#f2f8fd;border-color:#cfd7df}
+    .space-summary-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;margin-top:12px}
+    .space-summary-card{border:1px solid #eaeded;border-radius:4px;background:#fafafa;padding:12px}
+    .space-summary-card strong{display:block;font-size:22px;line-height:1.1;margin-bottom:4px}
+    .space-summary-card span{font-size:12px;color:#687078;line-height:1.35}
+    .space-create-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px}
+    .space-create-card{border:1px solid #eaeded;border-radius:4px;background:#fff;padding:14px}
+    .space-create-card .fl{margin-bottom:6px}
+    .space-create-card .fi{width:100%}
+    .space-create-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}
+    .space-table-wrap{overflow:auto}
+    .space-table{min-width:1220px}
 
     /* ── Info box ── */
     .ibox{background:#f2f8fd;border:1px solid #0073bb;border-radius:4px;padding:10px 14px;font-size:13px;margin-bottom:14px}
@@ -614,11 +627,17 @@
 const { useState, useEffect, useRef, useCallback, useMemo } = React;
 
 /* ── API layer ──────────────────────────────────────────────────────────── */
-async function api(method, path, body, isForm) {
+async function api(method, path, body, isForm, extraHeaders = {}) {
   const opts = { method, cache: 'no-store' };
   const principal = window.localStorage.getItem('cloudlearn.principal') || 'root';
   opts.headers = {'X-CloudLearn-Principal': principal};
-  if (body && !isForm) { opts.headers['Content-Type'] = 'application/json'; opts.body = JSON.stringify(body); }
+  if (extraHeaders && typeof extraHeaders === 'object') {
+    opts.headers = {...opts.headers, ...extraHeaders};
+  }
+  if (body && !isForm) {
+    if (!opts.headers['Content-Type']) opts.headers['Content-Type'] = 'application/json';
+    opts.body = JSON.stringify(body);
+  }
   else if (body) opts.body = body;
   const r = await fetch(path, opts);
   if (!r.ok) { const e = await r.json().catch(() => ({detail: r.statusText})); throw new Error(e.detail || 'Request failed'); }
@@ -647,6 +666,26 @@ const S3 = {
 
 const Catalog = {
   get: () => api('GET', '/api/catalog'),
+};
+
+const Spaces = {
+  list: () => api('GET', '/api/spaces'),
+  active: () => api('GET', '/api/spaces/active'),
+  get: (id) => api('GET', `/api/spaces/${encodeURIComponent(id)}`),
+  create: (payload) => api('POST', '/api/spaces', payload),
+  estimate: (payload) => api('POST', '/api/spaces/estimate', payload),
+  switch: (id) => api('POST', `/api/spaces/${encodeURIComponent(id)}/switch`),
+  pause: (id) => api('POST', `/api/spaces/${encodeURIComponent(id)}/pause`),
+  resume: (id) => api('POST', `/api/spaces/${encodeURIComponent(id)}/resume`),
+  archive: (id) => api('POST', `/api/spaces/${encodeURIComponent(id)}/archive`),
+  remove: (id) => api('DELETE', `/api/spaces/${encodeURIComponent(id)}`),
+};
+
+const CloudSim = {
+  current: () => api('GET', '/api/cloudsim/current'),
+  summary: () => api('GET', '/api/cloudsim/summary'),
+  reconcile: () => api('POST', '/api/cloudsim/reconcile', {}),
+  events: () => api('GET', '/api/cloudsim/events'),
 };
 
 const Packs = {
@@ -693,8 +732,12 @@ const EC2 = {
   terminate: (id) => api('POST', `/api/ec2/instances/${id}/terminate`),
   sampleApps: () => api('GET', '/api/ec2/sample-apps'),
   deploySampleApp: (id, appId) => api('POST', `/api/ec2/instances/${id}/sample-apps/${appId}/deploy`),
-  dockerRuntime: () => api('GET', '/api/ec2/runtime/docker'),
-  bootstrapDocker: () => api('POST', '/api/ec2/runtime/docker/bootstrap'),
+  runtime: () => api('GET', '/api/ec2/runtime'),
+  lxdRuntime: () => api('GET', '/api/ec2/runtime/lxd'),
+  multipassRuntime: () => api('GET', '/api/ec2/runtime/multipass'),
+  bootstrapRuntime: () => api('POST', '/api/ec2/runtime/bootstrap'),
+  bootstrapLxd: () => api('POST', '/api/ec2/runtime/lxd/bootstrap'),
+  bootstrapMultipass: () => api('POST', '/api/ec2/runtime/multipass/bootstrap'),
 };
 
 const VPC = {
@@ -748,6 +791,32 @@ const SQS = {
   tag: (name, payload) => api('POST', `/api/sqs/queues/${encodeURIComponent(name)}/tags`, payload),
   untag: (name, payload) => api('DELETE', `/api/sqs/queues/${encodeURIComponent(name)}/tags`, payload),
   invokeUrl: (name) => `/api/sqs/aws?Action=GetQueueUrl&QueueName=${encodeURIComponent(name)}&Version=2012-11-05`,
+};
+
+const DynamoDB = {
+  list: () => api('GET', '/api/dynamodb/tables'),
+  get: (name) => api('GET', `/api/dynamodb/tables/${encodeURIComponent(name)}`),
+  create: (payload) => api('POST', '/api/dynamodb/tables', payload),
+  remove: (name) => api('DELETE', `/api/dynamodb/tables/${encodeURIComponent(name)}`),
+  listItems: (name) => api('GET', `/api/dynamodb/tables/${encodeURIComponent(name)}/items`),
+  putItem: (name, payload) => api('POST', `/api/dynamodb/tables/${encodeURIComponent(name)}/items`, payload),
+  updateItem: (name, payload) => api('PUT', `/api/dynamodb/tables/${encodeURIComponent(name)}/items`, payload),
+  deleteItem: (name, payload) => api('DELETE', `/api/dynamodb/tables/${encodeURIComponent(name)}/items`, payload),
+  query: (name, payload) => api('POST', `/api/dynamodb/tables/${encodeURIComponent(name)}/query`, payload),
+  scan: (name, payload) => api('POST', `/api/dynamodb/tables/${encodeURIComponent(name)}/scan`, payload),
+  tags: (name) => api('GET', `/api/dynamodb/tables/${encodeURIComponent(name)}/tags`),
+  tag: (name, payload) => api('POST', `/api/dynamodb/tables/${encodeURIComponent(name)}/tags`, payload),
+  untag: (name, payload) => api('DELETE', `/api/dynamodb/tables/${encodeURIComponent(name)}/tags`, payload),
+  rpc: (action, payload) => api(
+    'POST',
+    '/api/dynamodb/aws',
+    payload,
+    false,
+    {
+      'Content-Type': 'application/x-amz-json-1.0',
+      'X-Amz-Target': `DynamoDB_20120810.${action}`,
+    }
+  ),
 };
 
 const APIGateway = {
@@ -1887,9 +1956,11 @@ function VPCApiDocsPanel() {
 
 function DashboardView({onOpen, notify}) {
   const cards = [
+    {id:'spaces', title:'Simulation Spaces', desc:'Create, switch, pause, and estimate local memory or disk usage across isolated cloud worlds.', cta:'Open Simulation Spaces'},
     {id:'iam', title:'IAM', desc:'Users, roles, policies, and access control across the simulator.', cta:'Open IAM'},
     {id:'s3', title:'Amazon S3', desc:'Object storage buckets, objects, upload/download, versioning, tags.', cta:'Open S3'},
     {id:'ec2', title:'EC2', desc:'Instance lifecycles backed by runtime containers or processes.', cta:'Open EC2'},
+    {id:'dynamodb', title:'Amazon DynamoDB', desc:'Managed key-value and document tables with query, scan, and item operations.', cta:'Open DynamoDB'},
     {id:'sqs', title:'Amazon SQS', desc:'Standard and FIFO queues, messages, visibility timeout, tags, and dead-letter queues.', cta:'Open SQS'},
     {id:'vpc', title:'VPC', desc:'Virtual networks, subnets, route tables, and security groups.', cta:'Open VPC'},
     {id:'rds', title:'Amazon RDS', desc:'Managed database instances, subnet groups, snapshots, and tags.', cta:'Open RDS'},
@@ -1905,10 +1976,12 @@ function DashboardView({onOpen, notify}) {
             <div className="ps">Simulator shell aligned to AWS console structure for supported MVP services.</div>
           </div>
           <div className="btn-grp">
+            <button className="btn btn-s" onClick={()=>onOpen('spaces')}>Open Spaces</button>
             <button className="btn btn-s" onClick={()=>onOpen('iam')}>Open IAM</button>
             <button className="btn btn-p" onClick={()=>onOpen('s3')}>Open S3</button>
             <button className="btn btn-s" onClick={()=>onOpen('rds')}>Open RDS</button>
             <button className="btn btn-s" onClick={()=>onOpen('lambda')}>Open Lambda</button>
+            <button className="btn btn-s" onClick={()=>onOpen('dynamodb')}>Open DynamoDB</button>
             <button className="btn btn-s" onClick={()=>onOpen('sqs')}>Open SQS</button>
             <button className="btn btn-s" onClick={()=>onOpen('apigateway')}>Open API Gateway</button>
           </div>
@@ -1959,6 +2032,285 @@ function ProductView({notify}) {
       </div>
       <div id="cloudlearn-license"><LicenseView notify={notify}/></div>
       <div id="cloudlearn-packs"><PacksView notify={notify}/></div>
+    </div>
+  );
+}
+
+function SpacesView({notify}) {
+  const [spaces, setSpaces] = useState([]);
+  const [activeId, setActiveId] = useState('');
+  const [settings, setSettings] = useState({max_spaces: 6, default_provider: 'aws', default_region: 'us-east-1'});
+  const [summary, setSummary] = useState({});
+  const [estimate, setEstimate] = useState(null);
+  const [busy, setBusy] = useState('');
+  const [loading, setLoading] = useState(true);
+  const [form, setForm] = useState({
+    name: '',
+    provider: 'aws',
+    region: 'us-east-1',
+    max_instances: 10,
+    runtime_count: 0,
+    ec2_count: 0,
+    lambda_count: 0,
+    rds_count: 0,
+    sqs_count: 0,
+    dynamodb_count: 0,
+  });
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      const [spaceResp, cloudResp] = await Promise.all([Spaces.list(), CloudSim.current()]);
+      const nextSpaces = spaceResp.spaces || [];
+      setSpaces(nextSpaces);
+      setActiveId(spaceResp.active_space_id || '');
+      setSettings(spaceResp.settings || {max_spaces: 6, default_provider: 'aws', default_region: 'us-east-1'});
+      setSummary(cloudResp.summary || {});
+      setForm(f => {
+        if (f.name.trim()) return f;
+        const defaults = {
+          name: `lab-${(nextSpaces.length + 1).toString().padStart(2, '0')}`,
+          provider: (spaceResp.settings && spaceResp.settings.default_provider) || 'aws',
+          region: (spaceResp.settings && spaceResp.settings.default_region) || 'us-east-1',
+          max_instances: 10,
+          runtime_count: 0,
+          ec2_count: 0,
+          lambda_count: 0,
+          rds_count: 0,
+          sqs_count: 0,
+          dynamodb_count: 0,
+        };
+        return {...f, ...defaults};
+      });
+    } catch (e) {
+      notify(e.message, 'error');
+    } finally {
+      setLoading(false);
+    }
+  }, [notify]);
+
+  useEffect(() => { load(); }, [load]);
+  useEffect(() => {
+    const timer = setInterval(load, 4000);
+    return () => clearInterval(timer);
+  }, [load]);
+
+  useEffect(() => {
+    let live = true;
+    (async () => {
+      try {
+        const resp = await Spaces.estimate(form);
+        if (live) setEstimate(resp.estimate || resp);
+      } catch (e) {
+        if (live) setEstimate(null);
+      }
+    })();
+    return () => { live = false; };
+  }, [form]);
+
+  const createSpace = async () => {
+    setBusy('create');
+    try {
+      const payload = {
+        name: form.name,
+        provider: form.provider,
+        region: form.region,
+        max_instances: Number(form.max_instances || 10),
+        runtime_count: Number(form.runtime_count || 0),
+        ec2_count: Number(form.ec2_count || 0),
+        lambda_count: Number(form.lambda_count || 0),
+        rds_count: Number(form.rds_count || 0),
+        sqs_count: Number(form.sqs_count || 0),
+        dynamodb_count: Number(form.dynamodb_count || 0),
+      };
+      const created = await Spaces.create(payload);
+      notify(`Space "${created.space.name}" created`, 'success');
+      if (created.space && created.space.space_id) {
+        await Spaces.switch(created.space.space_id);
+      }
+      await load();
+    } catch (e) {
+      notify(e.message, 'error');
+    } finally {
+      setBusy('');
+    }
+  };
+
+  const switchSpace = async (spaceId) => {
+    setBusy(spaceId);
+    try {
+      await Spaces.switch(spaceId);
+      notify('Active space switched', 'success');
+      await load();
+    } catch (e) {
+      notify(e.message, 'error');
+    } finally {
+      setBusy('');
+    }
+  };
+
+  const mutateSpace = async (spaceId, action) => {
+    setBusy(`${action}:${spaceId}`);
+    try {
+      if (action === 'pause') await Spaces.pause(spaceId);
+      if (action === 'resume') await Spaces.resume(spaceId);
+      if (action === 'archive') await Spaces.archive(spaceId);
+      if (action === 'delete') {
+        if (!window.confirm(`Delete simulation space ${spaceId}?`)) return;
+        await Spaces.remove(spaceId);
+      }
+      notify(`Space ${action}d`, 'success');
+      await load();
+    } catch (e) {
+      notify(e.message, 'error');
+    } finally {
+      setBusy('');
+    }
+  };
+
+  const activeSpace = spaces.find(s => s.space_id === activeId) || null;
+  const currentEstimate = estimate || {};
+  const maxSpaces = settings.max_spaces || 6;
+
+  return (
+    <div className="panel">
+      <div className="ph">
+        <div>
+          <div className="pt">Simulation Spaces</div>
+          <div className="ps">Create isolated local cloud worlds, switch active focus, and track local RAM and disk usage.</div>
+        </div>
+        <div className="btn-grp">
+          <button className="btn btn-s" onClick={load} disabled={loading || !!busy}>Refresh</button>
+          <button className="btn btn-p" onClick={createSpace} disabled={busy === 'create' || !form.name.trim()}>Create space</button>
+        </div>
+      </div>
+
+      <div style={{padding:16}}>
+        <div className="space-summary-grid">
+          <div className="space-summary-card"><strong>{spaces.length}</strong><span>Spaces created</span></div>
+          <div className="space-summary-card"><strong>{maxSpaces}</strong><span>Maximum spaces allowed locally</span></div>
+          <div className="space-summary-card"><strong>{settings.max_memory_mb ? `${settings.max_memory_mb} MB` : '—'}</strong><span>Local memory budget</span></div>
+          <div className="space-summary-card"><strong>{settings.max_disk_mb ? `${settings.max_disk_mb} MB` : '—'}</strong><span>Local disk budget</span></div>
+          <div className="space-summary-card"><strong>{activeSpace ? activeSpace.name : '—'}</strong><span>Active simulation space</span></div>
+          <div className="space-summary-card"><strong>{currentEstimate.total_memory_mb ? `${currentEstimate.total_memory_mb} MB` : '—'}</strong><span>Estimated memory for new space</span></div>
+          <div className="space-summary-card"><strong>{currentEstimate.total_disk_mb ? `${currentEstimate.total_disk_mb} MB` : '—'}</strong><span>Estimated disk for new space</span></div>
+          <div className="space-summary-card"><strong>{summary.last_reconcile_at ? relativeTime(summary.last_reconcile_at) : '—'}</strong><span>Last CloudSim reconcile</span></div>
+        </div>
+
+        <div style={{marginTop:16}} className="panel">
+          <div className="ph">
+            <div>
+              <div className="pt">Create Space</div>
+              <div className="ps">Preview local resource usage before creating a new simulation world.</div>
+            </div>
+          </div>
+          <div style={{padding:16, display:'grid', gap:12}}>
+            <div className="space-create-grid">
+              <div className="space-create-card">
+                <label className="fl">Name</label>
+                <input className="fi" value={form.name} onChange={e=>setForm(f=>({...f, name:e.target.value}))} placeholder="lab-01" />
+              </div>
+              <div className="space-create-card">
+                <label className="fl">Provider</label>
+                <select className="fi" value={form.provider} onChange={e=>setForm(f=>({...f, provider:e.target.value}))}>
+                  <option value="aws">AWS</option>
+                  <option value="gcp">GCP</option>
+                  <option value="azure">Azure</option>
+                  <option value="oci">Oracle Cloud</option>
+                  <option value="tencent">Tencent Cloud</option>
+                </select>
+              </div>
+              <div className="space-create-card">
+                <label className="fl">Region</label>
+                <input className="fi" value={form.region} onChange={e=>setForm(f=>({...f, region:e.target.value}))} placeholder="us-east-1" />
+              </div>
+              <div className="space-create-card">
+                <label className="fl">Max instances</label>
+                <input className="fi" type="number" min="1" value={form.max_instances} onChange={e=>setForm(f=>({...f, max_instances:Number(e.target.value || 0)}))} />
+              </div>
+            </div>
+            <div className="space-create-grid">
+              {[
+                ['runtime_count', 'Runtime sandboxes'],
+                ['ec2_count', 'EC2 instances'],
+                ['lambda_count', 'Lambda functions'],
+                ['rds_count', 'RDS instances'],
+                ['sqs_count', 'SQS queues'],
+                ['dynamodb_count', 'DynamoDB tables'],
+              ].map(([key, label]) => (
+                <div className="space-create-card" key={key}>
+                  <label className="fl">{label}</label>
+                  <input className="fi" type="number" min="0" value={form[key]} onChange={e=>setForm(f=>({...f, [key]: Number(e.target.value || 0)}))} />
+                </div>
+              ))}
+            </div>
+            <div className="ibox" style={{marginBottom:0}}>
+              <strong>Estimate</strong> — {currentEstimate.total_memory_mb ? `${currentEstimate.total_memory_mb} MB RAM` : 'No estimate yet'} / {currentEstimate.total_disk_mb ? `${currentEstimate.total_disk_mb} MB disk` : 'No disk estimate yet'}.
+              {currentEstimate.current_spaces !== undefined ? ` ${currentEstimate.current_spaces}/${currentEstimate.max_spaces || maxSpaces} spaces used.` : ''}
+              {currentEstimate.max_memory_mb ? ` Memory cap: ${currentEstimate.max_memory_mb} MB.` : ''}
+              {currentEstimate.max_disk_mb ? ` Disk cap: ${currentEstimate.max_disk_mb} MB.` : ''}
+            </div>
+            <div className="space-create-actions">
+              <button className="btn btn-p" onClick={createSpace} disabled={busy === 'create' || !form.name.trim()}>Create space</button>
+              <button className="btn btn-s" onClick={async()=>{try{const resp = await CloudSim.reconcile(); notify(resp.message || 'CloudSim reconciled','success'); await load();}catch(e){notify(e.message,'error');}}}>Reconcile CloudSim</button>
+            </div>
+          </div>
+        </div>
+
+        <div className="panel" style={{marginTop:16}}>
+          <div className="ph">
+            <div>
+              <div className="pt">Spaces</div>
+              <div className="ps">Switch active focus without stopping background runtimes.</div>
+            </div>
+          </div>
+          <div className="space-table-wrap">
+            <table className="tbl space-table">
+              <thead>
+                <tr>
+                  <th>Name</th>
+                  <th>Provider</th>
+                  <th>Status</th>
+                  <th>Region</th>
+                  <th>Estimated RAM</th>
+                  <th>Estimated Disk</th>
+                  <th>Created</th>
+                  <th>Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                {(spaces || []).map(space => (
+                  <tr key={space.space_id} className={space.space_id === activeId ? 'ec2-row-selected' : ''}>
+                    <td><strong>{space.name}</strong><div className="fh">ID: <span className="ec2-mono">{space.space_id}</span></div></td>
+                    <td>{space.provider || 'aws'}</td>
+                    <td><span className={`ec2-chip ${space.status || 'running'}`}>{space.status || 'running'}</span></td>
+                    <td>{space.active_region || 'us-east-1'}</td>
+                    <td>{space.estimated_memory_mb ? `${space.estimated_memory_mb} MB` : '—'}</td>
+                    <td>{space.estimated_disk_mb ? `${space.estimated_disk_mb} MB` : '—'}</td>
+                    <td>{fmtDate(space.created_at)}</td>
+                    <td>
+                      <div className="btn-grp">
+                        <button className="btn btn-s" onClick={()=>switchSpace(space.space_id)} disabled={busy===space.space_id}>Switch</button>
+                        {space.status === 'running'
+                          ? <button className="btn btn-s" onClick={()=>mutateSpace(space.space_id, 'pause')} disabled={busy===`pause:${space.space_id}`}>Pause</button>
+                          : <button className="btn btn-s" onClick={()=>mutateSpace(space.space_id, 'resume')} disabled={busy===`resume:${space.space_id}`}>Resume</button>
+                        }
+                        <button className="btn btn-s" onClick={()=>mutateSpace(space.space_id, 'archive')} disabled={busy===`archive:${space.space_id}`}>Archive</button>
+                        <button className="btn btn-d" onClick={()=>mutateSpace(space.space_id, 'delete')} disabled={busy===`delete:${space.space_id}`}>Delete</button>
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+                {!spaces.length && (
+                  <tr>
+                    <td colSpan="8" style={{padding:'18px 12px', color:'#687078'}}>No simulation spaces yet. Create one above to begin.</td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
     </div>
   );
 }
@@ -2585,17 +2937,20 @@ function IAMView({notify}) {
 
 function LaunchInstanceModal({onClose, onDone, notify, defaults = {}}) {
   const [busy, setBusy] = useState(false);
+  const [runtimeStatus, setRuntimeStatus] = useState(null);
+  const [runtimeReady, setRuntimeReady] = useState(false);
+  const [runtimeMessage, setRuntimeMessage] = useState('Checking Multipass and LXD runtime...');
   const [vpcs, setVpcs] = useState([]);
   const [subnets, setSubnets] = useState([]);
   const [sgs, setSgs] = useState([]);
   const [amis, setAmis] = useState([]);
-  const [sampleApps, setSampleApps] = useState([]);
   const [form, setForm] = useState({
     name: 'demo-instance',
     instance_type: 't3.micro',
     ami: '',
     key_pair: '',
     runtime: 'python',
+    runtime_backend: '',
     vpc_id: '',
     subnet_id: '',
     security_group_ids: '',
@@ -2603,54 +2958,127 @@ function LaunchInstanceModal({onClose, onDone, notify, defaults = {}}) {
     storage_gb: 8,
     command: '',
     user_data: '',
-    sample_app_id: '',
     ...defaults,
   });
 
   useEffect(() => {
+    let alive = true;
     Promise.all([
       api('GET', '/api/vpc/vpcs').catch(() => ({vpcs: []})),
       api('GET', '/api/vpc/subnets').catch(() => ({subnets: []})),
       api('GET', '/api/vpc/security-groups').catch(() => ({security_groups: []})),
       api('GET', '/api/ec2/amis').catch(() => ({amis: []})),
-      EC2.sampleApps().catch(() => ({sample_apps: []})),
-    ]).then(([v, s, g, a, samples]) => {
+    ]).then(([v, s, g, a]) => {
       setVpcs(v.vpcs || []);
       setSubnets(s.subnets || []);
       setSgs(g.security_groups || []);
       setAmis(a.amis || []);
-      setSampleApps(samples.sample_apps || []);
-      const catalogAmis = a.amis || [];
-      if (!form.ami && catalogAmis.length) {
-        const first = catalogAmis[0];
-        setForm(f => ({...f, ami: first.ami, runtime: first.default_runtime || f.runtime}));
-      }
       if (!form.vpc_id && (v.vpcs || []).length) setForm(f => ({...f, vpc_id: v.vpcs[0].vpc_id, subnet_id: '', security_group_ids: ''}));
     });
+    EC2.runtime()
+      .then(current => {
+        if (!alive) return;
+        const backends = current?.backends || {};
+        const ready = Object.values(backends).some(b => b?.available && b?.status === 'ready');
+        setRuntimeStatus(current || null);
+        setRuntimeReady(ready);
+        setRuntimeMessage(ready ? 'Multipass or LXD runtime is ready.' : (current?.backends?.multipass?.message || current?.backends?.lxd?.message || 'No Multipass or LXD runtime is ready yet.'));
+      })
+      .catch(e => {
+        if (!alive) return;
+        setRuntimeReady(false);
+        setRuntimeMessage(e.message || 'No Multipass or LXD runtime is ready.');
+      });
+    return () => {
+      alive = false;
+    };
   }, []);
 
-  const currentAmi = amis.find(a => a.ami === form.ami);
-  const currentSampleApp = sampleApps.find(app => app.id === form.sample_app_id);
+  const hostOs = String(runtimeStatus?.host_os || '').toLowerCase();
+  const runtimeFamilyLabel = hostOs === 'darwin' || hostOs === 'windows' ? 'Multipass' : 'Multipass or LXD';
+  const visibleAmis = useMemo(() => {
+    return amis.filter(ami => {
+      const supportedHosts = (ami.supported_host_os || []).map(v => String(v).toLowerCase());
+      const supportedBackends = (ami.supported_backends || []).map(v => String(v).toLowerCase());
+      if (supportedHosts.length && hostOs && !supportedHosts.includes(hostOs)) {
+        return false;
+      }
+      return supportedBackends.length > 0;
+    });
+  }, [amis, hostOs]);
+
+  const currentAmi = visibleAmis.find(a => a.ami === form.ami) || visibleAmis[0] || null;
+  const runtimeBackend = useMemo(() => {
+    if (!currentAmi) return '';
+    const supportedBackends = (currentAmi.supported_backends || []).map(v => String(v).toLowerCase());
+    const preferred = String(runtimeStatus?.preferred_backend || currentAmi.default_runtime_backend || '').toLowerCase();
+    const runtimeBackends = runtimeStatus?.backends || {};
+    const candidates = [preferred, ...supportedBackends];
+    for (const candidate of candidates) {
+      if (candidate && supportedBackends.includes(candidate) && runtimeBackends[candidate]?.available) return candidate;
+    }
+    return supportedBackends[0] || preferred || '';
+  }, [currentAmi, runtimeStatus]);
+
   const amiGroups = useMemo(() => {
-    const groups = amis.reduce((acc, ami) => {
+    const groups = visibleAmis.reduce((acc, ami) => {
       const group = ami.category || 'Other AMIs';
       if (!acc[group]) acc[group] = [];
       acc[group].push(ami);
       return acc;
     }, {});
     return Object.entries(groups).sort((a, b) => a[0].localeCompare(b[0]));
-  }, [amis]);
+  }, [visibleAmis]);
+
+  useEffect(() => {
+    if (!visibleAmis.length) return;
+    if (!form.ami || !visibleAmis.some(a => a.ami === form.ami)) {
+      const first = visibleAmis[0];
+      setForm(f => ({...f, ami: first.ami, runtime: first.default_runtime || f.runtime, runtime_backend: runtimeBackend || first.default_runtime_backend || f.runtime_backend || ''}));
+    }
+  }, [visibleAmis, form.ami, runtimeBackend]);
+
+  const checkRuntimeReady = async () => {
+    try {
+      const current = await EC2.runtime();
+      return {
+        ready: !!(current?.available || Object.values(current?.backends || {}).some(b => b?.available && b?.status === 'ready')),
+        current,
+      };
+    } catch (e) {
+      return { ready: false, current: { message: e.message || `No ${runtimeFamilyLabel} runtime is available.` } };
+    }
+  };
 
   const submit = async () => {
     setBusy(true);
     try {
+      const runtime = await checkRuntimeReady();
+      if (!runtime?.ready) {
+        notify(runtime?.current?.message || `A ${runtimeFamilyLabel} runtime is required before launching EC2 instances.`, 'error');
+        return;
+      }
+      const selectedBackend = runtimeBackend || currentAmi?.default_runtime_backend || runtime?.current?.preferred_backend || '';
       const payload = {
         ...form,
         storage_gb: Number(form.storage_gb) || 8,
-        sample_app_id: form.sample_app_id || '',
-        security_group_ids: form.security_group_ids ? form.security_group_ids.split(',').map(s => s.trim()).filter(Boolean) : []
+        security_group_ids: form.security_group_ids ? form.security_group_ids.split(',').map(s => s.trim()).filter(Boolean) : [],
+        runtime_backend: selectedBackend,
       };
-      await EC2.create(payload);
+      const created = await EC2.create(payload);
+      const instanceId = created?.instance_id || created?.id || '';
+      if (instanceId) {
+        const startedAt = Date.now();
+        while (Date.now() - startedAt < 20000) {
+          const current = await EC2.list();
+          const latest = (current.instances || []).find(i => i.instance_id === instanceId);
+          if (!latest) break;
+          if (['running', 'stopped', 'terminated'].includes(String(latest.state || '').toLowerCase()) || String(latest.launch_status || '').toLowerCase() === 'error') {
+            break;
+          }
+          await new Promise(resolve => setTimeout(resolve, 1000));
+        }
+      }
       notify('EC2 instance launched', 'success');
       onDone();
     } catch (e) {
@@ -2679,36 +3107,26 @@ function LaunchInstanceModal({onClose, onDone, notify, defaults = {}}) {
             <div className="fg">
               <label className="fl">AMI</label>
               <select className="fi" value={form.ami} onChange={e=>{
-                const next = amis.find(a => a.ami === e.target.value);
+                const next = visibleAmis.find(a => a.ami === e.target.value);
+                const nextBackend = String(next?.default_runtime_backend || runtimeBackend || '').toLowerCase();
                 setForm(f=>({
                   ...f,
                   ami: e.target.value,
                   runtime: next?.default_runtime || f.runtime,
+                  runtime_backend: nextBackend || f.runtime_backend,
                 }));
               }}>
                 <option value="">Select AMI</option>
                 {amiGroups.map(([group, groupAmis]) => (
                   <optgroup key={group} label={group}>
-                    {groupAmis.map(a => <option key={a.ami} value={a.ami}>{a.name} ({a.ami})</option>)}
+                    {groupAmis.map(a => {
+                      const backendLabel = (a.supported_backends || []).map(b => String(b).toUpperCase()).join(' / ');
+                      return <option key={a.ami} value={a.ami}>{a.name} ({a.ami}) [{backendLabel}]</option>;
+                    })}
                   </optgroup>
                 ))}
               </select>
               <div className="fh">{currentAmi?.description || 'Choose the base image for this instance.'}</div>
-            </div>
-            <div className="fg">
-              <label className="fl">Sample app</label>
-              <select className="fi" value={form.sample_app_id} onChange={e=>{
-                const next = sampleApps.find(app => app.id === e.target.value);
-                setForm(f=>({
-                  ...f,
-                  sample_app_id: e.target.value,
-                  command: next ? next.start_command : '',
-                }));
-              }}>
-                <option value="">No sample app</option>
-                {sampleApps.map(app => <option key={app.id} value={app.id}>{app.name}</option>)}
-              </select>
-              <div className="fh">{currentSampleApp?.description || 'Optional starter workload copied into the instance workspace.'}</div>
             </div>
             <div className="fg">
               <label className="fl">Instance type</label>
@@ -2781,92 +3199,28 @@ function LaunchInstanceModal({onClose, onDone, notify, defaults = {}}) {
           <div className="fg">
             <label className="fl">Boot command</label>
             <textarea className="fi" rows="3" value={form.command} onChange={e=>setForm(f=>({...f,command:e.target.value}))} placeholder="python -m http.server 8080"/>
-            <div className="fh">This command runs inside the chosen runtime after start. Docker is used when available; otherwise the simulator falls back to the local EC2 runtime.</div>
+            <div className="fh">This command runs inside the selected {runtimeFamilyLabel} runtime after start. EC2 launch is disabled until a runtime is ready.</div>
           </div>
           {currentAmi && (
             <div className="ibox">
-              <strong>Runtime image</strong> — {currentAmi.runtime_image || currentAmi.container_image || 'python:3.12-slim'} will back Docker-based launches.
+              <strong>Runtime backend</strong> — {runtimeBackend ? runtimeBackend.toUpperCase() : 'auto'} will back this AMI on this host.
             </div>
           )}
-          <div className="ibox"><strong>Launch summary</strong> — The backend will create a Docker-backed EC2 instance when Docker is present, otherwise it uses the local simulator runtime and persists state locally.</div>
+          <div className={`ibox ${runtimeReady ? '' : 'warn'}`}>
+            <strong>{runtimeReady ? `${runtimeFamilyLabel} ready` : `${runtimeFamilyLabel} required`}</strong> — {runtimeMessage}
+            <div className="fh" style={{marginTop:6}}>
+              {Object.entries(runtimeStatus?.backends || {}).map(([name, info]) => (
+                <span key={name} style={{display:'inline-block',marginRight:10}}>
+                  {name}: <strong>{info?.available && info?.status === 'ready' ? 'ready' : (info?.message || 'unavailable')}</strong>
+                </span>
+              ))}
+            </div>
+          </div>
+          <div className="ibox"><strong>Launch summary</strong> — The selected {runtimeFamilyLabel} runtime will download the chosen OS image automatically on first launch and cache it locally for later launches.</div>
         </div>
         <div className="mf">
           <button className="btn btn-s" onClick={onClose} disabled={busy}>Cancel</button>
-          <button className="btn btn-p" onClick={submit} disabled={busy}>{busy ? '⏳ Launching…' : 'Launch instance'}</button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function DeploySampleAppModal({instance, onClose, onDone, notify}) {
-  const [apps, setApps] = useState([]);
-  const [selected, setSelected] = useState(instance?.sample_app_id || '');
-  const [busy, setBusy] = useState(false);
-
-  useEffect(() => {
-    EC2.sampleApps()
-      .then(d => {
-        setApps(d.sample_apps || []);
-        if (!selected && (d.sample_apps || []).length) {
-          setSelected(d.sample_apps[0].id);
-        }
-      })
-      .catch(e => notify(e.message, 'error'));
-  }, []);
-
-  const current = apps.find(app => app.id === selected);
-
-  const deploy = async () => {
-    if (!selected) {
-      notify('Choose a sample app first.', 'error');
-      return;
-    }
-    setBusy(true);
-    try {
-      const result = await EC2.deploySampleApp(instance.instance_id, selected);
-      notify(`${result.sample_app?.name || 'Sample app'} deployed to ${instance.name}`, 'success');
-      onDone(result);
-    } catch (e) {
-      notify(e.message, 'error');
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  return (
-    <div className="overlay" onClick={e=>e.target===e.currentTarget&&!busy&&onClose()}>
-      <div className="modal">
-        <div className="mh">
-          <span className="mt">Deploy sample app</span>
-          <button className="mx" onClick={onClose} disabled={busy}>×</button>
-        </div>
-        <div className="mb">
-          <div className="ibox">
-            <strong>{instance.name}</strong> — {instance.instance_id}
-            <div className="console-meta">
-              <span>State: <strong>{instance.state}</strong></span>
-              <span>Runtime image: <strong>{instance.runtime_image || 'python:3.12-slim'}</strong></span>
-              <span>Endpoint: <strong>{instance.endpoint_url || 'assigned on start'}</strong></span>
-            </div>
-          </div>
-          <div className="fg">
-            <label className="fl">Sample app</label>
-            <select className="fi" value={selected} onChange={e=>setSelected(e.target.value)}>
-              <option value="">Select app</option>
-              {apps.map(app => <option key={app.id} value={app.id}>{app.name}</option>)}
-            </select>
-            <div className="fh">{current?.description || 'Copy a built-in template into the instance workspace and start it when the instance is running.'}</div>
-          </div>
-          {current && (
-            <div className="ibox">
-              <strong>{current.name}</strong> — start command: <span className="arn">{current.start_command}</span>
-            </div>
-          )}
-        </div>
-        <div className="mf">
-          <button className="btn btn-s" onClick={onClose} disabled={busy}>Cancel</button>
-          <button className="btn btn-p" onClick={deploy} disabled={busy}>{busy ? '⏳ Deploying…' : 'Deploy app'}</button>
+          <button className="btn btn-p" onClick={submit} disabled={busy || !runtimeReady}>{busy ? '⏳ Launching…' : 'Launch instance'}</button>
         </div>
       </div>
     </div>
@@ -2885,14 +3239,19 @@ function EC2ConsoleModal({instance, notify, onClose}) {
   const inputRef = useRef(null);
   const wsRef = useRef(null);
   const wsErroredRef = useRef(false);
-  const isDockerBacked = instance?.runtime_backend === 'docker';
-  const sessionLabel = isDockerBacked ? 'docker exec -it' : 'local runtime shell';
-  const sessionTarget = isDockerBacked ? (instance.container_name || instance.container_id || instanceId) : 'simulated EC2 runtime';
-  const hostCommand = isDockerBacked ? `docker exec -it ${sessionTarget} /bin/sh` : '';
-  const prompt = instance?.console_prompt || (isDockerBacked ? `root@${sessionTarget}:/workspace#` : 'C:\\Users\\Administrator>');
-  const emptyTerminal = isDockerBacked
-    ? <>docker exec -it {sessionTarget} /bin/sh<br/>Connected to container {sessionTarget} ({instance.runtime_image || 'python:3.12-slim'})</>
-    : <>Microsoft Windows [Version 10.0.22631.0]<br/>(c) CloudLearn Simulator. All rights reserved.<br/><br/>{`Attached to ${sessionLabel} ${sessionTarget}`}</>;
+  const isWindows = String(instance?.os_family || '').toLowerCase() === 'windows';
+  const backend = String(instance?.runtime_backend || '').toLowerCase();
+  const sshCommand = String(instance?.ssh_command || '').trim();
+  const isSandboxBacked = ['lxd', 'multipass'].includes(backend);
+  const sessionLabel = backend === 'multipass' ? 'ssh' : 'console';
+  const sessionTarget = isSandboxBacked ? (instance.container_name || instance.container_id || instanceId) : '';
+  const hostCommand = backend === 'multipass'
+    ? (sshCommand || `ssh ubuntu@${instance?.public_ip || instance?.private_ip || sessionTarget}`)
+    : '';
+  const prompt = instance?.console_prompt || (isSandboxBacked ? `ubuntu@${sessionTarget}:/workspace$` : '');
+  const emptyTerminal = isSandboxBacked
+    ? <>{backend === 'multipass' ? hostCommand : 'Connected to instance'}<br/>Connected to instance {sessionTarget} ({instance.runtime_image || 'ubuntu:24.04'})</>
+    : <>A sandbox runtime is required for EC2 consoles.</>;
 
   useEffect(() => {
     if (!instanceId) {
@@ -2900,12 +3259,17 @@ function EC2ConsoleModal({instance, notify, onClose}) {
       setOutput('Missing EC2 instance id.\n');
       return;
     }
+    if (!isSandboxBacked) {
+      setStatus('error');
+      setOutput('A sandbox runtime is required for EC2 consoles.\n');
+      return;
+    }
     const scheme = window.location.protocol === 'https:' ? 'wss' : 'ws';
     const ws = new WebSocket(`${scheme}://${window.location.host}/ws/ec2/instances/${encodeURIComponent(instanceId)}/console`);
     wsRef.current = ws;
     wsErroredRef.current = false;
     setStatus('connecting');
-    ws.onopen = () => setStatus(isDockerBacked ? 'attached' : 'live');
+    ws.onopen = () => setStatus('attached');
     ws.onmessage = (ev) => {
       const chunk = typeof ev.data === 'string' ? ev.data.replace(/\r\n/g, '\n').replace(/\r/g, '\n') : '';
       if (!chunk) return;
@@ -2914,7 +3278,7 @@ function EC2ConsoleModal({instance, notify, onClose}) {
     ws.onerror = () => {
       wsErroredRef.current = true;
       setStatus('error');
-      setOutput(`Unable to open Command Prompt for ${instanceId}.\n`);
+      setOutput(`Unable to open sandbox console for ${instanceId}.\n`);
     };
     ws.onclose = () => {
       if (!wsErroredRef.current) setStatus('closed');
@@ -2922,7 +3286,7 @@ function EC2ConsoleModal({instance, notify, onClose}) {
     return () => {
       try { ws.close(); } catch (_) {}
     };
-  }, [instanceId, instance?.endpoint_url, instance?.runtime_image, isDockerBacked, sessionTarget]);
+  }, [instanceId, instance?.endpoint_url, instance?.runtime_image, isSandboxBacked, sessionTarget]);
 
   useEffect(() => {
     if (endRef.current) endRef.current.scrollIntoView({behavior:'smooth', block:'end'});
@@ -2957,11 +3321,9 @@ function EC2ConsoleModal({instance, notify, onClose}) {
     if (busy) return;
     const value = input.trimEnd();
     if (!value) return;
-    if (!isDockerBacked) {
-      setOutput(prev => {
-        const echo = `${prompt} ${value}\n`;
-        return prev ? prev + echo : echo;
-      });
+    if (!isSandboxBacked) {
+      notify('A sandbox runtime is required for EC2 consoles.', 'error');
+      return;
     }
     setHistory(prev => {
       const next = [...prev, value];
@@ -2976,7 +3338,7 @@ function EC2ConsoleModal({instance, notify, onClose}) {
     <div className="overlay" onClick={e => e.target===e.currentTarget && onClose()}>
       <div className="modal modal-lg">
         <div className="mh">
-          <span className="mt">Command Prompt</span>
+          <span className="mt">SSH Console</span>
           <button className="mx" onClick={onClose}>×</button>
         </div>
         <div className="mb">
@@ -2986,10 +3348,10 @@ function EC2ConsoleModal({instance, notify, onClose}) {
               <span>State: <strong>{instance.state}</strong></span>
               <span>AMI: <strong>{instance.ami_name || instance.ami}</strong></span>
               <span>Runtime image: <strong>{instance.runtime_image || 'python:3.12-slim'}</strong></span>
-              <span>Sample app: <strong>{instance.sample_app_name || 'none'}</strong></span>
-              <span>Backend: <strong>{instance.runtime_backend || 'simulated'}</strong></span>
+              <span>Image download: <strong>{instance.container_download_state || 'pending'}</strong></span>
+              <span>Backend: <strong>{instance.runtime_backend || 'sandbox'}</strong></span>
+              {hostCommand && <span>SSH command: <strong className="ec2-mono">{hostCommand}</strong></span>}
               {instance.endpoint_url && <span>Endpoint: <strong>{instance.endpoint_url}</strong></span>}
-              {hostCommand && <span>Host command: <strong className="ec2-mono">{hostCommand}</strong></span>}
             </div>
           </div>
           <div className="terminal-wrap">
@@ -3036,7 +3398,8 @@ function EC2ConsoleModal({instance, notify, onClose}) {
                       setInput(prev => prev + '  ');
                     }
                   }}
-                  placeholder={isDockerBacked ? 'Type a command and press Enter' : 'Local runtime console'}
+                  disabled={!isSandboxBacked}
+                  placeholder={isSandboxBacked ? 'Type an SSH command and press Enter' : 'Multipass runtime required'}
                   spellCheck="false"
                   autoCapitalize="off"
                   autoComplete="off"
@@ -3051,7 +3414,7 @@ function EC2ConsoleModal({instance, notify, onClose}) {
               <button className="btn btn-s" onClick={() => send('\u0003')} disabled={busy}>Ctrl-C</button>
             </div>
             <div className="btn-grp">
-              <button className="btn btn-s" onClick={() => notify('Console output is streamed from the running EC2 instance console.', 'info')} disabled={busy}>Info</button>
+              <button className="btn btn-s" onClick={() => notify('Console output is executed over SSH against the running EC2 instance.', 'info')} disabled={busy}>Info</button>
             </div>
           </div>
         </div>
@@ -3117,32 +3480,35 @@ function EC2View({notify}) {
   const [instances, setInstances] = useState([]);
   const [showLaunch, setShowLaunch] = useState(false);
   const [consoleInstance, setConsoleInstance] = useState(null);
-  const [deployInstance, setDeployInstance] = useState(null);
   const [selectedIds, setSelectedIds] = useState([]);
   const [detailsTab, setDetailsTab] = useState('details');
   const [openMenu, setOpenMenu] = useState(null);
   const [search, setSearch] = useState('');
   const [showApiDocs, setShowApiDocs] = useState(false);
   const [docAction, setDocAction] = useState('DescribeInstances');
-  const [dockerRuntime, setDockerRuntime] = useState(null);
-  const [dockerBusy, setDockerBusy] = useState(false);
+  const [lxdRuntime, setLxdRuntime] = useState(null);
+  const [lxdBusy, setLxdBusy] = useState(false);
+  const [lxdInstalling, setLxdInstalling] = useState(false);
   const [focusedInstanceId, setFocusedInstanceId] = useState('');
+  const lxdQueueTimerRef = useRef(null);
+  const hostOs = String(lxdRuntime?.host_os || '').toLowerCase();
+  const runtimeFamilyLabel = hostOs === 'darwin' || hostOs === 'windows' ? 'Multipass' : 'Multipass / LXD';
 
   const load = useCallback(async () => {
     try { const d = await EC2.list(); setInstances(d.instances||[]); }
     catch(e) { notify(e.message, 'error'); }
   }, [notify]);
 
-  const loadDocker = useCallback(async () => {
+  const loadRuntime = useCallback(async () => {
     try {
-      const d = await EC2.dockerRuntime();
-      setDockerRuntime(d);
+      const d = await EC2.runtime();
+      setLxdRuntime(d);
       return d;
     } catch (e) {
-      setDockerRuntime({available:false, status:'error', message:e.message, instructions:{label:'Install Docker runtime'}});
+      setLxdRuntime({available:false, status:'error', message:e.message, instructions:{label:runtimeFamilyLabel}});
       return null;
     }
-  }, [notify]);
+  }, [notify, runtimeFamilyLabel]);
 
   const runAction = async (action) => {
     try {
@@ -3155,10 +3521,10 @@ function EC2View({notify}) {
 
   useEffect(() => { load(); }, [load]);
   useEffect(() => {
-    loadDocker();
-    const timer = setInterval(loadDocker, 5000);
+    loadRuntime();
+    const timer = setInterval(loadRuntime, 5000);
     return () => clearInterval(timer);
-  }, [loadDocker]);
+  }, [loadRuntime]);
   useEffect(() => {
     const closeMenu = () => setOpenMenu(null);
     document.addEventListener('click', closeMenu);
@@ -3196,9 +3562,8 @@ function EC2View({notify}) {
   const selectedStopped = selectedInstances.length > 0 && selectedInstances.every(i => i.state === 'stopped');
   const anySelectedRunning = selectedInstances.some(i => i.state === 'running');
   const anySelectedStopped = selectedInstances.some(i => i.state === 'stopped');
-  const dockerReady = dockerRuntime?.available && dockerRuntime?.status === 'ready';
-  const dockerInstalling = dockerRuntime?.status === 'installing';
-  const dockerVisible = !!dockerRuntime && !dockerReady;
+  const lxdReady = !!(lxdRuntime?.available || Object.values(lxdRuntime?.backends || {}).some(b => b?.available && b?.status === 'ready'));
+  const lxdVisible = !!lxdRuntime;
 
   const toggleSelected = (id) => {
     setSelectedIds(prev => {
@@ -3237,15 +3602,11 @@ function EC2View({notify}) {
       notify('Start the instance before opening the console.', 'info');
       return;
     }
-    setConsoleInstance({...consoleTarget});
-  };
-
-  const deploySelected = () => {
-    if (!selectedSingle) {
-      notify('Select exactly one instance to deploy a sample app.', 'info');
+    if (!['lxd', 'multipass'].includes(String(consoleTarget.runtime_backend || '').toLowerCase())) {
+      notify('EC2 consoles require a supported Multipass or LXD-backed instance.', 'error');
       return;
     }
-    setDeployInstance(selectedSingle);
+    setConsoleInstance({...consoleTarget});
   };
 
   const stateChipClass = (state) => ({
@@ -3265,7 +3626,15 @@ function EC2View({notify}) {
   };
 
   const alarmStatusLabel = () => 'No alarms';
-  const tabOrder = ['details', 'status checks', 'monitoring', 'tags', 'networking', 'security', 'storage', 'console', 'sample app'];
+  const runtimeLabel = (instance) => {
+    const backend = String(instance?.runtime_backend || '').toLowerCase();
+    return backend ? `${backend[0].toUpperCase()}${backend.slice(1)} runtime` : 'unavailable';
+  };
+  const consoleLabel = (instance) => {
+    const backend = String(instance?.runtime_backend || '').toLowerCase();
+    return backend ? `${backend[0].toUpperCase()}${backend.slice(1)} console` : 'unavailable';
+  };
+  const tabOrder = ['details', 'status checks', 'monitoring', 'tags', 'networking', 'security', 'storage', 'console'];
   const tabLabel = (tab) => ({
     'details': 'Details',
     'status checks': 'Status checks',
@@ -3275,7 +3644,6 @@ function EC2View({notify}) {
     'security': 'Security',
     'storage': 'Storage',
     'console': 'Console',
-    'sample app': 'Sample app',
   }[tab] || tab);
 
   const detailRows = selectedSingle ? [
@@ -3284,7 +3652,7 @@ function EC2View({notify}) {
     ['Instance type', selectedSingle.instance_type],
     ['AMI', selectedSingle.ami_name || selectedSingle.ami],
     ['Runtime image', selectedSingle.runtime_image || 'python:3.12-slim'],
-    ['Runtime backend', selectedSingle.runtime_backend || 'simulated'],
+    ['Runtime backend', runtimeLabel(selectedSingle)],
     ['Availability Zone', selectedSingle.az],
     ['Private IPv4 address', selectedSingle.private_ip || '—'],
     ['Public IPv4 address', selectedSingle.public_ip || '—'],
@@ -3292,22 +3660,63 @@ function EC2View({notify}) {
     ['Subnet ID', selectedSingle.subnet_id || '—'],
     ['Security groups', (selectedSingle.security_group_ids || []).join(', ') || '—'],
     ['Endpoint', selectedSingle.endpoint_url || '—'],
-    ['Sample app', selectedSingle.sample_app_name ? `${selectedSingle.sample_app_name} (${selectedSingle.sample_app_status || 'deployed'})` : 'None'],
-    ['Console backend', selectedSingle.console_backend || 'browser console']
+    ['Image download', selectedSingle.container_download_state || 'pending'],
+    ['Console backend', consoleLabel(selectedSingle)]
   ] : [];
 
-  const bootstrapDocker = async () => {
-    setDockerBusy(true);
+  const bootstrapRuntime = async () => {
+    setLxdBusy(true);
     try {
-      const d = await EC2.bootstrapDocker();
-      setDockerRuntime(d);
-      notify(d.status === 'ready' ? 'Docker runtime is ready.' : (d.message || 'Docker bootstrap started.'), d.status === 'ready' ? 'success' : 'info');
+      const d = await EC2.bootstrapRuntime();
+      setLxdRuntime(d);
+      if (lxdQueueTimerRef.current) {
+        clearTimeout(lxdQueueTimerRef.current);
+        lxdQueueTimerRef.current = null;
+      }
+      if (d.status === 'ready') {
+        setLxdInstalling(false);
+        notify(`${runtimeFamilyLabel} runtime is ready.`, 'success');
+        return;
+      }
+      setLxdInstalling(true);
+      notify(d.message || 'Multipass and LXD runtime checks started in the background.', 'info');
+      lxdQueueTimerRef.current = setTimeout(async () => {
+        try {
+          const current = await EC2.runtime();
+          setLxdRuntime(current);
+          if (current?.available && current?.status === 'ready') {
+            setLxdInstalling(false);
+            notify(`${runtimeFamilyLabel} runtime is ready.`, 'success');
+            return;
+          }
+          setLxdRuntime(prev => prev ? ({
+            ...prev,
+            available: false,
+            status: 'manual',
+            message: current?.message || `${runtimeFamilyLabel} runtime status checks are queued in the background. EC2 will remain blocked until a runtime is ready.`,
+            instructions: {
+              label: 'Runtime status queued',
+              message: `CloudLearn keeps running while ${runtimeFamilyLabel} is unavailable.`,
+              helper: 'background'
+            }
+          }) : prev);
+          setLxdInstalling(false);
+          notify(`${runtimeFamilyLabel} runtime status checks are queued in the background. EC2 will remain blocked until a runtime is ready.`, 'info');
+        } catch (e) {
+          setLxdInstalling(false);
+          notify(e.message || `${runtimeFamilyLabel} runtime status checks are queued in the background.`, 'info');
+        }
+      }, 2500);
     } catch (e) {
       notify(e.message, 'error');
     } finally {
-      setDockerBusy(false);
+      setLxdBusy(false);
     }
   };
+
+  useEffect(() => () => {
+    if (lxdQueueTimerRef.current) clearTimeout(lxdQueueTimerRef.current);
+  }, []);
 
   const copyToClipboard = async (text, label) => {
     try {
@@ -3376,23 +3785,27 @@ function EC2View({notify}) {
 
   return (
     <div className="panel">
-      {dockerVisible && (
+      {lxdVisible && (
         <div className="ibox" style={{margin:'16px 16px 0',display:'flex',alignItems:'flex-start',justifyContent:'space-between',gap:12,flexWrap:'wrap'}}>
           <div style={{minWidth:0,flex:1}}>
-            <strong>{dockerInstalling ? 'Docker runtime is installing' : 'Docker runtime is not ready'}</strong>
+            <strong>{lxdReady ? `${runtimeFamilyLabel} runtime ready` : `${runtimeFamilyLabel} runtime unavailable`}</strong>
             <div style={{marginTop:4}}>
-              {dockerRuntime?.message || 'This EC2 simulator can install a Docker-backed runtime on the host so instances can attach to containers and run sample apps.'}
+              {lxdRuntime?.message || `EC2 launches depend on a ${runtimeFamilyLabel} runtime service.`}
             </div>
             <div className="fh" style={{marginTop:6}}>
-              {dockerRuntime?.instructions?.label || 'Install Docker runtime'}
+              {lxdRuntime?.instructions?.label || runtimeFamilyLabel}
             </div>
-            {dockerRuntime?.target?.helper && (
-              <div className="fh">Mode: {dockerRuntime.target.helper}</div>
+            {lxdRuntime?.backends && Object.entries(lxdRuntime.backends).length > 0 && (
+              <div style={{marginTop:10,display:'grid',gap:6}}>
+                {Object.entries(lxdRuntime.backends).map(([backend, status]) => (
+                  <div key={backend} className="fh">
+                    <strong>{backend === 'multipass' ? 'Multipass' : backend === 'lxd' ? 'LXD' : backend.toUpperCase()}</strong>{' '}
+                    {status?.available && status?.status === 'ready' ? 'ready' : (status?.message || 'unavailable')}
+                  </div>
+                ))}
+              </div>
             )}
           </div>
-          <button className="btn btn-p" onClick={bootstrapDocker} disabled={dockerBusy || dockerInstalling}>
-            {dockerInstalling ? '⏳ Installing…' : 'Install Docker runtime'}
-          </button>
         </div>
       )}
       <div className="ec2-topbar">
@@ -3402,7 +3815,7 @@ function EC2View({notify}) {
         </div>
         <div className="btn-grp">
           <button className="btn btn-s" onClick={load}>↻ Refresh</button>
-          <button className="btn btn-p" onClick={()=>setShowLaunch(true)}>Launch instances</button>
+          <button className="btn btn-p" onClick={()=>setShowLaunch(true)} disabled={!lxdReady} title={!lxdReady ? `A ${runtimeFamilyLabel} runtime must be ready before launching EC2 instances.` : ''}>Launch instances</button>
         </div>
       </div>
       {!showApiDocs && (
@@ -3542,11 +3955,7 @@ Version=2016-11-15</pre>
             <div className="ec2-menu-panel" onClick={e=>e.stopPropagation()}>
               <button className="ec2-menu-item" disabled={!consoleTarget || consoleTarget.state !== 'running'} onClick={()=>{setOpenMenu(null); openConsole();}}>
                 <strong>Open console</strong>
-                <span>Open the browser console for the selected running instance.</span>
-              </button>
-              <button className="ec2-menu-item" disabled={!selectedSingle} onClick={()=>{setOpenMenu(null); deploySelected();}}>
-                <strong>Deploy sample app</strong>
-                <span>Copy a built-in sample app into the instance workspace.</span>
+                <span>Open the sandbox console for the selected running instance.</span>
               </button>
               <button className="ec2-menu-item" onClick={()=>{setOpenMenu(null); load();}}>
                 <strong>Refresh</strong>
@@ -3648,7 +4057,7 @@ Version=2016-11-15</pre>
             </div>
             <div className="ec2-details-sub">
               {selectedSingle
-                ? `${selectedSingle.instance_id} · ${selectedSingle.ami_name || selectedSingle.ami} · ${selectedSingle.runtime_backend || 'simulated'}`
+                ? `${selectedSingle.instance_id} · ${selectedSingle.ami_name || selectedSingle.ami} · ${runtimeLabel(selectedSingle)}`
                 : 'Select an instance to view details and actions.'}
             </div>
           </div>
@@ -3674,7 +4083,8 @@ Version=2016-11-15</pre>
                     ['Availability Zone', selectedSingle.az],
                     ['Launch time', fmtDate(selectedSingle.created)],
                     ['Key pair name', selectedSingle.key_pair || '—'],
-                    ['Runtime backend', selectedSingle.runtime_backend || 'simulated'],
+                    ['Runtime backend', runtimeLabel(selectedSingle)],
+                    ['Image download', selectedSingle.container_download_state || 'pending'],
                   ].map(([k, v]) => (
                     <dl className="ec2-kv" key={k}><dt>{k}</dt><dd>{String(v)}</dd></dl>
                   ))}
@@ -3700,8 +4110,8 @@ Version=2016-11-15</pre>
               {detailsTab === 'tags' && (
                 <div className="ec2-kv-grid">
                   <dl className="ec2-kv"><dt>Name</dt><dd>{selectedSingle.name}</dd></dl>
-                  <dl className="ec2-kv"><dt>Runtime backend</dt><dd>{selectedSingle.runtime_backend || 'simulated'}</dd></dl>
-                  <dl className="ec2-kv"><dt>Sample app</dt><dd>{selectedSingle.sample_app_name || 'None'}</dd></dl>
+                  <dl className="ec2-kv"><dt>Runtime backend</dt><dd>{runtimeLabel(selectedSingle)}</dd></dl>
+                  <dl className="ec2-kv"><dt>Image download</dt><dd>{selectedSingle.container_download_state || 'pending'}</dd></dl>
                   <dl className="ec2-kv"><dt>Pack</dt><dd>{selectedSingle.pack_id || 'cloudlearn.ec2.basic'}</dd></dl>
                 </div>
               )}
@@ -3736,17 +4146,9 @@ Version=2016-11-15</pre>
               )}
               {detailsTab === 'console' && (
                 <div className="ec2-kv-grid">
-                  <dl className="ec2-kv"><dt>Console backend</dt><dd>{selectedSingle.console_backend || 'browser console'}</dd></dl>
+                  <dl className="ec2-kv"><dt>Console backend</dt><dd>{consoleLabel(selectedSingle)}</dd></dl>
                   <dl className="ec2-kv"><dt>Console state</dt><dd>{selectedSingle.console_state?.cwd ? 'connected workspace' : selectedSingle.state}</dd></dl>
                   <dl className="ec2-kv"><dt>Recent commands</dt><dd>{(selectedSingle.console_log || []).slice(-3).map(item => item.command).join(' | ') || 'No console history yet'}</dd></dl>
-                </div>
-              )}
-              {detailsTab === 'sample app' && (
-                <div className="ec2-kv-grid">
-                  <dl className="ec2-kv"><dt>Sample app</dt><dd>{selectedSingle.sample_app_name || 'None'}</dd></dl>
-                  <dl className="ec2-kv"><dt>Status</dt><dd>{selectedSingle.sample_app_status || 'not deployed'}</dd></dl>
-                  <dl className="ec2-kv"><dt>Start command</dt><dd className="ec2-mono">{selectedSingle.sample_app_command || '—'}</dd></dl>
-                  <dl className="ec2-kv"><dt>Endpoint</dt><dd className="ec2-mono">{selectedSingle.endpoint_url || '—'}</dd></dl>
                 </div>
               )}
             </div>
@@ -3761,7 +4163,6 @@ Version=2016-11-15</pre>
         )}
       </div>
       {showLaunch && <LaunchInstanceModal notify={notify} onClose={()=>setShowLaunch(false)} onDone={()=>{setShowLaunch(false); load();}} />}
-      {deployInstance && <DeploySampleAppModal instance={deployInstance} notify={notify} onClose={()=>setDeployInstance(null)} onDone={()=>{setDeployInstance(null); load();}} />}
       {consoleInstance && <EC2ConsoleModal instance={consoleInstance} notify={notify} onClose={()=>setConsoleInstance(null)} />}
     </div>
   );
@@ -4792,7 +5193,7 @@ function RDSView({notify}) {
               <dl className="ec2-kv"><dt>Publicly accessible</dt><dd>{selectedDb.publicly_accessible ? 'Yes' : 'No'}</dd></dl>
               <dl className="ec2-kv"><dt>Availability Zone</dt><dd>{selectedDb.availability_zone || '—'}</dd></dl>
               <dl className="ec2-kv"><dt>Runtime backend</dt><dd>{selectedDb.runtime_backend || 'simulated'}</dd></dl>
-              <dl className="ec2-kv"><dt>Docker image</dt><dd className="ec2-mono">{selectedDb.runtime_image || '—'}</dd></dl>
+              <dl className="ec2-kv"><dt>LXD image</dt><dd className="ec2-mono">{selectedDb.runtime_image || '—'}</dd></dl>
               <dl className="ec2-kv"><dt>Container</dt><dd className="ec2-mono">{selectedDb.container_name || '—'}</dd></dl>
               <dl className="ec2-kv"><dt>Container status</dt><dd>{selectedDb.container_status || '—'}</dd></dl>
             </div>
@@ -6199,6 +6600,789 @@ function SQSView({notify}) {
               'The simulator will remove the queue and all messages in it.',
             ]}
             onConfirm={deleteQueue}
+            onClose={() => setDeleteTarget(null)}
+            busy={deleteBusy}
+          />
+        )}
+      </div>
+    </>
+  );
+}
+
+function DynamoDBApiDocsPanel() {
+  const [showApiDocs, setShowApiDocs] = useState(false);
+  const [docAction, setDocAction] = useState('CreateTable');
+  const docs = useMemo(() => ([
+    {
+      action: 'CreateTable',
+      request: `POST /api/dynamodb/aws
+X-Amz-Target: DynamoDB_20120810.CreateTable
+Content-Type: application/x-amz-json-1.0
+
+{
+  "TableName": "Books",
+  "AttributeDefinitions": [{"AttributeName":"id","AttributeType":"S"}],
+  "KeySchema": [{"AttributeName":"id","KeyType":"HASH"}]
+}`,
+      response: `{
+  "TableDescription": {
+    "TableName": "Books",
+    "TableStatus": "ACTIVE",
+    "ItemCount": 0
+  }
+}`,
+      summary: 'Creates a table with a hash key and optional sort key, then returns the table description.',
+    },
+    {
+      action: 'ListTables',
+      request: `POST /api/dynamodb/aws
+X-Amz-Target: DynamoDB_20120810.ListTables
+Content-Type: application/x-amz-json-1.0
+
+{}`,
+      response: `{
+  "TableNames": ["Books"]
+}`,
+      summary: 'Lists tables in the simulator account.',
+    },
+    {
+      action: 'DescribeTable',
+      request: `POST /api/dynamodb/aws
+X-Amz-Target: DynamoDB_20120810.DescribeTable
+Content-Type: application/x-amz-json-1.0
+
+{ "TableName": "Books" }`,
+      response: `{
+  "Table": {
+    "TableName": "Books",
+    "KeySchema": [{"AttributeName":"id","KeyType":"HASH"}],
+    "TableStatus": "ACTIVE"
+  }
+}`,
+      summary: 'Returns the table metadata, key schema, indexes, and item counts.',
+    },
+    {
+      action: 'PutItem',
+      request: `POST /api/dynamodb/aws
+X-Amz-Target: DynamoDB_20120810.PutItem
+Content-Type: application/x-amz-json-1.0
+
+{
+  "TableName": "Books",
+  "Item": {"id": {"S": "bk-001"}, "title": {"S": "CloudLearn"}}
+}`,
+      response: `{
+  "Attributes": {}
+}`,
+      summary: 'Adds or replaces an item in the selected table.',
+    },
+    {
+      action: 'Query',
+      request: `POST /api/dynamodb/aws
+X-Amz-Target: DynamoDB_20120810.Query
+Content-Type: application/x-amz-json-1.0
+
+{
+  "TableName": "Books",
+  "KeyConditionExpression": "id = :id",
+  "ExpressionAttributeValues": {":id": {"S": "bk-001"}}
+}`,
+      response: `{
+  "Items": [{"id": {"S": "bk-001"}, "title": {"S": "CloudLearn"}}],
+  "Count": 1
+}`,
+      summary: 'Returns items matching a partition key and optional sort key condition.',
+    },
+    {
+      action: 'Scan',
+      request: `POST /api/dynamodb/aws
+X-Amz-Target: DynamoDB_20120810.Scan
+Content-Type: application/x-amz-json-1.0
+
+{ "TableName": "Books" }`,
+      response: `{
+  "Items": [],
+  "Count": 0
+}`,
+      summary: 'Scans the entire table and returns a result set in table order.',
+    },
+  ]), []);
+  const selected = docs.find(d => d.action === docAction) || docs[0];
+
+  return (
+    <>
+      {!showApiDocs && (
+        <button className="vpc-doc-toggle" onClick={() => setShowApiDocs(true)}>
+          <span className="vpc-doc-toggle-label">API Documentation</span>
+        </button>
+      )}
+      {showApiDocs && (
+        <aside className="vpc-doc-drawer" aria-label="Amazon DynamoDB API Reference">
+          <div className="vpc-doc-drawer-head">
+            <div style={{minWidth:0,flex:1}}>
+              <div className="vpc-doc-drawer-title">Amazon DynamoDB API Reference</div>
+              <div className="vpc-doc-drawer-sub">Use the DynamoDB JSON RPC contract with one request/response pair at a time.</div>
+            </div>
+            <button className="vpc-doc-drawer-close" onClick={() => setShowApiDocs(false)}>Close</button>
+          </div>
+          <div className="vpc-doc-drawer-body">
+            <div className="ec2-docs-note">The simulator accepts the DynamoDB JSON target header and a JSON request body.</div>
+            <div className="ec2-docs-contents" style={{marginTop:0}}>
+              <h3>Contents</h3>
+              <div className="ec2-docs-links">
+                {docs.map(d => (
+                  <button key={d.action} className="ec2-docs-link" type="button" onClick={() => setDocAction(d.action)} style={{background:'none',border:'none',padding:0}}>
+                    {d.action}
+                  </button>
+                ))}
+              </div>
+            </div>
+            <div className="ec2-docs-section" style={{borderTop:'none',paddingTop:0,marginTop:16}}>
+              <h3>Request and response</h3>
+              <div className="ec2-docs-note">{selected.summary}</div>
+              <select className="ec2-doc-select" value={docAction} onChange={e => setDocAction(e.target.value)}>
+                {docs.map(d => <option key={d.action} value={d.action}>{d.action}</option>)}
+              </select>
+              <div className="ec2-docs-request">
+                <div className="ec2-docs-block">
+                  <div className="ec2-docs-block-title">Request</div>
+                  <pre className="ec2-docs-code">{selected.request}</pre>
+                </div>
+                <div className="ec2-docs-block">
+                  <div className="ec2-docs-block-title">Response</div>
+                  <pre className="ec2-docs-code">{selected.response}</pre>
+                </div>
+              </div>
+            </div>
+          </div>
+        </aside>
+      )}
+    </>
+  );
+}
+
+function CreateDynamoDBView({onBack, onDone, notify}) {
+  const [form, setForm] = useState({
+    table_name: 'my-table',
+    partition_key_name: 'id',
+    partition_key_type: 'S',
+    sort_key_name: '',
+    sort_key_type: 'S',
+    billing_mode: 'PAY_PER_REQUEST',
+  });
+  const [tagRows, setTagRows] = useState([{key: 'Name', value: 'my-table'}]);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState('');
+
+  const submit = async () => {
+    setBusy(true);
+    setErr('');
+    try {
+      const tags = tagRows.map(t => ({key: (t.key || '').trim(), value: (t.value || '').trim()})).filter(t => t.key || t.value);
+      const created = await DynamoDB.create({
+        ...form,
+        table_name: (form.table_name || '').trim(),
+        partition_key_name: (form.partition_key_name || '').trim(),
+        sort_key_name: (form.sort_key_name || '').trim(),
+        tags: tags.reduce((acc, row) => (row.key ? {...acc, [row.key]: row.value} : acc), {}),
+      });
+      onDone(created);
+    } catch (e) {
+      setErr(e.message);
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="panel">
+      <div className="vpc-page-head">
+        <div className="bc" style={{marginBottom:8}}>
+          <span>DynamoDB</span><span className="bc-sep">›</span><a onClick={onBack}>Tables</a><span className="bc-sep">›</span><span>Create table</span>
+        </div>
+        <div className="vpc-page-title">Create table</div>
+        <div className="vpc-page-sub">Create a table with a partition key and optional sort key, then use query and scan from the table details view.</div>
+      </div>
+      <div className="vpc-create-wrap">
+        <div className="vpc-create-card">
+          <div className="vpc-create-section">
+            <div className="vpc-detail-section-title">Table settings</div>
+            <div className="vpc-create-field">
+              <label className="fl">Table name</label>
+              <input className="fi" value={form.table_name} onChange={e => setForm(f => ({...f, table_name: e.target.value}))} placeholder="my-table" />
+            </div>
+            <div className="vpc-kv-grid" style={{marginTop:12}}>
+              <div className="fg">
+                <label className="fl">Partition key name</label>
+                <input className="fi" value={form.partition_key_name} onChange={e => setForm(f => ({...f, partition_key_name: e.target.value}))} placeholder="id" />
+              </div>
+              <div className="fg">
+                <label className="fl">Partition key type</label>
+                <select className="fi" value={form.partition_key_type} onChange={e => setForm(f => ({...f, partition_key_type: e.target.value}))}>
+                  <option value="S">String</option>
+                  <option value="N">Number</option>
+                  <option value="B">Binary</option>
+                </select>
+              </div>
+              <div className="fg">
+                <label className="fl">Sort key name</label>
+                <input className="fi" value={form.sort_key_name} onChange={e => setForm(f => ({...f, sort_key_name: e.target.value}))} placeholder="created_at" />
+              </div>
+              <div className="fg">
+                <label className="fl">Sort key type</label>
+                <select className="fi" value={form.sort_key_type} onChange={e => setForm(f => ({...f, sort_key_type: e.target.value}))}>
+                  <option value="S">String</option>
+                  <option value="N">Number</option>
+                  <option value="B">Binary</option>
+                </select>
+              </div>
+              <div className="fg">
+                <label className="fl">Billing mode</label>
+                <select className="fi" value={form.billing_mode} onChange={e => setForm(f => ({...f, billing_mode: e.target.value}))}>
+                  <option value="PAY_PER_REQUEST">On-demand</option>
+                  <option value="PROVISIONED">Provisioned</option>
+                </select>
+              </div>
+            </div>
+          </div>
+
+          <div className="vpc-create-section">
+            <div className="vpc-detail-section-title">Tags</div>
+            {tagRows.map((row, idx) => (
+              <div className="vpc-create-tag-row" key={idx}>
+                <input className="fi" placeholder="Key" value={row.key} onChange={e => setTagRows(rows => rows.map((r, i) => i === idx ? {...r, key: e.target.value} : r))} />
+                <input className="fi" placeholder="Value" value={row.value} onChange={e => setTagRows(rows => rows.map((r, i) => i === idx ? {...r, value: e.target.value} : r))} />
+                <button className="btn btn-s" type="button" onClick={() => setTagRows(rows => rows.filter((_, i) => i !== idx))}>Remove</button>
+              </div>
+            ))}
+            <div className="btn-grp" style={{marginTop:12}}>
+              <button className="btn btn-s" type="button" onClick={() => setTagRows(rows => [...rows, {key:'', value:''}])}>Add tag</button>
+            </div>
+          </div>
+
+          {err && <div className="ferr" style={{marginTop:8}}>{err}</div>}
+
+          <div className="vpc-create-footer">
+            <button className="btn btn-s" onClick={onBack} disabled={busy}>Cancel</button>
+            <button className="btn btn-p" onClick={submit} disabled={busy}>{busy ? '⏳ Creating…' : 'Create table'}</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function DynamoDBView({notify}) {
+  const [tables, setTables] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [page, setPage] = useState('list');
+  const [selectedTableName, setSelectedTableName] = useState('');
+  const [selectedTable, setSelectedTable] = useState(null);
+  const [detailTab, setDetailTab] = useState('items');
+  const [search, setSearch] = useState('');
+  const [actionsOpen, setActionsOpen] = useState(false);
+  const [showApiDocs, setShowApiDocs] = useState(false);
+  const [deleteTarget, setDeleteTarget] = useState(null);
+  const [deleteBusy, setDeleteBusy] = useState(false);
+  const [selectedItemKey, setSelectedItemKey] = useState('');
+  const [queryResult, setQueryResult] = useState(null);
+  const [itemDraft, setItemDraft] = useState('{\n  "id": "item-1",\n  "name": "Example"\n}');
+  const [queryForm, setQueryForm] = useState({
+    partition_key_value: '',
+    sort_key_equals: '',
+    sort_key_begins_with: '',
+    limit: 50,
+    scan_limit: 50,
+  });
+  const [tagRows, setTagRows] = useState([{key: 'Name', value: 'my-table'}]);
+  const actionsRef = useRef(null);
+
+  const loadList = useCallback(async () => {
+    setLoading(true);
+    try {
+      const d = await DynamoDB.list();
+      const list = d.tables || [];
+      setTables(list);
+      setSelectedTableName(current => current && list.some(table => table.table_name === current) ? current : (list[0]?.table_name || ''));
+    } catch (e) {
+      notify(e.message, 'error');
+    } finally {
+      setLoading(false);
+    }
+  }, [notify]);
+
+  const loadDetail = useCallback(async (tableName) => {
+    if (!tableName) {
+      setSelectedTable(null);
+      return;
+    }
+    try {
+      const d = await DynamoDB.get(tableName);
+      setSelectedTable(d.table || null);
+    } catch (e) {
+      notify(e.message, 'error');
+    }
+  }, [notify]);
+
+  useEffect(() => { loadList(); }, [loadList]);
+  useEffect(() => {
+    if (page === 'create') return;
+    if (!selectedTableName) return;
+    if (selectedTable && selectedTable.table_name === selectedTableName) return;
+    loadDetail(selectedTableName);
+  }, [selectedTableName, selectedTable, page, loadDetail]);
+  useEffect(() => {
+    if (!selectedTable) return;
+    const pk = selectedTable.partition_key_name || 'id';
+    const sk = selectedTable.sort_key_name || '';
+    setItemDraft(JSON.stringify(sk ? {[pk]: 'item-1', [sk]: '001', name: 'Example'} : {[pk]: 'item-1', name: 'Example'}, null, 2));
+    setTagRows(Object.entries(selectedTable.tags || {}).map(([key, value]) => ({key, value})).length ? Object.entries(selectedTable.tags || {}).map(([key, value]) => ({key, value})) : [{key:'', value:''}]);
+    setQueryForm(f => ({
+      ...f,
+      partition_key_value: '',
+      sort_key_equals: '',
+      sort_key_begins_with: '',
+      limit: 50,
+      scan_limit: 50,
+    }));
+    setSelectedItemKey('');
+    setQueryResult(null);
+  }, [selectedTable]);
+  useEffect(() => {
+    if (!actionsOpen) return;
+    const onPointerDown = (event) => {
+      if (actionsRef.current && !actionsRef.current.contains(event.target)) {
+        setActionsOpen(false);
+      }
+    };
+    document.addEventListener('pointerdown', onPointerDown);
+    return () => document.removeEventListener('pointerdown', onPointerDown);
+  }, [actionsOpen]);
+
+  const filteredTables = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    if (!q) return tables;
+    return tables.filter(table => [table.table_name, table.table_status, table.partition_key_name, table.sort_key_name, table.billing_mode, table.table_arn].join(' ').toLowerCase().includes(q));
+  }, [tables, search]);
+
+  const selectedItems = queryResult ? (queryResult.items || []) : (selectedTable?.item_rows || []);
+  const selectedSingle = selectedItems.find(row => JSON.stringify(row.key || {}) === selectedItemKey) || selectedItems[0] || null;
+  const totalTables = tables.length;
+  const visibleTables = filteredTables.length;
+  const selectedCount = selectedTable ? 1 : 0;
+
+  const openCreate = () => {
+    setShowApiDocs(false);
+    setActionsOpen(false);
+    setDeleteTarget(null);
+    setSelectedTableName('');
+    setSelectedTable(null);
+    setDetailTab('items');
+    setPage('create');
+  };
+
+  const handleCreateDone = async (created) => {
+    setPage('list');
+    notify(`Table "${created?.table_name || 'table'}" created`, 'success');
+    if (created?.table?.table_name) {
+      setSelectedTableName(created.table.table_name);
+      setSelectedTable(created.table);
+      setDetailTab('items');
+    }
+    await loadList();
+  };
+
+  const handleSelectTable = (tableName) => {
+    setActionsOpen(false);
+    setSelectedTableName(tableName);
+    setDetailTab('items');
+  };
+
+  const doDelete = async () => {
+    if (!deleteTarget) return;
+    setDeleteBusy(true);
+    try {
+      await DynamoDB.remove(deleteTarget.table_name);
+      notify(`Table "${deleteTarget.table_name}" deleted`, 'success');
+      setDeleteTarget(null);
+      setSelectedTableName('');
+      setSelectedTable(null);
+      await loadList();
+    } catch (e) {
+      notify(e.message, 'error');
+    } finally {
+      setDeleteBusy(false);
+    }
+  };
+
+  const saveItem = async () => {
+    if (!selectedTable) return notify('Select a table first', 'info');
+    try {
+      const parsed = JSON.parse(itemDraft || '{}');
+      await DynamoDB.putItem(selectedTable.table_name, {item: parsed});
+      notify('Item saved', 'success');
+      await loadDetail(selectedTable.table_name);
+      await loadList();
+    } catch (e) {
+      notify(e.message, 'error');
+    }
+  };
+
+  const deleteItem = async (row) => {
+    if (!selectedTable || !row) return;
+    try {
+      await DynamoDB.deleteItem(selectedTable.table_name, {key: row.key});
+      notify('Item deleted', 'success');
+      await loadDetail(selectedTable.table_name);
+      await loadList();
+      setSelectedItemKey('');
+    } catch (e) {
+      notify(e.message, 'error');
+    }
+  };
+
+  const runQuery = async () => {
+    if (!selectedTable) return notify('Select a table first', 'info');
+    try {
+      const d = await DynamoDB.query(selectedTable.table_name, {
+        partition_key_value: queryForm.partition_key_value || '',
+        sort_key_equals: queryForm.sort_key_equals || '',
+        sort_key_begins_with: queryForm.sort_key_begins_with || '',
+        limit: Number(queryForm.limit) || 50,
+      });
+      setQueryResult(d);
+      notify(`Query returned ${d.count || 0} item(s)`, 'success');
+    } catch (e) {
+      notify(e.message, 'error');
+    }
+  };
+
+  const runScan = async () => {
+    if (!selectedTable) return notify('Select a table first', 'info');
+    try {
+      const d = await DynamoDB.scan(selectedTable.table_name, {limit: Number(queryForm.scan_limit) || 50});
+      setQueryResult(d);
+      notify(`Scan returned ${d.count || 0} item(s)`, 'success');
+    } catch (e) {
+      notify(e.message, 'error');
+    }
+  };
+
+  const saveTags = async () => {
+    if (!selectedTable) return;
+    try {
+      const tags = tagRows.reduce((acc, row) => {
+        const key = (row.key || '').trim();
+        const value = (row.value || '').trim();
+        if (key) acc[key] = value;
+        return acc;
+      }, {});
+      await DynamoDB.tag(selectedTable.table_name, {tags});
+      notify('Tags updated', 'success');
+      await loadDetail(selectedTable.table_name);
+      await loadList();
+    } catch (e) {
+      notify(e.message, 'error');
+    }
+  };
+
+  const renderOverview = () => {
+    if (!selectedTable) {
+      return <div className="vpc-detail-empty">Select a table from the grid to view details.</div>;
+    }
+    return (
+      <>
+        <div className="vpc-detail-section">
+          <div className="vpc-kpi-grid">
+            <div className="vpc-kpi"><strong>{selectedTable.item_count ?? 0}</strong><span>Items</span></div>
+            <div className="vpc-kpi"><strong>{selectedTable.indexes?.length || 0}</strong><span>Indexes</span></div>
+            <div className="vpc-kpi"><strong>{Object.keys(selectedTable.tags || {}).length}</strong><span>Tags</span></div>
+            <div className="vpc-kpi"><strong>{selectedTable.billing_mode || 'PAY_PER_REQUEST'}</strong><span>Billing mode</span></div>
+          </div>
+        </div>
+        <div className="vpc-detail-section">
+          <div className="vpc-detail-section-title">Table details</div>
+          <div className="rds-detail-grid">
+            <dl className="ec2-kv"><dt>Table name</dt><dd>{selectedTable.table_name}</dd></dl>
+            <dl className="ec2-kv"><dt>Table ARN</dt><dd className="ec2-mono">{selectedTable.table_arn}</dd></dl>
+            <dl className="ec2-kv"><dt>Table status</dt><dd>{selectedTable.table_status}</dd></dl>
+            <dl className="ec2-kv"><dt>Partition key</dt><dd>{selectedTable.partition_key_name} ({selectedTable.partition_key_type})</dd></dl>
+            <dl className="ec2-kv"><dt>Sort key</dt><dd>{selectedTable.sort_key_name ? `${selectedTable.sort_key_name} (${selectedTable.sort_key_type})` : '—'}</dd></dl>
+            <dl className="ec2-kv"><dt>Created</dt><dd>{fmtDate(selectedTable.created)}</dd></dl>
+          </div>
+        </div>
+      </>
+    );
+  };
+
+  const renderItems = () => {
+    if (!selectedTable) return <div className="vpc-detail-empty">Select a table from the grid to view items.</div>;
+    const rows = queryResult?.items || selectedTable.item_rows || [];
+    return (
+      <>
+        <div className="vpc-detail-section">
+          <div className="vpc-detail-section-title">Query / Scan</div>
+          <div className="vpc-kv-grid">
+            <div className="fg">
+              <label className="fl">Partition key value</label>
+              <input className="fi" value={queryForm.partition_key_value} onChange={e => setQueryForm(f => ({...f, partition_key_value: e.target.value}))} placeholder="item-1" />
+            </div>
+            <div className="fg">
+              <label className="fl">Sort key equals</label>
+              <input className="fi" value={queryForm.sort_key_equals} onChange={e => setQueryForm(f => ({...f, sort_key_equals: e.target.value}))} placeholder="001" />
+            </div>
+            <div className="fg">
+              <label className="fl">Sort key begins with</label>
+              <input className="fi" value={queryForm.sort_key_begins_with} onChange={e => setQueryForm(f => ({...f, sort_key_begins_with: e.target.value}))} placeholder="00" />
+            </div>
+            <div className="fg">
+              <label className="fl">Limit</label>
+              <input className="fi" type="number" min="1" value={queryForm.limit} onChange={e => setQueryForm(f => ({...f, limit: e.target.value}))} />
+            </div>
+          </div>
+          <div className="btn-grp" style={{marginTop:10}}>
+            <button className="btn btn-s" onClick={runQuery}>Query</button>
+            <button className="btn btn-s" onClick={runScan}>Scan</button>
+            <button className="btn btn-s" onClick={() => setQueryResult(null)}>Clear results</button>
+          </div>
+        </div>
+        {rows.length > 0 && (
+          <div className="vpc-detail-section">
+            <div className="vpc-detail-section-title">Items</div>
+            <div className="vpc-grid-wrap apigw-list-scroll">
+              <table className="tbl vpc-grid">
+                <thead>
+                  <tr>
+                    <th><input type="checkbox" disabled aria-label="Select all items" /></th>
+                    <th>Primary key</th>
+                    <th>Sort key</th>
+                    <th>Attributes</th>
+                    <th>Created</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {rows.map(row => {
+                    const keyLabel = Object.entries(row.key || {}).map(([k, v]) => `${k}=${String(v)}`).join(', ');
+                    return (
+                      <tr key={JSON.stringify(row.key || {})} className={selectedItemKey === JSON.stringify(row.key || {}) ? 'active' : ''} onClick={() => setSelectedItemKey(JSON.stringify(row.key || {}))}>
+                        <td><input type="checkbox" checked={selectedItemKey === JSON.stringify(row.key || {})} onChange={() => setSelectedItemKey(JSON.stringify(row.key || {}))} /></td>
+                        <td title={keyLabel}><span className="vpc-grid-name">{keyLabel || '—'}</span></td>
+                        <td>{selectedTable.sort_key_name ? String(row.key?.[selectedTable.sort_key_name] ?? '—') : '—'}</td>
+                        <td><span className="ec2-mono">{JSON.stringify(row.item || {}, null, 0)}</span></td>
+                        <td>{fmtDate(row.created)}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
+        <div className="vpc-detail-section">
+          <div className="vpc-detail-section-title">Put item</div>
+          <div className="vpc-detail-note">Paste a simple JSON object with at least the partition key field.</div>
+          <textarea className="fi" rows="8" value={itemDraft} onChange={e => setItemDraft(e.target.value)} style={{fontFamily:'Consolas, "Courier New", monospace', minHeight:160}} />
+          <div className="btn-grp" style={{marginTop:10}}>
+            <button className="btn btn-p" onClick={saveItem}>Save item</button>
+            <button className="btn btn-s" onClick={() => selectedSingle && deleteItem(selectedSingle)} disabled={!selectedSingle}>Delete selected item</button>
+          </div>
+        </div>
+      </>
+    );
+  };
+
+  const renderIndexes = () => {
+    if (!selectedTable) return <div className="vpc-detail-empty">Select a table to view indexes.</div>;
+    return (
+      <div className="vpc-detail-section">
+        <div className="vpc-detail-section-title">Secondary indexes</div>
+        {selectedTable.indexes && selectedTable.indexes.length ? (
+          <table className="vpc-simple-table">
+            <thead><tr><th>Name</th><th>Status</th><th>Type</th></tr></thead>
+            <tbody>
+              {selectedTable.indexes.map(idx => (
+                <tr key={idx.index_name || idx.name}>
+                  <td>{idx.index_name || idx.name}</td>
+                  <td>{idx.index_status || idx.status || 'ACTIVE'}</td>
+                  <td>{idx.index_type || idx.type || 'GSI'}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        ) : <div className="vpc-detail-empty">No secondary indexes are configured yet.</div>}
+      </div>
+    );
+  };
+
+  const renderBackups = () => {
+    if (!selectedTable) return <div className="vpc-detail-empty">Select a table to view backups.</div>;
+    return <div className="vpc-detail-empty">Backups and restore flows are planned for the next iteration.</div>;
+  };
+
+  const renderTags = () => {
+    if (!selectedTable) return <div className="vpc-detail-empty">Select a table to view tags.</div>;
+    return (
+      <div className="vpc-detail-section">
+        <div className="vpc-detail-section-title">Tags</div>
+        {tagRows.map((row, idx) => (
+          <div className="vpc-create-tag-row" key={idx}>
+            <input className="fi" placeholder="Key" value={row.key} onChange={e => setTagRows(rows => rows.map((r, i) => i === idx ? {...r, key: e.target.value} : r))} />
+            <input className="fi" placeholder="Value" value={row.value} onChange={e => setTagRows(rows => rows.map((r, i) => i === idx ? {...r, value: e.target.value} : r))} />
+            <button className="btn btn-s" onClick={() => setTagRows(rows => rows.filter((_, i) => i !== idx))}>Remove</button>
+          </div>
+        ))}
+        <div className="btn-grp" style={{marginTop:12}}>
+          <button className="btn btn-s" onClick={() => setTagRows(rows => [...rows, {key:'', value:''}])}>Add tag</button>
+          <button className="btn btn-p" onClick={saveTags}>Save tags</button>
+        </div>
+      </div>
+    );
+  };
+
+  const renderSettings = () => {
+    if (!selectedTable) return <div className="vpc-detail-empty">Select a table to view settings.</div>;
+    return (
+      <div className="vpc-detail-section">
+        <div className="vpc-detail-section-title">Settings</div>
+        <div className="rds-detail-grid">
+          <dl className="ec2-kv"><dt>Billing mode</dt><dd>{selectedTable.billing_mode || 'PAY_PER_REQUEST'}</dd></dl>
+          <dl className="ec2-kv"><dt>Read capacity</dt><dd>{selectedTable.provisioned_throughput?.ReadCapacityUnits || '—'}</dd></dl>
+          <dl className="ec2-kv"><dt>Write capacity</dt><dd>{selectedTable.provisioned_throughput?.WriteCapacityUnits || '—'}</dd></dl>
+          <dl className="ec2-kv"><dt>Table size</dt><dd>{selectedTable.table_size_human || '0 B'}</dd></dl>
+          <dl className="ec2-kv"><dt>Table status</dt><dd>{selectedTable.table_status}</dd></dl>
+          <dl className="ec2-kv"><dt>Last modified</dt><dd>{fmtDate(selectedTable.last_modified)}</dd></dl>
+        </div>
+      </div>
+    );
+  };
+
+  if (page === 'create') {
+    return (
+      <>
+        <DynamoDBApiDocsPanel />
+        <CreateDynamoDBView onBack={() => setPage('list')} onDone={handleCreateDone} notify={notify} />
+      </>
+    );
+  }
+
+  return (
+    <>
+      <DynamoDBApiDocsPanel />
+      <div className="panel">
+        <div className="vpc-page-head">
+          <div className="bc" style={{marginBottom:8}}>
+            <span>DynamoDB</span><span className="bc-sep">›</span><span>Tables</span>
+          </div>
+          <div className="vpc-page-title">Tables</div>
+          <div className="vpc-page-sub">Create and manage DynamoDB tables with a full-width grid and separate details view.</div>
+        </div>
+        <div className="vpc-vpcs-toolbar">
+          <div className="vpc-vpcs-toolbar-left">
+            <input className="fi vpc-search" value={search} onChange={e => setSearch(e.target.value)} placeholder="Find tables by name or key schema" />
+            <div className="vpc-summary">
+              <div className="vpc-summary-count">Your tables ({visibleTables}/{totalTables})</div>
+              <a className="vpc-summary-info" href="#" onClick={e => e.preventDefault()}>Info</a>
+              <div className="vpc-summary-updated">Last updated {relativeTime(selectedTable?.last_modified || tables[0]?.last_modified || '')}</div>
+            </div>
+          </div>
+          <div className="vpc-vpcs-toolbar-right">
+            <button type="button" className="btn btn-s" onClick={() => { setActionsOpen(false); loadList(); }}>↻</button>
+            <div className="vpc-actions-wrap" ref={actionsRef}>
+              <button type="button" className="btn btn-s" onClick={(e) => { e.stopPropagation(); setActionsOpen(v => !v); }}>Actions ▾</button>
+              {actionsOpen && (
+                <div className="vpc-actions-menu">
+                  <button type="button" className="vpc-actions-item" onClick={() => { setActionsOpen(false); loadList(); }}>Refresh</button>
+                  <button type="button" className="vpc-actions-item" onClick={openCreate}>Create table</button>
+                  <button type="button" className="vpc-actions-item" onClick={() => { if (selectedTable) { setActionsOpen(false); setDeleteTarget(selectedTable); } }} disabled={!selectedTable}>Delete selected table</button>
+                </div>
+              )}
+            </div>
+            <button type="button" className="btn btn-p" onClick={openCreate}>Create table</button>
+          </div>
+        </div>
+
+        <div className="vpc-grid-wrap apigw-list-scroll">
+          {loading && !tables.length ? (
+            <div className="ld">Loading tables…</div>
+          ) : filteredTables.length ? (
+            <table className="tbl vpc-grid">
+              <thead>
+                <tr>
+                  <th><input type="checkbox" disabled aria-label="Select all tables" /></th>
+                  <th>Table name</th>
+                  <th>Status</th>
+                  <th>Partition key</th>
+                  <th>Sort key</th>
+                  <th>Items</th>
+                  <th>Billing mode</th>
+                  <th>Created</th>
+                </tr>
+              </thead>
+              <tbody>
+                {filteredTables.map(table => (
+                  <tr key={table.table_name} className={selectedTableName === table.table_name ? 'active' : ''} onClick={() => handleSelectTable(table.table_name)}>
+                    <td><input type="checkbox" checked={selectedTableName === table.table_name} onChange={() => handleSelectTable(table.table_name)} /></td>
+                    <td title={table.table_name}><span className="vpc-grid-name">{table.table_name}</span></td>
+                    <td><span className={`tag ${table.table_status === 'ACTIVE' ? 'tg' : 'tgr'}`}>{table.table_status}</span></td>
+                    <td>{table.partition_key_name}</td>
+                    <td>{table.sort_key_name || '—'}</td>
+                    <td>{table.item_count ?? 0}</td>
+                    <td>{table.billing_mode || 'PAY_PER_REQUEST'}</td>
+                    <td>{fmtDate(table.created)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          ) : (
+            <div className="empty">
+              <div className="empty-t">{search ? 'No matching tables' : 'No tables yet'}</div>
+              <div className="empty-d">{search ? 'Try a different search term.' : 'Create a table to get started.'}</div>
+            </div>
+          )}
+        </div>
+
+        <div className="vpc-detail-wrap">
+          <div className="vpc-detail-panel">
+            {selectedTable ? (
+              <>
+                <div className="vpc-detail-banner">
+                  <div className="vpc-detail-name">{selectedTable.table_name}</div>
+                  <div className="vpc-detail-meta">{selectedTable.table_arn} · {selectedTable.partition_key_name} · {selectedTable.sort_key_name || 'No sort key'}</div>
+                </div>
+                <div className="tabs ec2-subtabs">
+                  {[
+                    ['items', 'Items'],
+                    ['indexes', 'Indexes'],
+                    ['backups', 'Backups'],
+                    ['tags', 'Tags'],
+                    ['settings', 'Settings'],
+                  ].map(([k, label]) => (
+                    <div key={k} className={`tab ${detailTab === k ? 'active' : ''}`} onClick={() => setDetailTab(k)}>{label}</div>
+                  ))}
+                </div>
+                <div className="vpc-detail-body">
+                  {detailTab === 'items' ? renderItems()
+                    : detailTab === 'indexes' ? renderIndexes()
+                    : detailTab === 'backups' ? renderBackups()
+                    : detailTab === 'tags' ? renderTags()
+                    : renderSettings()}
+                </div>
+              </>
+            ) : (
+              <div className="vpc-detail-body">
+                <div className="vpc-detail-empty">Select a table from the grid to show the separate details view.</div>
+              </div>
+            )}
+          </div>
+        </div>
+
+        {deleteTarget && (
+          <ConfirmDelete
+            title="Delete table"
+            lines={[
+              `You are about to delete table "${deleteTarget.table_name}".`,
+              'The simulator will remove the table and all items in it.',
+            ]}
+            onConfirm={doDelete}
             onClose={() => setDeleteTarget(null)}
             busy={deleteBusy}
           />
@@ -8503,7 +9687,7 @@ function App() {
   const [notif, setNotif]   = useState(null);
   const [query, setQuery]   = useState('');
 
-  const notify = (msg, type='info') => setNotif({msg, type, id: Date.now()});
+  const notify = useCallback((msg, type='info') => setNotif({msg, type, id: Date.now()}), []);
 
   const enterBucket = (b) => { setBucket(b); setView('s3-objects'); };
   const goBack      = ()  => { setBucket(null); setView('s3-buckets'); };
@@ -8514,8 +9698,10 @@ function App() {
   };
   const titleMap = {
     dashboard: 'AWS Management Console',
+    spaces: 'Simulation Spaces',
     iam: 'IAM',
     ec2: 'Amazon EC2',
+    dynamodb: 'Amazon DynamoDB',
     sqs: 'Amazon SQS',
     vpc: 'Amazon VPC',
     rds: 'Amazon RDS',
@@ -8526,8 +9712,10 @@ function App() {
   };
   const navItems = [
     ['Overview', 'dashboard'],
+    ['Simulation Spaces', 'spaces'],
     ['IAM', 'iam'],
     ['EC2', 'ec2'],
+    ['DynamoDB', 'dynamodb'],
     ['SQS', 'sqs'],
     ['RDS', 'rds'],
     ['Lambda', 'lambda'],
@@ -8612,10 +9800,14 @@ function App() {
             <main className="aws-main">
               {view==='dashboard'
                 ? <DashboardView onOpen={open} notify={notify}/>
+              : view==='spaces'
+                ? <SpacesView notify={notify}/>
               : view==='iam'
-                ? <IAMView notify={notify}/>
+              ? <IAMView notify={notify}/>
               : view==='ec2'
                 ? <EC2View notify={notify}/>
+              : view==='dynamodb'
+                ? <DynamoDBView notify={notify}/>
               : view==='sqs'
                 ? <SQSView notify={notify}/>
               : view==='rds'

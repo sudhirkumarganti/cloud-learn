@@ -1,0 +1,229 @@
+package cloudlearn.cloudsim;
+
+import org.cloudsimplus.brokers.DatacenterBrokerSimple;
+import org.cloudsimplus.cloudlets.CloudletSimple;
+import org.cloudsimplus.core.CloudSimPlus;
+import org.cloudsimplus.datacenters.DatacenterSimple;
+import org.cloudsimplus.hosts.HostSimple;
+import org.cloudsimplus.resources.PeSimple;
+import org.cloudsimplus.utilizationmodels.UtilizationModelDynamic;
+import org.cloudsimplus.vms.VmSimple;
+
+import java.time.Instant;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+
+public final class CloudSimSpace {
+    private final String spaceId;
+    private final Map<String, Object> spec = new LinkedHashMap<>();
+    private final List<Map<String, Object>> events = new ArrayList<>();
+    private Map<String, Object> lastSummary = new LinkedHashMap<>();
+    private String status = "running";
+    private String createdAt = Instant.now().toString();
+    private String updatedAt = createdAt;
+
+    public CloudSimSpace(String spaceId) {
+        this.spaceId = spaceId;
+        this.spec.put("space_id", spaceId);
+        this.spec.put("provider", "aws");
+        this.spec.put("name", spaceId);
+        this.spec.put("region", "us-east-1");
+        this.spec.put("runtime_count", 0);
+        this.spec.put("ec2_count", 0);
+        this.spec.put("lambda_count", 0);
+        this.spec.put("rds_count", 0);
+        this.spec.put("sqs_count", 0);
+        this.spec.put("dynamodb_count", 0);
+    }
+
+    public synchronized void apply(Map<String, Object> payload) {
+        if (payload == null) {
+            return;
+        }
+        for (Map.Entry<String, Object> entry : payload.entrySet()) {
+            spec.put(entry.getKey(), entry.getValue());
+        }
+        if (payload.containsKey("status")) {
+            this.status = stringValue(payload.get("status"), this.status).toLowerCase(Locale.ROOT);
+        }
+        this.updatedAt = Instant.now().toString();
+    }
+
+    public synchronized void setStatus(String status) {
+        this.status = stringValue(status, this.status).toLowerCase(Locale.ROOT);
+        this.updatedAt = Instant.now().toString();
+    }
+
+    public synchronized String getStatus() {
+        return status;
+    }
+
+    public synchronized void touch(String field) {
+        if (field != null && !field.isBlank()) {
+            spec.put(field, Instant.now().toString());
+        }
+        this.updatedAt = Instant.now().toString();
+    }
+
+    public synchronized Map<String, Object> reconcile() {
+        if ("archived".equals(status)) {
+            return snapshot();
+        }
+
+        final int runtimeCount = intValue(spec.get("runtime_count"));
+        final int ec2Count = intValue(spec.get("ec2_count"));
+        final int lambdaCount = intValue(spec.get("lambda_count"));
+        final int rdsCount = intValue(spec.get("rds_count"));
+        final int sqsCount = intValue(spec.get("sqs_count"));
+        final int ddbCount = intValue(spec.get("dynamodb_count"));
+
+        final int vmCount = Math.max(1, runtimeCount + ec2Count + lambdaCount + rdsCount + sqsCount + ddbCount);
+        final int hostCount = Math.max(1, (vmCount + 1) / 2);
+        final int cloudletCount = Math.max(1, vmCount + runtimeCount + lambdaCount);
+
+        CloudSimPlus simulation = new CloudSimPlus();
+        DatacenterBrokerSimple broker = new DatacenterBrokerSimple(simulation);
+        List<org.cloudsimplus.hosts.Host> hosts = buildHosts(hostCount, vmCount);
+        new DatacenterSimple(simulation, hosts);
+        List<org.cloudsimplus.vms.Vm> vms = buildVms(vmCount);
+        List<org.cloudsimplus.cloudlets.Cloudlet> cloudlets = buildCloudlets(cloudletCount);
+
+        broker.submitVmList(vms);
+        broker.submitCloudletList(cloudlets);
+        simulation.start();
+
+        Map<String, Object> summary = new LinkedHashMap<>();
+        summary.put("space_id", spaceId);
+        summary.put("name", stringValue(spec.get("name"), spaceId));
+        summary.put("provider", stringValue(spec.get("provider"), "aws").toLowerCase(Locale.ROOT));
+        summary.put("status", status);
+        summary.put("active_region", stringValue(spec.get("region"), "us-east-1"));
+        summary.put("cloudsim_engine", "CloudSim Plus 8.5.7");
+        summary.put("cloudsim_runtime_id", stringValue(spec.getOrDefault("cloudsim_runtime_id", "cloudsim-" + spaceId), "cloudsim-" + spaceId));
+        summary.put("datacenters", 1);
+        summary.put("hosts", hostCount);
+        summary.put("vms", vms.size());
+        summary.put("cloudlets", cloudlets.size());
+        summary.put("finished_cloudlets", broker.getCloudletFinishedList().size());
+        summary.put("runtime_count", runtimeCount);
+        summary.put("ec2_count", ec2Count);
+        summary.put("lambda_count", lambdaCount);
+        summary.put("rds_count", rdsCount);
+        summary.put("sqs_count", sqsCount);
+        summary.put("dynamodb_count", ddbCount);
+        summary.put("last_tick", Instant.now().toString());
+        summary.put("updated_at", updatedAt);
+        summary.put("created_at", createdAt);
+        summary.put("simulation_state", "completed");
+        lastSummary = summary;
+        events.add(event("cloudsim.reconcile", summary));
+        return summary;
+    }
+
+    public synchronized Map<String, Object> recordEvent(Map<String, Object> payload) {
+        Map<String, Object> normalized = new LinkedHashMap<>();
+        if (payload != null) {
+            normalized.putAll(payload);
+        }
+        normalized.putIfAbsent("event", "cloudlearn.event");
+        normalized.putIfAbsent("at", Instant.now().toString());
+        normalized.putIfAbsent("space_id", spaceId);
+        events.add(normalized);
+        updatedAt = Instant.now().toString();
+        return Map.of(
+                "message", "Event recorded",
+                "space_id", spaceId,
+                "event", normalized
+        );
+    }
+
+    public synchronized Map<String, Object> snapshot() {
+        Map<String, Object> payload = new LinkedHashMap<>(spec);
+        payload.put("space_id", spaceId);
+        payload.put("status", status);
+        payload.put("created_at", createdAt);
+        payload.put("updated_at", updatedAt);
+        payload.put("cloudsim_runtime_id", stringValue(spec.getOrDefault("cloudsim_runtime_id", "cloudsim-" + spaceId), "cloudsim-" + spaceId));
+        payload.put("cloudsim", new LinkedHashMap<>(Map.of(
+                "summary", new LinkedHashMap<>(lastSummary),
+                "events", new ArrayList<>(events),
+                "last_tick", stringValue(lastSummary.getOrDefault("last_tick", ""), "")
+        )));
+        payload.put("hosts", intValue(lastSummary.getOrDefault("hosts", 0)));
+        payload.put("vms", intValue(lastSummary.getOrDefault("vms", 0)));
+        payload.put("cloudlets", intValue(lastSummary.getOrDefault("cloudlets", 0)));
+        payload.put("finished_cloudlets", intValue(lastSummary.getOrDefault("finished_cloudlets", 0)));
+        payload.put("events", new ArrayList<>(events));
+        return payload;
+    }
+
+    public synchronized Map<String, Object> eventsPayload() {
+        return Map.of(
+                "space_id", spaceId,
+                "events", new ArrayList<>(events),
+                "count", events.size()
+        );
+    }
+
+    private List<org.cloudsimplus.hosts.Host> buildHosts(int hostCount, int vmCount) {
+        List<org.cloudsimplus.hosts.Host> hosts = new ArrayList<>();
+        long ram = 8192L + (vmCount * 256L);
+        long bw = 100000L;
+        long storage = 100000L;
+        int peCount = Math.max(2, Math.min(8, Math.max(1, vmCount)));
+        for (int i = 0; i < hostCount; i++) {
+            List<org.cloudsimplus.resources.Pe> pes = new ArrayList<>();
+            for (int j = 0; j < peCount; j++) {
+                pes.add(new PeSimple(10000));
+            }
+            hosts.add(new HostSimple(ram, bw, storage, pes));
+        }
+        return hosts;
+    }
+
+    private List<org.cloudsimplus.vms.Vm> buildVms(int vmCount) {
+        List<org.cloudsimplus.vms.Vm> vms = new ArrayList<>();
+        for (int i = 0; i < vmCount; i++) {
+            VmSimple vm = new VmSimple(1000 + ((i % 4) * 250), 1 + (i % 2));
+            vm.setRam(1024 + ((i % 4) * 256L)).setBw(1000).setSize(10000);
+            vms.add(vm);
+        }
+        return vms;
+    }
+
+    private List<org.cloudsimplus.cloudlets.Cloudlet> buildCloudlets(int cloudletCount) {
+        List<org.cloudsimplus.cloudlets.Cloudlet> cloudlets = new ArrayList<>();
+        UtilizationModelDynamic util = new UtilizationModelDynamic(0.5);
+        for (int i = 0; i < cloudletCount; i++) {
+            cloudlets.add(new CloudletSimple(5000 + (i * 250L), 1, util));
+        }
+        return cloudlets;
+    }
+
+    private Map<String, Object> event(String type, Map<String, Object> detail) {
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("event", type);
+        payload.put("space_id", spaceId);
+        payload.put("at", Instant.now().toString());
+        payload.put("detail", detail);
+        return payload;
+    }
+
+    private static String stringValue(Object value, String fallback) {
+        return value == null ? fallback : String.valueOf(value);
+    }
+
+    private static int intValue(Object value) {
+        if (value instanceof Number number) {
+            return number.intValue();
+        }
+        try {
+            return Integer.parseInt(String.valueOf(value));
+        } catch (Exception e) {
+            return 0;
+        }
+    }
+}

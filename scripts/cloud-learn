@@ -1,0 +1,347 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR="${CLOUD_LEARN_HOME:-$(cd "${SCRIPT_PATH}/.." && pwd)}"
+PROJECT_NAME="${CLOUD_LEARN_PROJECT_NAME:-cloud-learn}"
+COMPOSE_FILE="${CLOUD_LEARN_COMPOSE_FILE:-${ROOT_DIR}/docker-compose.yml}"
+PARENT_OS="${CLOUD_LEARN_PARENT_OS:-$(uname -s)}"
+RUNTIME_BRIDGE_HOST="${CLOUD_LEARN_RUNTIME_BRIDGE_HOST:-127.0.0.1}"
+RUNTIME_BRIDGE_PORT="${CLOUD_LEARN_RUNTIME_BRIDGE_PORT:-9171}"
+RUNTIME_BRIDGE_URL="${CLOUD_LEARN_RUNTIME_BRIDGE_URL:-http://host.docker.internal:${RUNTIME_BRIDGE_PORT}}"
+
+case "$PARENT_OS" in
+  Darwin) PARENT_OS="darwin" ;;
+  Linux) PARENT_OS="linux" ;;
+  MINGW*|MSYS*|CYGWIN*|Windows_NT) PARENT_OS="windows" ;;
+esac
+export CLOUDLEARN_PARENT_OS="$PARENT_OS"
+export CLOUDLEARN_RUNTIME_BRIDGE_URL="$RUNTIME_BRIDGE_URL"
+
+usage() {
+  cat <<'EOF'
+cloud-learn - local cloud simulator launcher
+
+Usage:
+  cloud-learn up [--detach]
+  cloud-learn dev up [--detach]
+  cloud-learn dev down
+  cloud-learn dev restart
+  cloud-learn dev logs [service]
+  cloud-learn dev status
+  cloud-learn dev build
+  cloud-learn down
+  cloud-learn restart
+  cloud-learn logs [service]
+  cloud-learn status
+  cloud-learn build
+  cloud-learn doctor
+  cloud-learn help
+
+Environment:
+  CLOUD_LEARN_HOME         Root directory containing docker-compose.yml
+  CLOUD_LEARN_COMPOSE_FILE Alternate compose file path
+  CLOUD_LEARN_PROJECT_NAME Compose project name (default: cloud-learn)
+  CLOUDLEARN_PARENT_OS     Parent host OS forwarded into the app container
+  CLOUDLEARN_RUNTIME_BRIDGE_URL Host runtime bridge URL forwarded into the app container
+
+Default mode:
+  Local compose build for development. No Docker Hub images are required.
+  The launcher will try to install Docker Compose automatically on supported hosts.
+  Host OS is forwarded as CLOUDLEARN_PARENT_OS so the UI can filter AMIs correctly.
+  A local runtime bridge is started on the host and forwarded as CLOUDLEARN_RUNTIME_BRIDGE_URL.
+EOF
+}
+
+runtime_bridge_health() {
+  if command -v curl >/dev/null 2>&1; then
+    curl -fsS "http://${RUNTIME_BRIDGE_HOST}:${RUNTIME_BRIDGE_PORT}/health" >/dev/null 2>&1
+    return $?
+  fi
+  return 1
+}
+
+start_runtime_bridge() {
+  if runtime_bridge_health; then
+    return 0
+  fi
+  if ! command -v python3 >/dev/null 2>&1; then
+    printf '%s\n' 'python3 is required to start the local runtime bridge' >&2
+    return 1
+  fi
+  if [ ! -f "${ROOT_DIR}/runtime_bridge.py" ]; then
+    printf '%s\n' "runtime bridge script not found: ${ROOT_DIR}/runtime_bridge.py" >&2
+    return 1
+  fi
+  nohup python3 "${ROOT_DIR}/runtime_bridge.py" --host "${RUNTIME_BRIDGE_HOST}" --port "${RUNTIME_BRIDGE_PORT}" >/tmp/cloudlearn-runtime-bridge.log 2>&1 &
+  local waited=0
+  while [ "$waited" -lt 20 ]; do
+    if runtime_bridge_health; then
+      return 0
+    fi
+    sleep 1
+    waited=$((waited + 1))
+  done
+  printf '%s\n' 'runtime bridge did not become ready in time' >&2
+  return 1
+}
+
+compose_cmd() {
+  if command -v docker >/dev/null 2>&1; then
+    if docker compose version >/dev/null 2>&1; then
+      printf 'docker compose'
+      return 0
+    fi
+  fi
+  if command -v docker-compose >/dev/null 2>&1; then
+    printf 'docker-compose'
+    return 0
+  fi
+  return 1
+}
+
+compose_backend_available() {
+  if command -v docker >/dev/null 2>&1; then
+    if docker info >/dev/null 2>&1; then
+      return 0
+    fi
+  fi
+  return 1
+}
+
+install_compose() {
+  local system="${1:-$(uname -s)}"
+  case "$system" in
+    Darwin)
+      if command -v brew >/dev/null 2>&1; then
+        printf '%s\n' 'installing docker-compose via Homebrew...' >&2
+        brew install docker-compose
+        return 0
+      fi
+      ;;
+    Linux)
+      if command -v apt-get >/dev/null 2>&1; then
+        printf '%s\n' 'installing docker compose via apt...' >&2
+        if command -v sudo >/dev/null 2>&1; then
+          sudo apt-get update
+          if sudo apt-get install -y docker-compose-plugin >/dev/null 2>&1; then
+            return 0
+          fi
+          sudo apt-get install -y docker-compose
+          return 0
+        fi
+      fi
+      if command -v dnf >/dev/null 2>&1; then
+        printf '%s\n' 'installing docker compose via dnf...' >&2
+        if command -v sudo >/dev/null 2>&1; then
+          sudo dnf install -y docker-compose || sudo dnf install -y docker-compose-plugin
+          return 0
+        fi
+      fi
+      if command -v yum >/dev/null 2>&1; then
+        printf '%s\n' 'installing docker compose via yum...' >&2
+        if command -v sudo >/dev/null 2>&1; then
+          sudo yum install -y docker-compose || sudo yum install -y docker-compose-plugin
+          return 0
+        fi
+      fi
+      ;;
+  esac
+  return 1
+}
+
+ensure_prereqs() {
+  local missing=0
+  local compose_ready=0
+
+  if ! command -v docker >/dev/null 2>&1; then
+    printf '%s\n' 'docker is not installed or not on PATH' >&2
+    missing=1
+  fi
+
+  if compose_cmd >/dev/null 2>&1; then
+    compose_ready=1
+  else
+    printf '%s\n' 'docker compose is not available; attempting automatic install...' >&2
+    if install_compose; then
+      if compose_cmd >/dev/null 2>&1; then
+        compose_ready=1
+      fi
+    fi
+    if [ "$compose_ready" -ne 1 ]; then
+      printf '%s\n' 'docker compose install failed or is still unavailable' >&2
+      missing=1
+    fi
+  fi
+
+  if ! compose_backend_available; then
+    printf '%s\n' 'docker engine is not reachable; start Docker Desktop or the docker service' >&2
+    missing=1
+  fi
+
+  if [ ! -f "$COMPOSE_FILE" ]; then
+    printf 'compose file not found: %s\n' "$COMPOSE_FILE" >&2
+    missing=1
+  fi
+
+  return "$missing"
+}
+
+doctor() {
+  printf 'cloud-learn root: %s\n' "$ROOT_DIR"
+  printf 'compose file: %s\n' "$COMPOSE_FILE"
+  if command -v docker >/dev/null 2>&1; then
+    printf 'docker: available\n'
+  else
+    printf 'docker: missing\n'
+  fi
+  if compose_cmd >/dev/null 2>&1; then
+    printf 'compose: available\n'
+  else
+    printf 'compose: missing\n'
+  fi
+  if compose_backend_available; then
+    printf 'engine: reachable\n'
+  else
+    printf 'engine: unreachable\n'
+  fi
+  if command -v multipass >/dev/null 2>&1; then
+    printf 'multipass: available\n'
+  else
+    printf 'multipass: missing\n'
+  fi
+  if command -v lxc >/dev/null 2>&1; then
+    printf 'lxd: available\n'
+  else
+    printf 'lxd: missing\n'
+  fi
+  if runtime_bridge_health; then
+    printf 'runtime bridge: available\n'
+  else
+    printf 'runtime bridge: missing\n'
+  fi
+  printf 'runtime: sandboxed\n'
+  printf 'parent os: %s\n' "$CLOUDLEARN_PARENT_OS"
+  printf 'mode: local build via compose\n'
+}
+
+run_compose() {
+  local cmd="$1"
+  shift || true
+  local compose
+  compose="$(compose_cmd)"
+  # shellcheck disable=SC2086
+  $compose --project-name "$PROJECT_NAME" --project-directory "$ROOT_DIR" -f "$COMPOSE_FILE" "$cmd" "$@"
+}
+
+run_compose_for_project() {
+  local project_name="$1"
+  shift
+  local cmd="$1"
+  shift || true
+  local compose
+  compose="$(compose_cmd)"
+  # shellcheck disable=SC2086
+  $compose --project-name "$project_name" --project-directory "$ROOT_DIR" -f "$COMPOSE_FILE" "$cmd" "$@"
+}
+
+cleanup_legacy_projects() {
+  local legacy_projects=("cloudlearn")
+  local legacy
+  for legacy in "${legacy_projects[@]}"; do
+    if [ "$legacy" != "$PROJECT_NAME" ]; then
+      run_compose_for_project "$legacy" down --remove-orphans >/dev/null 2>&1 || true
+    fi
+  done
+}
+
+cmd="${1:-help}"
+if [ "$#" -gt 0 ]; then
+  shift
+fi
+
+run_dev() {
+  local subcmd="${1:-help}"
+  if [ "$#" -gt 0 ]; then
+    shift
+  fi
+  case "$subcmd" in
+    up)
+      ensure_prereqs
+      start_runtime_bridge
+      cleanup_legacy_projects
+      run_compose up --build --force-recreate "$@"
+      ;;
+    down)
+      ensure_prereqs
+      run_compose down "$@"
+      ;;
+    restart)
+      ensure_prereqs
+      run_compose restart "$@"
+      ;;
+    logs)
+      ensure_prereqs
+      run_compose logs -f "$@"
+      ;;
+    status|ps)
+      ensure_prereqs
+      run_compose ps "$@"
+      ;;
+    build)
+      ensure_prereqs
+      run_compose build "$@"
+      ;;
+    help|-h|--help)
+      usage
+      ;;
+    *)
+      printf 'Unknown dev command: %s\n\n' "$subcmd" >&2
+      usage >&2
+      exit 2
+      ;;
+  esac
+}
+
+case "$cmd" in
+  dev)
+    run_dev "$@"
+    ;;
+    up)
+      ensure_prereqs
+      start_runtime_bridge
+      cleanup_legacy_projects
+      run_compose up --build --force-recreate "$@"
+      ;;
+  down)
+    ensure_prereqs
+    run_compose down "$@"
+    ;;
+  restart)
+    ensure_prereqs
+    run_compose restart "$@"
+    ;;
+  logs)
+    ensure_prereqs
+    run_compose logs -f "$@"
+    ;;
+  status|ps)
+    ensure_prereqs
+    run_compose ps "$@"
+    ;;
+  build)
+    ensure_prereqs
+    run_compose build "$@"
+    ;;
+  doctor)
+    doctor
+    ;;
+  help|-h|--help)
+    usage
+    ;;
+  *)
+    printf 'Unknown command: %s\n\n' "$cmd" >&2
+    usage >&2
+    exit 2
+    ;;
+esac

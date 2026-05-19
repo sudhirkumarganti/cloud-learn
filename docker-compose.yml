@@ -1,11 +1,26 @@
 services:
+  cloudsim:
+    build:
+      context: ./cloudsim-backbone
+    ports:
+      - "9010:9010"
+    environment:
+      CLOUDLEARN_CLOUDSIM_HOST: 0.0.0.0
+      CLOUDLEARN_CLOUDSIM_PORT: 9010
+    restart: unless-stopped
+
   simulator:
     build: .
     ports:
       - "9000:9000"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     environment:
       CLOUDLEARN_STATE_FILE: /data/cloudlearn_state.sqlite3
       CLOUDLEARN_LICENSE_SECRET: cloudlearn-dev-secret
+      CLOUDLEARN_CLOUDSIM_URL: http://cloudsim:9010
+      CLOUDLEARN_PARENT_OS: ${CLOUDLEARN_PARENT_OS:-linux}
+      CLOUDLEARN_RUNTIME_BRIDGE_URL: ${CLOUDLEARN_RUNTIME_BRIDGE_URL:-http://host.docker.internal:9171}
     volumes:
       - cloudlearn-data:/data
     restart: unless-stopped

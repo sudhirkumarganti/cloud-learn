@@ -2,62 +2,75 @@
 
 ## 1. Product Definition
 
-CloudLearn is a local-first cloud learning platform that gives users an AWS-like operating experience on their own machine. It is designed to:
+CloudLearn is a local-first, multi-space cloud simulation platform built on a CloudSim backbone and a VM-like LXD runtime layer. It gives users AWS-like, GCP-like, Azure-like, OCI-like, and Tencent-like experiences on their own machine while keeping the simulation boundary local.
 
-- simulate cloud workflows with near-real user experience,
-- run lightweight applications locally,
+It is designed to:
+
+- simulate cloud workflows with realistic cloud physics,
+- keep multiple isolated simulation spaces running in parallel,
 - persist all simulator state on the user's device,
-- support official AWS API surfaces for common workflows,
+- expose provider-specific APIs and UI experiences through the control plane,
+- provide VM-like runtime environments where users can SSH in and deploy their own applications,
+- support inter-space and intercloud federation workflows,
 - export and import infrastructure through Terraform,
 - add certification exercises and scoring,
-- and later extend to Azure and GCP using the same simulator core.
+- and later extend to additional cloud providers using the same substrate.
 
-The simulator is not a copy of AWS internals. It is a compatible experience layer backed by a custom lightweight runtime.
+The simulator is not a copy of any public cloud internals. It is a provider-aware experience layer backed by a provider-neutral simulation kernel.
 
 ## 2. Architectural Principles
 
 - Local-first: the simulator must work without cloud hosting.
 - Persistent: state survives stop and start.
-- Compatible: common AWS APIs and workflows should behave as expected.
-- Lightweight: use the simplest backend that provides the user-facing result.
-- Modular: services and runtime bundles must be pluggable.
-- Provider-neutral core: AWS is first, but Azure and GCP should reuse the same engine.
+- Provider-neutral backbone: CloudSim owns the cloud physics and scheduling model.
+- Provider-specific control plane: IAM, API, and UI behavior belong to the provider adapter layer.
+- Multi-space: multiple simulation spaces can coexist and keep running in the background.
+- VM-like runtime layer: LXD provides the user-facing machine experience.
+- Federation-aware: same-cloud and cross-cloud workflows must be first-class.
+- Modular: services, provider adapters, and runtime bundles must be pluggable.
 - Secure by design: signing, entitlement, tamper detection, and local lockout are part of the platform.
+- Resource-aware: the control plane must estimate RAM, disk, and runtime overhead before creating new spaces.
 
 ## 3. Top-Level System View
 
 ```mermaid
 flowchart TB
     U[User] --> UI[Console / CLI / SDK]
-    UI --> GW[API Compatibility Gateway]
-    GW --> CORE[Simulation Kernel]
-    CORE --> STATE[(Local Durable State)]
-    CORE --> EVT[Event Bus]
-    CORE --> ENT[Entitlement and Credit Layer]
-    CORE --> CERT[Certification Engine]
-    CORE --> TF[Terraform Bridge]
-    CORE --> GH[GitHub Integration Layer]
-    CORE --> VAL[AWS Validation Mode]
-    CORE --> SRV[Cloud Service Adapters]
-    SRV --> S3[S3 Service]
-    SRV --> IAM[IAM Service]
-    SRV --> EC2[EC2 Service]
-    SRV --> VPC[VPC Service]
-    SRV --> RDS[RDS Service]
-    SRV --> LAMBDA[Lambda Service]
-    SRV --> MQ[SQS / SNS Service]
-    SRV --> OBS[CloudWatch / Observability]
-    SRV --> CFN[CloudFormation Service]
-    SRV --> CONT[Container / Registry Services]
-    SRV --> EDGE[API Gateway / Route53 / Edge Services]
-    CORE --> RT[Runtime Manager]
-    RT --> BUNDLES[Runtime Bundles]
-    BUNDLES --> JAVA[Java]
-    BUNDLES --> DOTNET[.NET]
-    BUNDLES --> GO[Go]
-    BUNDLES --> PHP[PHP]
-    BUNDLES --> PY[Python]
-    RT --> HOST[Container / Sandbox Host]
+    UI --> CP[Python Control Plane]
+    CP --> SR[Simulation Space Registry]
+    CP --> ASM[Active Space Manager]
+    CP --> EST[Local Cost Estimator]
+    CP --> GW[API Compatibility Gateway]
+    CP --> IAM[IAM / Policy Engine]
+    CP --> FM[Federation Manager]
+    CP --> EVT[Event Bus]
+    CP --> CORE[Simulation Kernel]
+    CP --> STATE[(Local Durable State)]
+    CP --> ADAPTERS[Cloud Service Adapters]
+    CP --> VAL[Validation Mode]
+    CORE --> K1[CloudSim Runtime A]
+    CORE --> K2[CloudSim Runtime B]
+    CORE --> K3[CloudSim Runtime C]
+    CP --> RT[LXD Runtime Manager]
+    RT --> PROJECTS[LXD Projects / Instance Sandboxes]
+    RT --> IMAGES[OS Images / Runtime Bundles]
+    ADAPTERS --> AWS[AWS Space]
+    ADAPTERS --> GCP[GCP Space]
+    ADAPTERS --> AZ[Azure Space]
+    ADAPTERS --> OCI[OCI / Tencent Spaces]
+    FM --> LINKS[Federation Links / Workflows]
+    VAL --> RW[Optional Real Cloud Validation]
+    CP --> TF[Terraform Bridge]
+    CP --> CERT[Certification Engine]
+    CP --> GH[GitHub Integration Layer]
+    CP --> ENT[Entitlement and Credit Layer]
+    CP --> OBS[CloudWatch / Observability]
+    IMAGES --> JAVA[Java]
+    IMAGES --> DOTNET[.NET]
+    IMAGES --> GO[Go]
+    IMAGES --> PHP[PHP]
+    IMAGES --> PY[Python]
+    RT --> HOST[LXD Host]
 ```
 
 ## 4. Control Plane
@@ -66,29 +79,39 @@ The control plane is the local application that the user installs and launches. 
 
 - UI rendering
 - request routing
+- simulation space registry
+- active space switching
+- provider-specific IAM, API, and UI behavior
 - simulator orchestration
 - local persistence
 - lifecycle management
 - entitlement enforcement
+- local cost estimation and space caps
 - workflow state
 - certification tracking
 - source-control deployment flow
+- federation orchestration
+- runtime management
 
-The control plane should stay thin in business logic. It should delegate most domain behavior to the simulation kernel and service adapters.
+The control plane should stay thin in cloud substrate logic. It should delegate cloud physics to CloudSim, runtime execution to LXD, and provider behavior to adapters.
 
 ## 5. Simulation Kernel
 
-The kernel is the source of truth for simulator state. It manages:
+The kernel is the source of truth for simulation state within a given space. It manages:
 
-- accounts and regions
-- resource graph
+- accounts, regions, and provider-scoped naming
+- resource graph per simulation space
 - workflow execution
 - latency and failure simulation
 - region outages and recovery
-- object and instance lifecycles
+- object, queue, function, database, and instance lifecycles
 - event emission
 - snapshot creation and restore
 - transition validation
+- federation link state
+- reconciliation between desired state and runtime state
+- simulation tick progression
+- local cost accounting
 
 The kernel should expose a small internal API:
 
@@ -101,6 +124,10 @@ The kernel should expose a small internal API:
 - `restore_snapshot`
 - `evaluate_policy`
 - `check_entitlement`
+- `advance_tick`
+- `attach_federation_link`
+- `detach_federation_link`
+- `estimate_space_cost`
 
 ## 6. Local Persistence
 
@@ -109,14 +136,18 @@ All user-visible state must persist locally.
 Recommended storage layout:
 
 - SQLite for structured records
-- local files for artifacts and uploads
+- local files for artifacts, uploads, logs, and runtime volumes
 - event log for workflow history
 - snapshot table for restart
 - encrypted store for license and identity tokens
+- per-space namespace directories
+- per-space runtime and LXD project metadata
 
 State persisted locally:
 
 - simulator configuration
+- simulation space registry
+- active space context
 - account and region inventories
 - cloud resources
 - runtime instances
@@ -127,18 +158,23 @@ State persisted locally:
 - entitlement decisions
 - lockout events
 - GitHub integration tokens
+- federation definitions and traces
+- capacity and cost estimates
+- space snapshots and replay checkpoints
 
 ## 7. API Compatibility Layer
 
-The API layer exposes AWS-style endpoints and request shapes. Its job is to:
+The API layer exposes provider-specific endpoints and request shapes. Its job is to:
 
 - accept AWS CLI and SDK traffic,
+- accept GCP, Azure, OCI, and Tencent-specific calls through provider adapters when enabled,
 - normalize request parameters,
 - validate documented inputs,
-- produce AWS-like responses,
-- convert internal errors into AWS-like errors,
+- produce provider-like responses,
+- convert internal errors into provider-like errors,
 - preserve common headers and metadata,
-- route to the correct service adapter and region.
+- route to the correct service adapter, region, and simulation space,
+- inject the active space context into the request lifecycle.
 
 The compatibility layer should not own business state.
 
@@ -162,6 +198,10 @@ The entitlement layer decides:
 - whether validation mode is allowed,
 - whether multi-region is allowed,
 - whether certification mode is allowed.
+- how many simulation spaces may be created,
+- whether federation features are enabled,
+- whether provider packs are unlocked,
+- whether local resource budgets are exceeded.
 
 Security model:
 
@@ -173,23 +213,27 @@ Security model:
 
 ## 9. Runtime Layer
 
-The runtime layer exists to run lightweight applications locally. It should support:
+The runtime layer exists to run lightweight applications locally and to present a VM-like user experience. It should support:
 
 - source-based deployment,
 - artifact-based deployment,
-- container-based execution,
+- sandbox-based execution,
+- LXD-backed VM-like execution,
 - local ports and network exposure,
 - environment variable injection,
 - simulated cloud metadata,
 - logs and health checks,
 - lifecycle operations.
 
+The runtime layer must also support SSH and SCP access for machine-like EC2 usage.
+
 ## 10. Runtime Bundles
 
-Each language runtime is a bundle that plugs into the runtime manager.
+Each language runtime is a bundle that plugs into the runtime manager. OS-image bundles are required for VM-like EC2 spaces.
 
 Supported bundle types:
 
+- OS image bundles for VM-like EC2 spaces
 - Java
 - .NET
 - Go
@@ -216,6 +260,17 @@ The runtime manager should call a common interface:
 - `restart(instance_id)`
 - `logs(instance_id)`
 - `health(instance_id)`
+
+The LXD runtime manager should additionally provide:
+
+- `create_project(space_id)`
+- `delete_project(space_id)`
+- `create_instance(space_id, os_image, flavor)`
+- `delete_instance(space_id, instance_id)`
+- `snapshot_instance(space_id, instance_id)`
+- `restore_instance(space_id, snapshot_id)`
+- `attach_network(space_id, instance_id, network_spec)`
+- `attach_storage(space_id, instance_id, storage_spec)`
 
 ## 11. GitHub Deployment Layer
 
@@ -264,6 +319,8 @@ This mode should:
 
 It is a compatibility aid, not the default runtime.
 
+Validation mode should remain optional and must not change the active space lifecycle or the local simulation contract.
+
 ## 14. Terraform Bridge
 
 Terraform is the portability bridge between the simulator and real cloud.
@@ -277,12 +334,12 @@ The bridge should:
 
 ## 15. Service Architecture
 
-The simulator should implement AWS-like service families through lightweight adapters and runtime backends.
+The simulator should implement provider-like service families through lightweight adapters and runtime backends that sit on top of CloudSim and LXD.
 
 ### 15.1 S3
 
 Purpose:
-- object storage simulator.
+- object storage simulator within an active simulation space.
 
 Back end:
 - local filesystem or embedded object store.
@@ -304,7 +361,7 @@ Core behaviors:
 ### 15.2 IAM
 
 Purpose:
-- identity and access simulator.
+- identity and access simulator. IAM and policy enforcement live in the control plane and are provider-specific.
 
 Back end:
 - simplified policy and principal evaluator.
@@ -322,10 +379,10 @@ Core behaviors:
 ### 15.3 EC2
 
 Purpose:
-- compute instance simulator.
+- compute instance simulator with VM-like access.
 
 Back end:
-- container or sandbox runtime.
+- CloudSim VM placement plus LXD runtime sandbox.
 
 State model:
 - instances, AMI template, key pair, security groups, volumes, metadata, state transitions.
@@ -338,12 +395,13 @@ Core behaviors:
 - expose metadata service,
 - surface console output,
 - attach volumes,
-- restart workloads.
+- restart workloads,
+- allow SSH and SCP into the sandbox.
 
 ### 15.4 VPC
 
 Purpose:
-- networking and boundary simulator.
+- networking and boundary simulator scoped to the active space.
 
 Back end:
 - network policy and endpoint mapping.
@@ -361,7 +419,7 @@ Core behaviors:
 ### 15.5 RDS
 
 Purpose:
-- relational database simulator.
+- relational database simulator scoped to the active space.
 
 Back end:
 - local PostgreSQL, SQLite, or containerized DB.
@@ -379,7 +437,7 @@ Core behaviors:
 ### 15.6 Lambda
 
 Purpose:
-- function-as-a-service simulator.
+- function-as-a-service simulator scoped to the active space.
 
 Back end:
 - sandboxed local process or container.
@@ -397,7 +455,7 @@ Core behaviors:
 ### 15.7 SQS / SNS
 
 Purpose:
-- queue and pub/sub simulator.
+- queue and pub/sub simulator scoped to the active space.
 
 Back end:
 - local message broker or in-memory queue store.
@@ -415,7 +473,7 @@ Core behaviors:
 ### 15.8 CloudWatch / Observability
 
 Purpose:
-- logs, metrics, and alarms.
+- logs, metrics, and alarms scoped to the active space.
 
 Back end:
 - event store and metrics tables.
@@ -451,7 +509,7 @@ Core behaviors:
 ### 15.10 Containers and Registry
 
 Purpose:
-- ECS, ECR, and EKS-aligned workflows.
+- container and registry-aligned workflows when needed by a provider profile.
 
 Back end:
 - local container engine integration.
@@ -469,7 +527,7 @@ Core behaviors:
 ### 15.11 API Gateway / Route 53 / Edge
 
 Purpose:
-- entrypoint and routing simulator.
+- entrypoint and routing simulator scoped to the active space.
 
 Back end:
 - local gateway router and DNS-like mapping.
@@ -496,11 +554,14 @@ Catalog model:
 - entitlement tier,
 - certification support,
 - runtime dependency,
-- validation support.
+- active simulation space,
+- runtime backing type,
+- validation support,
+- federation compatibility.
 
 ## 17. EC2 Runtime Mapping
 
-EC2 simulation should map to local runtime templates.
+EC2 simulation should map to local LXD runtime templates while CloudSim manages placement and capacity.
 
 Example:
 
@@ -511,12 +572,13 @@ Example:
 The simulator creates:
 
 - an EC2 instance record,
-- a matching container or sandbox image,
+- a matching LXD instance or VM-like guest,
 - a local storage attachment,
 - metadata service,
 - network policy,
 - startup hooks,
-- console output stream.
+- console output stream,
+- SSH and SCP access endpoint.
 
 ## 18. Installer and Packaging Layer
 
@@ -565,16 +627,18 @@ Compose is a supported deployment profile, not the only product form.
 
 ## 20. Expansion Path
 
-The core must be reusable for multiple providers.
+The core must be reusable for multiple providers and multiple simulation spaces per provider.
 
 Expansion order:
 
 1. AWS core services.
-2. Certification and validation.
-3. Terraform import/export.
-4. GitHub deployment.
-5. Azure provider profile.
-6. GCP provider profile.
+2. Multi-space simulation and active-space switching.
+3. Federation and cross-space workflows.
+4. Certification and validation.
+5. Terraform import/export.
+6. GitHub deployment.
+7. Azure provider profile.
+8. GCP provider profile.
 
 The provider-neutral core should remain stable while adapters and UI skins change.
 
@@ -583,21 +647,28 @@ The provider-neutral core should remain stable while adapters and UI skins chang
 - Recreate all AWS internal implementation details.
 - Build a public cloud control plane.
 - Depend on cloud hosting for the simulator to work.
-- Model every obscure edge case of every AWS API on day one.
+- Model every obscure edge case of every cloud API on day one.
+- Merge simulation spaces into one global state.
+- Make space switching stop runtimes implicitly.
+- Use Docker as the primary VM abstraction when LXD is available.
 
 ## 22. Summary
 
 CloudLearn is best implemented as:
 
 - a local control plane,
-- a persistent simulator kernel,
-- AWS-compatible adapters,
+- a persistent simulation kernel,
+- CloudSim as the cloud substrate,
+- LXD as the VM-like runtime layer,
+- provider-specific adapters for IAM, API, and UI behavior,
+- multiple isolated simulation spaces,
+- federation and connected workflows,
 - runtime bundles for app execution,
 - certification and credit systems,
 - GitHub source deployment,
 - Terraform translation,
 - secure licensing and lockout,
-- and a provider-neutral core for future Azure and GCP support.
+- and a provider-neutral core for future Azure, GCP, OCI, and Tencent support.
 
 ## 23. API-Driven Action Model
 
@@ -611,6 +682,8 @@ Design rule:
 - Lab and certification step -> same API action
 
 The UI should never bypass the API layer. This keeps the simulator familiar to users and keeps future service additions consistent.
+
+The active simulation space must also flow through the API layer so every action is scoped correctly.
 
 ## 24. Lightweight Engine Strategy
 
@@ -626,6 +699,8 @@ To avoid a massive codebase, the simulator should reuse a small set of shared en
 
 Services become thin adapters over these engines. That means S3, IAM, EC2, VPC, Lambda, queues, observability, and template deployment all reuse the same core mechanics.
 
+CloudSim owns the placement and timing layer, and LXD owns the machine-like runtime layer.
+
 ## 25. Network Simulation Model
 
 VPC, subnets, availability zones, security groups, route tables, internet gateways, and NAT should all be simulated as a logical network model.
@@ -640,20 +715,22 @@ Key points:
 
 The simulator should enforce these rules at the service gateway and runtime boundary, not by trying to build a real cloud network.
 
+Federation links should sit above the network model and connect entire simulation spaces with explicit trust and latency rules.
+
 ## 26. Master Layered Architecture
 
 The complete platform stack should be understood as the following layers:
 
 - Experience layer: console, CLI, SDK, labs, certification UI.
 - API contract layer: documented cloud actions, request and response shapes.
-- Routing layer: service dispatch, region selection, account resolution.
-- Simulation kernel: resource graph, lifecycles, workflows, events, snapshots.
+- Routing layer: service dispatch, region selection, account resolution, active space selection.
+- Simulation kernel: resource graph, lifecycles, workflows, events, snapshots, and federation links.
 - Shared engines: policy, topology, runtime, persistence, and event handling.
 - Service adapter layer: S3, IAM, EC2, VPC, RDS, Lambda, queues, observability, templates, containers, edge.
-- Runtime bundle layer: Java, .NET, Go, PHP, Python.
-- Local host layer: containers, sandboxes, local ports, mounted storage, startup hooks.
-- Persistence layer: SQLite, artifact storage, encrypted tokens, snapshots, audit history.
-- Governance layer: credits, tiers, certification, GitHub deploy, Terraform bridge, AWS validation, lockout.
+- Runtime bundle layer: OS images, Java, .NET, Go, PHP, Python.
+- Local host layer: LXD projects, sandboxes, local ports, mounted storage, startup hooks.
+- Persistence layer: SQLite, artifact storage, encrypted tokens, snapshots, audit history, per-space namespaces.
+- Governance layer: credits, tiers, certification, GitHub deploy, Terraform bridge, real cloud validation, lockout, and local resource caps.
 
 That layered view is the master architecture used for design, implementation, certification planning, and future provider expansion.
 
@@ -687,10 +764,12 @@ Pack contents should include:
 - state model
 - tests and fixtures
 - signature metadata
+- space scoping metadata
+- federation compatibility metadata
 
 ## 28. Pack Admission Rules
 
-Every capability pack must include AWS-like API support in the MVP and beyond.
+Every capability pack must include provider-like API support in the MVP and beyond.
 
 A pack should be rejected unless it provides:
 
@@ -700,6 +779,8 @@ A pack should be rejected unless it provides:
 - error mappings
 - state transition rules
 - pagination and region behavior where relevant
+- space scoping behavior
+- federation compatibility where relevant
 
 Admission checks should include:
 
@@ -709,6 +790,7 @@ Admission checks should include:
 - API contract validation
 - schema validation
 - optional contract tests
+- local resource estimate validation
 
 ## 29. Cloud-Agnostic Pack Design
 
@@ -719,6 +801,8 @@ The pack should contain:
 - a provider-neutral capability core
 - provider adapters
 - provider profiles
+- space lifecycle hooks
+- federation hooks
 
 The provider-neutral core owns:
 
@@ -745,16 +829,21 @@ The MVP should include the smallest useful set of capabilities while keeping the
 MVP must include:
 
 - local control plane
-- AWS-style API-driven actioning
+- provider-style API-driven actioning
 - local durable state
 - Docker Compose deployment mode
 - Free tier simulator support
 - signed entitlement and license flow
-- capability packs with AWS-like API contract validation
+- capability packs with provider-like API contract validation
 - lazy activation of services
+- multi-space registry and active-space switching
+- local RAM/disk estimation and max-space enforcement
+- CloudSim-backed cloud physics
+- LXD-backed VM-like runtime for EC2
+- federation primitives for same-provider and cross-provider workflows
 - S3
 - IAM basics
-- EC2 basics backed by a local container runtime
+- EC2 basics backed by a local VM-like runtime
 - VPC basics with subnet, security group, route, and AZ labels
 - one runtime bundle path, starting with Python
 - GitHub deploy into local runtime
@@ -773,3 +862,19 @@ MVP should defer:
 - Terraform import/export at scale
 - Azure and GCP provider packs
 - advanced multi-region behavior
+- distributed execution beyond the local machine
+
+## 31. Architecture Decisions
+
+The platform should follow these explicit decisions:
+
+1. CloudSim is the provider-neutral simulation backbone.
+2. LXD is the default VM-like runtime layer for EC2-style machine access.
+3. The control plane owns provider-specific IAM, API contracts, and UI behavior.
+4. Multiple simulation spaces per provider are first-class and may run in parallel.
+5. Switching the active space never stops any background simulation runtime.
+6. Same-provider and cross-provider federation are both supported.
+7. Local RAM, disk, and runtime estimates must gate space creation.
+8. Provider-specific service adapters sit on top of the shared kernel, not inside CloudSim.
+9. EC2-style usage should favor SSH and SCP into a sandboxed guest over sample-app shortcuts.
+10. The first implementation slice should expose the space registry, active-space switch, and CloudSim summary APIs before deeper provider overlays.

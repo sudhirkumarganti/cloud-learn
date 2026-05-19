@@ -36,6 +36,7 @@ import textwrap
 import traceback
 from functools import partial
 from collections import deque
+from collections.abc import MutableMapping
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
 from urllib.parse import parse_qsl
@@ -77,6 +78,10 @@ def _now_http() -> str:
 
 def _iam_root_principal() -> str:
     return f"arn:aws:iam::{AWS_ACCOUNT_ID}:root"
+
+
+def _parent_os() -> str:
+    return str(os.environ.get("CLOUDLEARN_PARENT_OS") or platform.system()).strip().lower()
 
 
 def _iam_user_arn(user_name: str) -> str:
@@ -153,6 +158,10 @@ def _iam_sqs_queue_arn(queue_name: str) -> str:
 
 def _iam_lambda_function_arn(function_name: str) -> str:
     return f"arn:aws:lambda:us-east-1:{AWS_ACCOUNT_ID}:function:{function_name}"
+
+
+def _iam_dynamodb_table_arn(table_name: str) -> str:
+    return f"arn:aws:dynamodb:us-east-1:{AWS_ACCOUNT_ID}:table/{table_name}"
 
 
 def _iam_state() -> dict:
@@ -439,6 +448,49 @@ def _iam_route_action_resource(request: Request) -> tuple[str, str] | None:
         return None
     if path.startswith("/api/catalog") or path.startswith("/api/packs") or path.startswith("/api/license") or path.startswith("/api/runtime/bundles") or path.startswith("/api/deployments") or path.startswith("/api/actions"):
         return None
+    if path.startswith("/api/spaces"):
+        if path == "/api/spaces" and method == "GET":
+            return ("cloudlearn:ListSpaces", "*")
+        if path == "/api/spaces" and method == "POST":
+            return ("cloudlearn:CreateSpace", "*")
+        if path == "/api/spaces/estimate" and method == "POST":
+            return ("cloudlearn:EstimateSpace", "*")
+        if path == "/api/spaces/active" and method == "GET":
+            return ("cloudlearn:GetActiveSpace", "*")
+        parts = [p for p in path.split("/") if p]
+        if len(parts) >= 3:
+            space_id = parts[2]
+            if len(parts) == 3 and method == "GET":
+                return ("cloudlearn:GetSpace", f"arn:cloudlearn:space::{space_id}")
+            if len(parts) == 3 and method == "DELETE":
+                return ("cloudlearn:DeleteSpace", f"arn:cloudlearn:space::{space_id}")
+            if len(parts) == 4 and parts[3] == "switch" and method == "POST":
+                return ("cloudlearn:SwitchSpace", f"arn:cloudlearn:space::{space_id}")
+            if len(parts) == 4 and parts[3] == "pause" and method == "POST":
+                return ("cloudlearn:PauseSpace", f"arn:cloudlearn:space::{space_id}")
+            if len(parts) == 4 and parts[3] == "resume" and method == "POST":
+                return ("cloudlearn:ResumeSpace", f"arn:cloudlearn:space::{space_id}")
+            if len(parts) == 4 and parts[3] == "archive" and method == "POST":
+                return ("cloudlearn:ArchiveSpace", f"arn:cloudlearn:space::{space_id}")
+        return None
+    if path.startswith("/api/cloudsim/"):
+        action_map = {
+            ("GET", "/api/cloudsim/current"): ("cloudlearn:GetCloudSimCurrent", "*"),
+            ("GET", "/api/cloudsim/summary"): ("cloudlearn:GetCloudSimSummary", "*"),
+            ("POST", "/api/cloudsim/reconcile"): ("cloudlearn:ReconcileCloudSim", "*"),
+            ("GET", "/api/cloudsim/events"): ("cloudlearn:ListCloudSimEvents", "*"),
+        }
+        return action_map.get((method, path))
+    if path.startswith("/api/federations/") or path == "/api/federations":
+        if path == "/api/federations" and method == "GET":
+            return ("cloudlearn:ListFederations", "*")
+        if path == "/api/federations" and method == "POST":
+            return ("cloudlearn:CreateFederation", "*")
+        if path.startswith("/api/federations/") and method == "POST" and path.endswith("/links"):
+            return ("cloudlearn:CreateFederationLink", "*")
+        if path.startswith("/api/federations/") and method == "POST" and path.endswith("/tests"):
+            return ("cloudlearn:RunFederationTest", "*")
+        return None
     if path.startswith("/api/iam/"):
         action_map = {
             ("GET", "/api/iam/users"): ("iam:ListUsers", "*"),
@@ -522,7 +574,7 @@ def _iam_route_action_resource(request: Request) -> tuple[str, str] | None:
                     if tail[2] == "tags" and method in {"GET", "POST", "DELETE"}:
                         return ({"GET": "s3:GetObjectTagging", "POST": "s3:PutObjectTagging", "DELETE": "s3:DeleteObjectTagging"}.get(method), object_arn)
         return None
-    if path.startswith("/api/ec2/runtime/docker/bootstrap"):
+    if path.startswith("/api/ec2/runtime/lxd/bootstrap"):
         return ("ec2:DescribeInstances", "*")
     if path.startswith("/api/ec2/instances"):
         parts = [p for p in path.split("/") if p]
@@ -553,8 +605,12 @@ def _iam_route_action_resource(request: Request) -> tuple[str, str] | None:
         action_map = {
             ("GET", "/api/ec2/amis"): ("ec2:DescribeImages", "*"),
             ("GET", "/api/ec2/sample-apps"): ("ec2:DescribeImages", "*"),
-            ("GET", "/api/ec2/runtime/docker"): ("ec2:DescribeInstances", "*"),
-            ("POST", "/api/ec2/runtime/docker/bootstrap"): ("ec2:CreateServiceLinkedRole", "*"),
+            ("GET", "/api/ec2/runtime"): ("ec2:DescribeInstances", "*"),
+            ("GET", "/api/ec2/runtime/lxd"): ("ec2:DescribeInstances", "*"),
+            ("GET", "/api/ec2/runtime/multipass"): ("ec2:DescribeInstances", "*"),
+            ("POST", "/api/ec2/runtime/bootstrap"): ("ec2:CreateServiceLinkedRole", "*"),
+            ("POST", "/api/ec2/runtime/lxd/bootstrap"): ("ec2:CreateServiceLinkedRole", "*"),
+            ("POST", "/api/ec2/runtime/multipass/bootstrap"): ("ec2:CreateServiceLinkedRole", "*"),
         }
         return action_map.get((method, path))
     if path.startswith("/api/vpc/"):
@@ -661,6 +717,32 @@ def _iam_route_action_resource(request: Request) -> tuple[str, str] | None:
                 return ("sqs:PurgeQueue", resource)
             if tail == ["tags"]:
                 return ({"GET": "sqs:ListQueueTags", "POST": "sqs:TagQueue", "DELETE": "sqs:UntagQueue"}.get(method), resource) if method in {"GET", "POST", "DELETE"} else None
+    if path.startswith("/api/dynamodb/") or path == "/dynamodb":
+        parts = [p for p in path.split("/") if p]
+        if path in {"/api/dynamodb/tables"}:
+            return ({"GET": "dynamodb:ListTables", "POST": "dynamodb:CreateTable"}.get(method), "*") if method in {"GET", "POST"} else None
+        if path in {"/api/dynamodb/aws", "/dynamodb"} and method == "POST":
+            target = request.headers.get("x-amz-target", "")
+            action = target.rsplit(".", 1)[-1] if target else "Unknown"
+            return (f"dynamodb:{action}", "*")
+        if len(parts) >= 4 and parts[2] == "tables":
+            table_name = parts[3]
+            resource = _iam_dynamodb_table_arn(table_name)
+            tail = parts[4:] if len(parts) > 4 else []
+            if not tail:
+                return ({"GET": "dynamodb:DescribeTable", "DELETE": "dynamodb:DeleteTable"}.get(method), resource) if method in {"GET", "DELETE"} else None
+            if tail == ["items"]:
+                return ({"GET": "dynamodb:Scan", "POST": "dynamodb:PutItem", "PUT": "dynamodb:UpdateItem", "DELETE": "dynamodb:DeleteItem"}.get(method), resource) if method in {"GET", "POST", "PUT", "DELETE"} else None
+            if tail == ["query"] and method == "POST":
+                return ("dynamodb:Query", resource)
+            if tail == ["scan"] and method == "POST":
+                return ("dynamodb:Scan", resource)
+            if tail == ["batch-get"] and method == "POST":
+                return ("dynamodb:BatchGetItem", resource)
+            if tail == ["batch-write"] and method == "POST":
+                return ("dynamodb:BatchWriteItem", resource)
+            if tail == ["tags"]:
+                return ({"GET": "dynamodb:ListTagsOfResource", "POST": "dynamodb:TagResource", "DELETE": "dynamodb:UntagResource"}.get(method), resource) if method in {"GET", "POST", "DELETE"} else None
     if path.startswith("/api/apigateway/"):
         parts = [p for p in path.split("/") if p]
         if path == "/api/apigateway/apis":
@@ -748,11 +830,13 @@ def _iam_route_action_resource(request: Request) -> tuple[str, str] | None:
                         return ("s3:CompleteMultipartUpload", resource)
     return None
 
-STATE_VERSION = 7
+STATE_VERSION = 8
 STATE_FILE = Path(os.environ.get("CLOUDLEARN_STATE_FILE", Path(__file__).with_name(".cloudlearn_state.sqlite3")))
 LEGACY_STATE_FILE = Path(os.environ.get("CLOUDLEARN_LEGACY_STATE_FILE", STATE_FILE.with_suffix(".pkl")))
 STATE_LOCK = threading.RLock()
-DOCKER_RUNTIME_IMAGE = os.environ.get("CLOUDLEARN_DOCKER_RUNTIME_IMAGE", "python:3.12-slim")
+LXD_RUNTIME_IMAGE = os.environ.get("CLOUDLEARN_LXD_RUNTIME_IMAGE", os.environ.get("CLOUDLEARN_DOCKER_RUNTIME_IMAGE", "ubuntu:24.04"))
+DOCKER_RUNTIME_IMAGE = LXD_RUNTIME_IMAGE
+MULTIPASS_RUNTIME_IMAGE = os.environ.get("CLOUDLEARN_MULTIPASS_RUNTIME_IMAGE", "ubuntu:24.04")
 DOCKER_CONSOLE_PORT = 8080
 EC2_TERMINATED_VISIBILITY_SECONDS = int(os.environ.get("CLOUDLEARN_EC2_TERMINATED_VISIBILITY_SECONDS", "60"))
 INSTANCE_WORK_ROOT = Path(os.environ.get("CLOUDLEARN_DEPLOY_DIR", Path(__file__).with_name("deployments")))
@@ -912,6 +996,42 @@ def _default_packs() -> Dict[str, dict]:
                 "regionAware": True,
             },
         },
+        "cloudlearn.dynamodb.basic": {
+            "id": "cloudlearn.dynamodb.basic",
+            "type": "service",
+            "version": "1.0.0",
+            "provider": "agnostic",
+            "coreProviderNeutral": True,
+            "state": "available",
+            "active": False,
+            "api": {
+                "protocol": "aws-like",
+                "actions": ["CreateTable", "ListTables", "DescribeTable", "PutItem", "GetItem", "UpdateItem", "DeleteItem", "Query", "Scan", "BatchGetItem", "BatchWriteItem"],
+                "requestSchemas": True,
+                "responseSchemas": True,
+                "errors": True,
+                "pagination": True,
+                "regionAware": True,
+            },
+        },
+        "cloudlearn.cloudsim.basic": {
+            "id": "cloudlearn.cloudsim.basic",
+            "type": "service",
+            "version": "1.0.0",
+            "provider": "agnostic",
+            "coreProviderNeutral": True,
+            "state": "available",
+            "active": False,
+            "api": {
+                "protocol": "aws-like",
+                "actions": ["GetSummary", "Reconcile", "ListEvents"],
+                "requestSchemas": True,
+                "responseSchemas": True,
+                "errors": True,
+                "pagination": False,
+                "regionAware": True,
+            },
+        },
     }
 
 
@@ -928,6 +1048,11 @@ def _default_state() -> dict:
             "issued_at": _now(),
             "status": "active",
         },
+        "spaces": {
+            "spaces": {},
+            "active_space_id": "",
+            "settings": {"max_spaces": 6, "default_provider": "aws", "default_region": "us-east-1", "max_memory_mb": 8192, "max_disk_mb": 32768},
+        },
         "packs": _default_packs(),
         "deployments": {},
         "iam": {"users": {}, "groups": {}, "roles": {}, "policies": {}, "attachments": [], "identity_providers": {}, "account_settings": {"password_policy": {"minimum_length": 8, "require_symbols": True, "require_numbers": True, "require_uppercase": True, "require_lowercase": True}}},
@@ -936,6 +1061,9 @@ def _default_state() -> dict:
         "apigateway": {"apis": {}, "logs": []},
         "lambda": {"functions": {}, "events": [], "invocations": []},
         "sqs": {"queues": {}, "events": []},
+        "dynamodb": {"tables": {}, "events": []},
+        "cloudsim": {"summary": {}, "events": [], "last_reconcile_at": ""},
+        "federations": {"federations": {}, "links": {}, "tests": []},
         "rds": {
             "db_instances": {},
             "db_subnet_groups": {},
@@ -945,7 +1073,8 @@ def _default_state() -> dict:
         },
         "runtime": {
             "bundles": {"python": {"id": "cloudlearn.runtime.python", "installed": True, "active": False}},
-            "docker": {"status": "missing", "message": "", "mode": "auto", "last_checked": ""},
+            "lxd": {"status": "missing", "message": "", "mode": "auto", "last_checked": ""},
+            "multipass": {"status": "missing", "message": "", "mode": "auto", "last_checked": ""},
         },
         "github": {"connections": {}, "repos": {}, "deployments": {}},
         "usage": {"events": []},
@@ -959,6 +1088,22 @@ def _migrate_state(state: dict) -> dict:
         if key not in state:
             state[key] = value
     state["schema_version"] = STATE_VERSION
+    spaces_state = state.setdefault(
+        "spaces",
+        {
+            "spaces": {},
+            "active_space_id": "",
+            "settings": {"max_spaces": 6, "default_provider": "aws", "default_region": "us-east-1", "max_memory_mb": 8192, "max_disk_mb": 32768},
+        },
+    )
+    spaces_state.setdefault("spaces", {})
+    spaces_state.setdefault("active_space_id", "")
+    spaces_state.setdefault("settings", {})
+    spaces_state["settings"].setdefault("max_spaces", 6)
+    spaces_state["settings"].setdefault("default_provider", "aws")
+    spaces_state["settings"].setdefault("default_region", "us-east-1")
+    spaces_state["settings"].setdefault("max_memory_mb", 8192)
+    spaces_state["settings"].setdefault("max_disk_mb", 32768)
     packs = state.setdefault("packs", {})
     for pack_id, pack in _default_packs().items():
         packs.setdefault(pack_id, copy.deepcopy(pack))
@@ -969,12 +1114,14 @@ def _migrate_state(state: dict) -> dict:
             continue
         inst.setdefault("instance_id", instance_id)
         inst.setdefault("state", "stopped")
-        backend = inst.get("runtime_backend")
-        if backend in {"docker", "docker-shell"} or inst.get("container_id"):
-            inst["runtime_backend"] = "docker"
+        backend = str(inst.get("runtime_backend") or "").strip().lower()
+        if backend in {"lxd", "lxd-shell"} or inst.get("container_id"):
+            inst["runtime_backend"] = "lxd"
+        elif backend in {"multipass", "multipass-shell"}:
+            inst["runtime_backend"] = "multipass"
         else:
             inst["runtime_backend"] = "simulated"
-        inst.setdefault("runtime_image", DOCKER_RUNTIME_IMAGE)
+        inst.setdefault("runtime_image", LXD_RUNTIME_IMAGE)
         inst.setdefault("container_id", "")
         inst.setdefault("container_name", f"cloudlearn-{instance_id}")
         inst.setdefault("container_port", DOCKER_CONSOLE_PORT)
@@ -995,12 +1142,20 @@ def _migrate_state(state: dict) -> dict:
         console_state = inst.get("console_state")
         if not isinstance(console_state, dict):
             inst["console_state"] = {"cwd": str((INSTANCE_WORK_ROOT / instance_id).resolve())}
+    runtime = state.setdefault("runtime", {"bundles": {"python": {"id": "cloudlearn.runtime.python", "installed": True, "active": False}}})
+    runtime.setdefault("lxd", {"status": "missing", "message": "", "mode": "auto", "last_checked": ""})
+    runtime.setdefault("multipass", {"status": "missing", "message": "", "mode": "auto", "last_checked": ""})
+    federations = state.setdefault("federations", {"federations": {}, "links": {}, "tests": []})
+    federations.setdefault("federations", {})
+    federations.setdefault("links", {})
+    federations.setdefault("tests", [])
     rds = state.setdefault("rds", {"db_instances": {}, "db_subnet_groups": {}, "db_parameter_groups": {}, "db_snapshots": {}, "events": []})
     rds.setdefault("db_instances", {})
     rds.setdefault("db_subnet_groups", {})
     rds.setdefault("db_parameter_groups", {})
     rds.setdefault("db_snapshots", {})
     rds.setdefault("events", [])
+    state.setdefault("cloudsim", {"summary": {}, "events": [], "last_reconcile_at": ""})
     apigw = state.setdefault("apigateway", {"apis": {}, "logs": []})
     apigw.setdefault("apis", {})
     apigw.setdefault("logs", [])
@@ -1032,6 +1187,27 @@ def _migrate_state(state: dict) -> dict:
         queue.setdefault("messages", [])
         queue.setdefault("created", _now())
         queue.setdefault("last_modified", _now())
+    ddb_state = state.setdefault("dynamodb", {"tables": {}, "events": []})
+    ddb_state.setdefault("tables", {})
+    ddb_state.setdefault("events", [])
+    for table_name, table in ddb_state["tables"].items():
+        if not isinstance(table, dict):
+            continue
+        table.setdefault("table_name", table_name)
+        table.setdefault("table_arn", _iam_dynamodb_table_arn(table_name))
+        table.setdefault("table_status", "ACTIVE")
+        table.setdefault("partition_key_name", "id")
+        table.setdefault("partition_key_type", "S")
+        table.setdefault("sort_key_name", "")
+        table.setdefault("sort_key_type", "S")
+        table.setdefault("billing_mode", "PAY_PER_REQUEST")
+        table.setdefault("provisioned_throughput", {"ReadCapacityUnits": 5, "WriteCapacityUnits": 5})
+        table.setdefault("tags", {})
+        table.setdefault("indexes", [])
+        table.setdefault("streams", {"enabled": False, "latest_stream_label": ""})
+        table.setdefault("items", {})
+        table.setdefault("created", _now())
+        table.setdefault("last_modified", _now())
     buckets_state = state.setdefault("buckets", {})
     if isinstance(buckets_state, dict):
         for bucket_name, bucket_meta in buckets_state.items():
@@ -1045,6 +1221,63 @@ def _migrate_state(state: dict) -> dict:
                 "deliveries": [],
                 "updatedAt": _now(),
             })
+    spaces_state = state.setdefault("spaces", {"spaces": {}, "active_space_id": "", "settings": {"max_spaces": 6, "default_provider": "aws", "default_region": "us-east-1"}})
+    spaces_state.setdefault("spaces", {})
+    spaces_state.setdefault("active_space_id", "")
+    spaces_state.setdefault("settings", {})
+    spaces_state["settings"].setdefault("max_spaces", 6)
+    spaces_state["settings"].setdefault("default_provider", "aws")
+    spaces_state["settings"].setdefault("default_region", "us-east-1")
+    if not spaces_state["spaces"]:
+        legacy_space_id = "space-legacy"
+        spaces_state["spaces"][legacy_space_id] = {
+            "space_id": legacy_space_id,
+            "name": "Legacy Workspace",
+            "provider": "aws",
+            "status": "running",
+            "seed": state.get("license", {}).get("device_id") or "legacy",
+            "owner_id": "local-user",
+            "created_at": _now(),
+            "updated_at": _now(),
+            "cloudsim_runtime_id": "cloudsim-space-legacy",
+            "lxd_project_name": "cl-space-legacy",
+            "active_region": "us-east-1",
+            "active_account": AWS_ACCOUNT_ID,
+            "max_instances": 10,
+            "max_memory_mb": 4096,
+            "max_disk_mb": 20480,
+            "estimated_memory_mb": 0,
+            "estimated_disk_mb": 0,
+            "estimated_runtime_mb": 0,
+            "estimated_cost_notes": "Legacy workspace seeded from existing simulator state.",
+            "runtime_count": 0,
+            "ec2_count": len((state.get("ec2") or {}).get("instances", {})),
+            "lambda_count": len((state.get("lambda") or {}).get("functions", {})),
+            "rds_count": len((state.get("rds") or {}).get("db_instances", {})),
+            "sqs_count": len((state.get("sqs") or {}).get("queues", {})),
+            "dynamodb_count": len((state.get("dynamodb") or {}).get("tables", {})),
+            "cloudsim": {"summary": {}, "events": [], "last_tick": ""},
+            "runtime": {"mode": "lxd", "instances": {}, "sandbox_count": 0},
+            "resources": {},
+            "events": [],
+            "snapshots": [],
+            "service_states": {
+                "s3": {
+                    "buckets": copy.deepcopy(buckets_state),
+                    "objects": copy.deepcopy(state.get("objects", {})),
+                    "multiparts": copy.deepcopy(state.get("multiparts", {})),
+                },
+                "ec2": copy.deepcopy(state.get("ec2", {"instances": {}})),
+                "vpc": copy.deepcopy(state.get("vpc", {"vpcs": {}, "subnets": {}, "security_groups": {}, "route_tables": {}, "internet_gateways": {}})),
+                "rds": copy.deepcopy(state.get("rds", {"db_instances": {}, "db_subnet_groups": {}, "db_parameter_groups": {}, "db_snapshots": {}, "events": []})),
+                "apigateway": copy.deepcopy(state.get("apigateway", {"apis": {}, "logs": []})),
+                "lambda": copy.deepcopy(state.get("lambda", {"functions": {}, "events": [], "invocations": []})),
+                "sqs": copy.deepcopy(state.get("sqs", {"queues": {}, "events": []})),
+                "dynamodb": copy.deepcopy(state.get("dynamodb", {"tables": {}, "events": []})),
+            },
+            "tags": {},
+        }
+        spaces_state["active_space_id"] = legacy_space_id
     return state
 
 
@@ -1173,6 +1406,7 @@ class EC2InstanceRequest(BaseModel):
     instance_type: str = "t3.micro"
     ami: str = "sim-ubuntu-22.04"
     runtime: str = "python"
+    runtime_backend: str = ""
     key_pair: str = ""
     subnet_id: str = ""
     vpc_id: str = ""
@@ -1437,6 +1671,46 @@ class SQSVisibilityRequest(BaseModel):
     visibility_timeout: int = 30
 
 
+class DynamoDBTableRequest(BaseModel):
+    table_name: str
+    partition_key_name: str = "id"
+    partition_key_type: str = "S"
+    sort_key_name: str = ""
+    sort_key_type: str = "S"
+    billing_mode: str = "PAY_PER_REQUEST"
+    read_capacity_units: int = 5
+    write_capacity_units: int = 5
+    tags: dict[str, str] | None = None
+
+
+class DynamoDBItemRequest(BaseModel):
+    item: dict[str, Any] = {}
+    key: dict[str, Any] = {}
+    return_values: str = "NONE"
+    attribute_updates: dict[str, Any] | None = None
+    update_expression: str = ""
+    expression_attribute_values: dict[str, Any] | None = None
+
+
+class DynamoDBQueryRequest(BaseModel):
+    partition_key_value: Any = None
+    sort_key_equals: Any = None
+    sort_key_begins_with: str = ""
+    sort_key_between: list[Any] | None = None
+    limit: int = 100
+    key_condition_expression: str = ""
+    expression_attribute_values: dict[str, Any] | None = None
+    expression_attribute_names: dict[str, str] | None = None
+
+
+class DynamoDBScanRequest(BaseModel):
+    limit: int = 100
+
+
+class DynamoDBTagRequest(BaseModel):
+    tags: dict[str, str] = {}
+
+
 class DeploymentRequest(BaseModel):
     name: str
     source_url: str = ""
@@ -1447,7 +1721,7 @@ class DeploymentRequest(BaseModel):
 
 
 def _apigw_state() -> dict:
-    return STATE.setdefault("apigateway", {"apis": {}, "logs": []})
+    return apigw_state
 
 
 def _apigw_api(api_id: str) -> dict | None:
@@ -1826,7 +2100,7 @@ def _apigw_summary(api: dict) -> dict:
 
 
 def _lambda_state() -> dict:
-    return STATE.setdefault("lambda", {"functions": {}, "events": [], "invocations": []})
+    return lambda_state
 
 
 def _lambda_function_key(function_name: str) -> str:
@@ -2436,7 +2710,7 @@ def _lambda_invoke_response(function_name: str, event_payload: Any, invocation_t
 
 
 def _sqs_state() -> dict:
-    return STATE.setdefault("sqs", {"queues": {}, "events": []})
+    return sqs_state
 
 
 def _sqs_queue_key(queue_name: str) -> str:
@@ -3025,6 +3299,27 @@ AMI_CATALOG = [
     },
 ]
 
+
+def _decorate_ami_catalog() -> None:
+    host_os = _parent_os()
+    for item in AMI_CATALOG:
+        family = str(item.get("os_family") or "").lower()
+        if family == "ubuntu":
+            item.setdefault("supported_backends", ["multipass", "lxd"])
+            item.setdefault("supported_host_os", ["linux", "darwin", "windows"])
+            item.setdefault("default_runtime_backend", "multipass" if host_os in {"windows", "darwin"} else "lxd")
+        elif family == "windows":
+            item.setdefault("supported_backends", [])
+            item.setdefault("supported_host_os", ["windows"])
+            item.setdefault("default_runtime_backend", "multipass")
+        else:
+            item.setdefault("supported_backends", ["lxd"])
+            item.setdefault("supported_host_os", ["linux"])
+            item.setdefault("default_runtime_backend", "lxd")
+
+
+_decorate_ami_catalog()
+
 EC2_INSTANCE_TYPE_CATALOG = [
     {
         "instanceType": "t3.micro",
@@ -3140,16 +3435,27 @@ def healthz():
 
 @app.on_event("startup")
 def _startup_reconcile_ec2_state():
+    try:
+        PLATFORM.runtime.start_bootstrap()
+    except Exception:
+        pass
     for instance_id in _ec2_instance_ids():
         instance = ec2_state["instances"].get(instance_id)
         if not isinstance(instance, dict):
             continue
-        if instance.get("runtime_backend") == "docker":
+        backend = str(instance.get("runtime_backend") or "").strip().lower()
+        if backend == "multipass":
+            _ensure_instance_workspace(instance)
+            if _runtime_available("multipass"):
+                _sync_multipass_instance(instance)
+            else:
+                instance.setdefault("container_status", "multipass-unavailable")
+        elif backend == "lxd":
             _ensure_instance_workspace(instance)
             if _docker_available():
                 _sync_docker_instance(instance)
             else:
-                instance.setdefault("container_status", "docker-unavailable")
+                instance.setdefault("container_status", "lxd-unavailable")
         if instance.get("sample_app_id"):
             try:
                 if instance.get("state") == "running":
@@ -3166,9 +3472,75 @@ def _startup_reconcile_ec2_state():
 #                                   metadata:{}, tags:{}, storage_class } } }
 # multiparts: { upload_id → { bucket, key, parts:{part_number → {data,etag}},
 #                              content_type, metadata, initiated } }
-buckets:    Dict[str, dict] = STATE.setdefault("buckets", {})
-objects:    Dict[str, dict] = STATE.setdefault("objects", {})
-multiparts: Dict[str, dict] = STATE.setdefault("multiparts", {})
+class _SpaceScopedDictProxy(MutableMapping):
+    def __init__(self, service_key: str, default_factory, nested_key: str | None = None):
+        self.service_key = service_key
+        self.default_factory = default_factory
+        self.nested_key = nested_key
+
+    def _service_state(self) -> dict:
+        spaces_state = STATE.setdefault("spaces", {"spaces": {}, "active_space_id": "", "settings": {"max_spaces": 6, "default_provider": "aws", "default_region": "us-east-1"}})
+        active_id = spaces_state.get("active_space_id", "")
+        space = spaces_state.get("spaces", {}).get(active_id, {}) if active_id else {}
+        if isinstance(space, dict):
+            service_states = space.setdefault("service_states", {})
+            service_state = service_states.setdefault(self.service_key, self.default_factory())
+        else:
+            service_state = STATE.setdefault(self.service_key, self.default_factory())
+        return service_state
+
+    def _target(self) -> dict:
+        service_state = self._service_state()
+        if self.nested_key is None:
+            return service_state
+        return service_state.setdefault(self.nested_key, {})
+
+    def __getitem__(self, key):
+        return self._target()[key]
+
+    def __setitem__(self, key, value):
+        self._target()[key] = value
+
+    def __delitem__(self, key):
+        del self._target()[key]
+
+    def __iter__(self):
+        return iter(self._target())
+
+    def __len__(self):
+        return len(self._target())
+
+    def __contains__(self, key):
+        return key in self._target()
+
+    def get(self, key, default=None):
+        return self._target().get(key, default)
+
+    def setdefault(self, key, default=None):
+        return self._target().setdefault(key, default)
+
+    def pop(self, key, default=None):
+        return self._target().pop(key, default)
+
+    def update(self, *args, **kwargs):
+        return self._target().update(*args, **kwargs)
+
+    def clear(self):
+        return self._target().clear()
+
+    def keys(self):
+        return self._target().keys()
+
+    def items(self):
+        return self._target().items()
+
+    def values(self):
+        return self._target().values()
+
+
+buckets:    Dict[str, dict] = _SpaceScopedDictProxy("s3", lambda: {"buckets": {}, "objects": {}, "multiparts": {}}, "buckets")
+objects:    Dict[str, dict] = _SpaceScopedDictProxy("s3", lambda: {"buckets": {}, "objects": {}, "multiparts": {}}, "objects")
+multiparts: Dict[str, dict] = _SpaceScopedDictProxy("s3", lambda: {"buckets": {}, "objects": {}, "multiparts": {}}, "multiparts")
 iam_state = STATE.setdefault("iam", {"users": {}, "groups": {}, "roles": {}, "policies": {}, "attachments": [], "identity_providers": {}, "account_settings": {"password_policy": {"minimum_length": 8, "require_symbols": True, "require_numbers": True, "require_uppercase": True, "require_lowercase": True}}})
 iam_state.setdefault("users", {})
 iam_state.setdefault("groups", {})
@@ -3177,17 +3549,15 @@ iam_state.setdefault("policies", {})
 iam_state.setdefault("attachments", [])
 iam_state.setdefault("identity_providers", {})
 iam_state.setdefault("account_settings", {"password_policy": {"minimum_length": 8, "require_symbols": True, "require_numbers": True, "require_uppercase": True, "require_lowercase": True}})
-ec2_state = STATE.setdefault("ec2", {"instances": {}})
-vpc_state = STATE.setdefault("vpc", {"vpcs": {}, "subnets": {}, "security_groups": {}, "route_tables": {}, "internet_gateways": {}})
-vpc_state.setdefault("internet_gateways", {})
-rds_state = STATE.setdefault("rds", {"db_instances": {}, "db_subnet_groups": {}, "db_parameter_groups": {}, "db_snapshots": {}, "events": []})
-rds_state.setdefault("db_instances", {})
-rds_state.setdefault("db_subnet_groups", {})
-rds_state.setdefault("db_parameter_groups", {})
-rds_state.setdefault("db_snapshots", {})
-rds_state.setdefault("events", [])
+ec2_state = _SpaceScopedDictProxy("ec2", lambda: {"instances": {}})
+vpc_state = _SpaceScopedDictProxy("vpc", lambda: {"vpcs": {}, "subnets": {}, "security_groups": {}, "route_tables": {}, "internet_gateways": {}})
+rds_state = _SpaceScopedDictProxy("rds", lambda: {"db_instances": {}, "db_subnet_groups": {}, "db_parameter_groups": {}, "db_snapshots": {}, "events": []})
+apigw_state = _SpaceScopedDictProxy("apigateway", lambda: {"apis": {}, "logs": []})
+lambda_state = _SpaceScopedDictProxy("lambda", lambda: {"functions": {}, "events": [], "invocations": []})
+sqs_state = _SpaceScopedDictProxy("sqs", lambda: {"queues": {}, "events": []})
+ddb_state = _SpaceScopedDictProxy("dynamodb", lambda: {"tables": {}, "events": []})
 runtime_state = STATE.setdefault("runtime", {"bundles": {"python": {"id": "cloudlearn.runtime.python", "installed": True, "active": False}}})
-runtime_state.setdefault("docker", {"status": "missing", "message": "", "mode": "auto", "last_checked": ""})
+runtime_state.setdefault("lxd", {"status": "missing", "message": "", "mode": "auto", "last_checked": ""})
 github_state = STATE.setdefault("github", {"connections": {}, "repos": {}, "deployments": {}})
 
 S3_NS = "http://s3.amazonaws.com/doc/2006-03-01/"
@@ -3379,7 +3749,7 @@ def _ec2_instance_xml(instance: dict) -> ET.Element:
     tag = _ec2_sub(tag_set, "item")
     _ec2_sub(tag, "key", "Name")
     _ec2_sub(tag, "value", instance.get("name", ""))
-    if instance.get("runtime_backend") == "docker":
+    if instance.get("runtime_backend") == "lxd":
         _ec2_sub(item, "privateDnsNameOptions")
     return item
 
@@ -4630,6 +5000,10 @@ def _docker_available() -> bool:
     return PLATFORM.runtime.available()
 
 
+def _docker_cli_available() -> bool:
+    return bool(_docker_cli())
+
+
 def _docker_bootstrap_status() -> dict:
     return PLATFORM.runtime.bootstrap_status()
 
@@ -4644,58 +5018,58 @@ def _run_bootstrap_command(args: list[str], timeout: int = 1200) -> subprocess.C
 
 def _apply_bootstrap_result(result: subprocess.CompletedProcess) -> None:
     output = (result.stdout or "") + (result.stderr or "")
-    runtime_state["docker"]["last_checked"] = _now()
-    runtime_state["docker"]["message"] = output[-1000:].strip()
+    runtime_state["lxd"]["last_checked"] = _now()
+    runtime_state["lxd"]["message"] = output[-1000:].strip()
     if result.returncode == 0:
-        runtime_state["docker"]["status"] = "ready"
+        runtime_state["lxd"]["status"] = "ready"
     else:
-        runtime_state["docker"]["status"] = "error"
+        runtime_state["lxd"]["status"] = "error"
 
 
 def _docker_bootstrap_worker() -> None:
     target = _docker_bootstrap_target()
     with DOCKER_BOOTSTRAP_LOCK:
-        runtime_state["docker"]["status"] = "installing"
-        runtime_state["docker"]["helper"] = target["helper"]
-        runtime_state["docker"]["label"] = target["label"]
-        runtime_state["docker"]["message"] = target["message"]
-        runtime_state["docker"]["started_at"] = _now()
+        runtime_state["lxd"]["status"] = "installing"
+        runtime_state["lxd"]["helper"] = target["helper"]
+        runtime_state["lxd"]["label"] = target["label"]
+        runtime_state["lxd"]["message"] = target["message"]
+        runtime_state["lxd"]["started_at"] = _now()
         _persist_state()
 
     try:
-        if target["helper"] == "brew-colima":
+        if target["helper"] == "snap-lxd":
             for command in target["commands"]:
-                completed = _run_bootstrap_command(command, timeout=1800 if command[0] and "brew" in command[0] else 900)
+                completed = _run_bootstrap_command(command, timeout=1200)
                 _apply_bootstrap_result(completed)
                 _persist_state()
                 if completed.returncode != 0:
                     break
-        elif target["helper"] in {"apt-docker", "dnf-docker"}:
+        elif target["helper"] == "apt-lxd":
             for command in target["commands"]:
-                completed = _run_bootstrap_command(command, timeout=1800)
+                completed = _run_bootstrap_command(command, timeout=1200)
                 _apply_bootstrap_result(completed)
                 _persist_state()
                 if completed.returncode != 0:
                     break
         else:
-            runtime_state["docker"]["status"] = "manual"
-            runtime_state["docker"]["message"] = target["message"]
+            runtime_state["lxd"]["status"] = "manual"
+            runtime_state["lxd"]["message"] = target["message"]
             _persist_state()
     except Exception as exc:
-        runtime_state["docker"]["status"] = "error"
-        runtime_state["docker"]["message"] = str(exc)
-        runtime_state["docker"]["finished_at"] = _now()
+        runtime_state["lxd"]["status"] = "error"
+        runtime_state["lxd"]["message"] = str(exc)
+        runtime_state["lxd"]["finished_at"] = _now()
         _persist_state()
         return
 
-    runtime_state["docker"]["finished_at"] = _now()
+    runtime_state["lxd"]["finished_at"] = _now()
     if _docker_available():
-        runtime_state["docker"]["status"] = "ready"
-        runtime_state["docker"]["message"] = "Docker runtime is ready."
-    elif runtime_state["docker"].get("status") not in {"manual", "error"}:
-        runtime_state["docker"]["status"] = "error"
-        if not runtime_state["docker"].get("message"):
-            runtime_state["docker"]["message"] = "Docker bootstrap finished without a usable Docker CLI."
+        runtime_state["lxd"]["status"] = "ready"
+        runtime_state["lxd"]["message"] = "LXD is ready."
+    elif runtime_state["lxd"].get("status") not in {"manual", "error"}:
+        runtime_state["lxd"]["status"] = "error"
+        if not runtime_state["lxd"].get("message"):
+            runtime_state["lxd"]["message"] = "LXD bootstrap finished without a usable LXC CLI."
     _persist_state()
 
 
@@ -4707,44 +5081,65 @@ def _preferred_runtime_backend() -> str:
     return PLATFORM.runtime.preferred_backend()
 
 
+def _runtime_cli(backend: str) -> str | None:
+    return PLATFORM.runtime.cli_for(backend)
+
+
+def _runtime_available(backend: str) -> bool:
+    return PLATFORM.runtime.available(backend)
+
+
+def _runtime_bootstrap_status(backend: str | None = None) -> dict:
+    return PLATFORM.runtime.bootstrap_status(backend)
+
+
+def _runtime_bootstrap_target(backend: str | None = None) -> dict:
+    return PLATFORM.runtime.bootstrap_target(backend)
+
+
+def _require_lxd_runtime() -> None:
+    if not _docker_available():
+        raise HTTPException(status_code=503, detail="LXDUnavailable")
+
+
 def _docker_run(args: list[str], timeout: int = 60) -> subprocess.CompletedProcess:
-    binary = _docker_cli()
-    if not binary:
-        raise HTTPException(503, detail="DockerUnavailable")
-    try:
-        return subprocess.run([binary, *args], capture_output=True, text=True, timeout=timeout)
-    except FileNotFoundError:
-        raise HTTPException(503, detail="DockerUnavailable")
+    return PLATFORM.runtime.run_backend("lxd", args, timeout=timeout)
 
 
 def _docker_run_checked(args: list[str], timeout: int = 60) -> subprocess.CompletedProcess:
     completed = _docker_run(args, timeout=timeout)
     if completed.returncode != 0:
-        detail = (completed.stderr or completed.stdout or "DockerCommandFailed").strip()
+        detail = (completed.stderr or completed.stdout or "LXDCommandFailed").strip()
         raise HTTPException(503, detail=detail)
     return completed
 
 
 def _docker_inspect(ref: str) -> dict[str, Any] | None:
-    completed = _docker_run(["inspect", ref], timeout=30)
+    completed = _docker_run(["info", ref], timeout=30)
     if completed.returncode != 0:
         return None
     try:
-        payload = json.loads(completed.stdout or "[]")
+        payload = json.loads(completed.stdout or "{}")
     except Exception:
         return None
-    if isinstance(payload, list) and payload:
-        item = payload[0]
-        if isinstance(item, dict):
-            return item
+    if isinstance(payload, dict):
+        return payload
     return None
 
 
 def _docker_status(ref: str) -> str | None:
-    completed = _docker_run(["inspect", "-f", "{{.State.Status}}", ref], timeout=30)
+    completed = _docker_run(["info", ref], timeout=30)
     if completed.returncode != 0:
         return None
-    return (completed.stdout or "").strip() or None
+    try:
+        payload = json.loads(completed.stdout or "{}")
+    except Exception:
+        return None
+    if isinstance(payload, dict):
+        status = payload.get("status") or payload.get("Status") or payload.get("state", {}).get("status")
+        if status:
+            return str(status).strip().lower()
+    return None
 
 
 def _docker_container_exists(ref: str) -> bool:
@@ -4815,13 +5210,20 @@ def _container_cwd(instance: dict) -> str:
 
 
 def _container_exec(instance: dict, command: str, cwd: str | None = None, detach: bool = False) -> subprocess.CompletedProcess:
+    backend = str(instance.get("runtime_backend") or "lxd").strip().lower()
     ref = instance.get("container_id") or _container_name(instance)
+    if backend == "multipass":
+        args = ["exec", ref, "--", "/bin/sh", "-lc"]
+        if cwd:
+            command = f"cd {shlex.quote(cwd)} && {command}"
+        args.append(command)
+        return _multipass_run_checked(args, timeout=120)
     args = ["exec"]
     if detach:
         args.append("-d")
     if cwd:
-        args += ["-w", cwd]
-    args += [ref, "/bin/sh", "-lc", command]
+        command = f"cd {shlex.quote(cwd)} && {command}"
+    args += [ref, "--", "/bin/sh", "-lc", command]
     return _docker_run_checked(args, timeout=120)
 
 
@@ -4897,7 +5299,7 @@ def _stop_sample_app_server(instance_id: str, handle: dict | None = None) -> Non
 
 
 def _ensure_sample_app_server(instance: dict) -> None:
-    if instance.get("runtime_backend") != "docker" or instance.get("state") != "running" or not instance.get("sample_app_id"):
+    if instance.get("runtime_backend") != "lxd" or instance.get("state") != "running" or not instance.get("sample_app_id"):
         _stop_sample_app_server(instance["instance_id"])
         return
 
@@ -4981,53 +5383,38 @@ def _deploy_sample_app(instance: dict, app_id: str, start_now: bool = True) -> d
 
 def _ensure_container(instance: dict) -> str:
     if not _docker_available():
-        raise HTTPException(503, detail="DockerUnavailable")
+        raise HTTPException(503, detail="LXDUnavailable")
     if instance.get("state") == "terminated":
         raise HTTPException(409, detail="InstanceTerminated")
 
     workspace = _ensure_instance_workspace(instance)
-    instance.setdefault("runtime_image", DOCKER_RUNTIME_IMAGE)
+    instance.setdefault("runtime_image", LXD_RUNTIME_IMAGE)
     instance.setdefault("container_port", DOCKER_CONSOLE_PORT)
     if not instance.get("host_port"):
         instance["host_port"] = _allocate_host_port()
     instance.setdefault("container_name", f"cloudlearn-{instance['instance_id']}")
-    instance["endpoint_url"] = f"http://127.0.0.1:{instance['host_port']}"
+    instance["endpoint_url"] = f"lxd://{instance['container_name']}"
+    instance["container_download_state"] = "downloading"
 
     container_ref = instance.get("container_id") or instance["container_name"]
     if _docker_container_exists(container_ref):
         if not instance.get("container_id"):
             instance["container_id"] = container_ref
+        instance["container_download_state"] = "ready"
         return container_ref
 
     if instance.get("sample_app_id"):
         _copy_sample_app_files(instance["sample_app_id"], workspace)
 
-    publish_port = not bool(instance.get("sample_app_id"))
     run_args = [
-        "create",
-        "--name", instance["container_name"],
-        "--label", f"cloudlearn.instance_id={instance['instance_id']}",
-        "--label", f"cloudlearn.instance_name={instance.get('name', '')}",
-        "--label", f"cloudlearn.runtime=ec2",
-        "--label", f"cloudlearn.sample_app_id={instance.get('sample_app_id', '')}",
-        "-w", _container_mount_path(),
-        "-v", f"{workspace}:{_container_mount_path()}",
-    ]
-    if publish_port:
-        run_args += ["-p", f"127.0.0.1:{instance['host_port']}:{instance['container_port']}"]
-    run_args += [
-        "-e", f"CLOUDLEARN_INSTANCE_ID={instance['instance_id']}",
-        "-e", f"CLOUDLEARN_INSTANCE_NAME={instance.get('name', '')}",
-        "-e", f"CLOUDLEARN_SAMPLE_APP={instance.get('sample_app_id', '')}",
-        "-e", f"CLOUDLEARN_WORKSPACE={_container_mount_path()}",
+        "launch",
         instance["runtime_image"],
-        "python",
-        "-c",
-        "import time; time.sleep(10**9)",
+        instance["container_name"],
     ]
     completed = _docker_run_checked(run_args, timeout=120)
-    instance["container_id"] = (completed.stdout or "").strip() or instance["container_name"]
+    instance["container_id"] = instance["container_name"]
     instance["container_status"] = "created"
+    instance["container_download_state"] = "ready"
     return instance["container_id"]
 
 
@@ -5046,10 +5433,8 @@ def _start_instance_command(instance: dict) -> None:
 
 
 def _sync_docker_instance(instance: dict) -> None:
-    if not _docker_available():
-        instance.setdefault("container_status", "docker-unavailable")
-        if instance.get("state") == "running":
-            instance["state"] = "stopped"
+    if not _docker_cli_available():
+        instance.setdefault("container_status", "lxd-unavailable")
         return
     ref = instance.get("container_id") or instance.get("container_name")
     if not ref:
@@ -5075,7 +5460,7 @@ def _start_docker_instance(instance: dict) -> dict:
         _docker_run_checked(["start", container_ref], timeout=120)
     instance["state"] = "running"
     instance["container_status"] = "running"
-    instance["console_backend"] = "docker-exec"
+    instance["console_backend"] = "lxd-exec"
     instance["started_at"] = _now()
     instance["stopped_at"] = ""
     if instance.get("command"):
@@ -5088,11 +5473,7 @@ def _start_docker_instance(instance: dict) -> dict:
 
 def _stop_docker_instance(instance: dict) -> dict:
     if not _docker_available():
-        instance["state"] = "stopped"
-        instance["stopped_at"] = _now()
-        instance["container_status"] = "docker-unavailable"
-        instance["pid"] = None
-        return instance
+        raise HTTPException(status_code=503, detail="LXDUnavailable")
     ref = instance.get("container_id") or instance.get("container_name")
     if not ref:
         raise HTTPException(409, detail="InstanceContainerMissing")
@@ -5119,6 +5500,7 @@ def _reboot_docker_instance(instance: dict) -> dict:
     _docker_run_checked(["restart", ref], timeout=180)
     instance["state"] = "running"
     instance["container_status"] = "running"
+    instance["console_backend"] = "lxd-exec"
     if instance.get("command"):
         _start_instance_command(instance)
     if instance.get("sample_app_id"):
@@ -5129,11 +5511,7 @@ def _reboot_docker_instance(instance: dict) -> dict:
 
 def _terminate_docker_instance(instance: dict) -> dict:
     if not _docker_available():
-        instance["state"] = "terminated"
-        instance["terminated_at"] = _now()
-        instance["container_status"] = "docker-unavailable"
-        instance["pid"] = None
-        return instance
+        raise HTTPException(status_code=503, detail="LXDUnavailable")
     ref = instance.get("container_id") or instance.get("container_name")
     if ref and _docker_container_exists(ref):
         _docker_run(["rm", "-f", ref], timeout=120)
@@ -5145,6 +5523,405 @@ def _terminate_docker_instance(instance: dict) -> dict:
     if instance.get("sample_app_id"):
         _stop_sample_app_server(instance["instance_id"])
     return instance
+
+
+def _multipass_run(args: list[str], timeout: int = 60) -> subprocess.CompletedProcess:
+    return PLATFORM.runtime.run_backend("multipass", args, timeout=timeout)
+
+
+def _host_run(args: list[str], timeout: int = 60) -> subprocess.CompletedProcess:
+    return PLATFORM.runtime.run_backend("host", args, timeout=timeout)
+
+
+def _multipass_run_checked(args: list[str], timeout: int = 60) -> subprocess.CompletedProcess:
+    completed = _multipass_run(args, timeout=timeout)
+    if completed.returncode != 0:
+        detail = (completed.stderr or completed.stdout or "MultipassCommandFailed").strip()
+        raise HTTPException(503, detail=detail)
+    return completed
+
+
+def _multipass_info(ref: str) -> dict[str, Any] | None:
+    completed = _multipass_run(["info", ref, "--format", "json"], timeout=30)
+    if completed.returncode != 0:
+        return None
+    try:
+        payload = json.loads(completed.stdout or "{}")
+    except Exception:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    info = payload.get("info")
+    if isinstance(info, dict):
+        item = info.get(ref)
+        if isinstance(item, dict):
+            return item
+        if info:
+            first = next(iter(info.values()))
+            if isinstance(first, dict):
+                return first
+    return payload if isinstance(payload, dict) else None
+
+
+def _multipass_status(ref: str) -> str | None:
+    payload = _multipass_info(ref)
+    if not payload:
+        return None
+    status = payload.get("state") or payload.get("State") or payload.get("status")
+    if status:
+        return str(status).strip().lower()
+    return None
+
+
+def _multipass_container_exists(ref: str) -> bool:
+    return _multipass_status(ref) is not None
+
+
+def _multipass_ssh_identity() -> dict:
+    identity: dict | None = None
+    try:
+        identity = PLATFORM.runtime.bridge_ssh_identity()
+    except Exception:
+        identity = None
+    if isinstance(identity, dict) and identity.get("available") and identity.get("private_key_path") and identity.get("public_key"):
+        return identity
+    host_os = _parent_os()
+    if host_os == "darwin":
+        private_key_path = "/var/root/Library/Application Support/multipassd/ssh-keys/id_rsa"
+    elif host_os == "linux":
+        private_key_path = "/var/snap/multipass/common/data/multipassd/ssh-keys/id_rsa"
+    elif host_os == "windows":
+        private_key_path = r"C:\ProgramData\Multipass\ssh-keys\id_rsa"
+    else:
+        private_key_path = ""
+    if not private_key_path:
+        return {}
+    public_key_path = f"{private_key_path}.pub"
+    public_key = ""
+    try:
+        public_key = Path(public_key_path).read_text(encoding="utf-8").strip()
+    except Exception:
+        public_key = ""
+    return {
+        "available": bool(public_key),
+        "private_key_path": private_key_path,
+        "public_key_path": public_key_path,
+        "public_key": public_key,
+    }
+
+
+def _multipass_ssh_target(instance: dict) -> tuple[str, str] | None:
+    ref = instance.get("container_id") or instance.get("container_name") or instance.get("instance_id")
+    payload = _multipass_info(str(ref))
+    if not isinstance(payload, dict):
+        return None
+    candidates: list[Any] = []
+    for key in ("ipv4", "IPv4", "ip", "IPAddress"):
+        value = payload.get(key)
+        if value:
+            candidates.append(value)
+    info = payload.get("info")
+    if isinstance(info, dict):
+        item = info.get(str(ref))
+        if isinstance(item, dict):
+            for key in ("ipv4", "IPv4", "ip", "IPAddress"):
+                value = item.get(key)
+                if value:
+                    candidates.append(value)
+    ip = ""
+    for value in candidates:
+        if isinstance(value, list) and value:
+            ip = str(value[0]).strip()
+            if ip:
+                break
+        elif isinstance(value, str) and value.strip():
+            ip = value.strip()
+            break
+    if not ip:
+        return None
+    user = "ubuntu"
+    return ip, user
+
+
+def _multipass_ssh_args(instance: dict, command: str | None = None) -> tuple[list[str], str] | None:
+    target = _multipass_ssh_target(instance)
+    if not target:
+        return None
+    ip, user = target
+    identity = _multipass_ssh_identity()
+    key_path = str(identity.get("private_key_path") or "").strip()
+    if not key_path or not identity.get("available"):
+        return None
+    ref = instance.get("container_id") or instance.get("container_name") or instance.get("instance_id")
+    ssh_base = [
+        "ssh",
+        "-i",
+        key_path,
+        "-o",
+        "StrictHostKeyChecking=no",
+        "-o",
+        "UserKnownHostsFile=/dev/null",
+        "-tt",
+        f"{user}@{ip}",
+    ]
+    if command is None:
+        command = "sh"
+    args = [*ssh_base, "--", "sh", "-lc", command]
+    ssh_cmd = f"ssh -i {shlex.quote(key_path)} {user}@{ip}"
+    if command and command != "sh":
+        ssh_cmd = f"{ssh_cmd} -- sh -lc {shlex.quote(command)}"
+    return args, ssh_cmd
+
+
+def _update_multipass_ssh_metadata(instance: dict) -> None:
+    target = _multipass_ssh_args(instance, None)
+    if not target:
+        instance.pop("ssh_command", None)
+        instance.pop("ssh_target", None)
+        return
+    args, ssh_cmd = target
+    instance["ssh_command"] = ssh_cmd
+    if len(args) >= 7:
+        instance["ssh_target"] = args[6]
+    else:
+        instance.pop("ssh_target", None)
+
+
+def _ensure_multipass_instance(instance: dict) -> str:
+    if not _runtime_available("multipass"):
+        raise HTTPException(status_code=503, detail="MultipassUnavailable")
+    if instance.get("state") == "terminated":
+        raise HTTPException(status_code=409, detail="InstanceTerminated")
+
+    workspace = _ensure_instance_workspace(instance)
+    instance.setdefault("runtime_image", MULTIPASS_RUNTIME_IMAGE)
+    instance.setdefault("container_port", DOCKER_CONSOLE_PORT)
+    if not instance.get("host_port"):
+        instance["host_port"] = _allocate_host_port()
+    instance.setdefault("container_name", f"cloudlearn-{instance['instance_id']}")
+    instance["endpoint_url"] = f"multipass://{instance['container_name']}"
+    instance["container_download_state"] = "downloading"
+
+    container_ref = instance.get("container_id") or instance["container_name"]
+    if _multipass_container_exists(container_ref):
+        if not instance.get("container_id"):
+            instance["container_id"] = container_ref
+        instance["container_download_state"] = "ready"
+        return container_ref
+
+    if instance.get("sample_app_id"):
+        _copy_sample_app_files(instance["sample_app_id"], workspace)
+
+    launch_image = str(instance["runtime_image"] or MULTIPASS_RUNTIME_IMAGE)
+    if launch_image.startswith("ubuntu:"):
+        launch_image = launch_image.split("ubuntu:", 1)[1]
+    identity = _multipass_ssh_identity()
+    public_key = str(identity.get("public_key") or "").strip()
+    cloud_init_lines = ["#cloud-config"]
+    if public_key:
+        cloud_init_lines.extend(["ssh_authorized_keys:", f"  - {public_key}"])
+    if instance.get("user_data"):
+        user_data = str(instance.get("user_data") or "").strip()
+        if user_data:
+            cloud_init_lines.append(user_data)
+    cloud_init_payload = "\n".join(cloud_init_lines).strip() + "\n"
+
+    launch_script = "\n".join(
+        [
+            "set -e",
+            "tmp_cloudlearn_init=\"$(mktemp /tmp/cloudlearn-cloudinit.XXXXXX.yaml)\"",
+            "cat > \"$tmp_cloudlearn_init\" <<'CLOUDLEARN_EOF'",
+            cloud_init_payload.rstrip("\n"),
+            "CLOUDLEARN_EOF",
+            f"multipass launch {shlex.quote(launch_image)} --name {shlex.quote(instance['container_name'])} --cloud-init \"$tmp_cloudlearn_init\"",
+            "status=$?",
+            "rm -f \"$tmp_cloudlearn_init\"",
+            "exit \"$status\"",
+        ]
+    )
+    _host_run(["bash", "-lc", launch_script], timeout=300)
+    instance["container_id"] = instance["container_name"]
+    instance["container_status"] = "created"
+    instance["container_download_state"] = "ready"
+    try:
+        _multipass_run_checked(["mount", str(workspace), f"{instance['container_name']}:/workspace"], timeout=180)
+    except HTTPException:
+        pass
+    _update_multipass_ssh_metadata(instance)
+    return instance["container_id"]
+
+
+def _sync_multipass_instance(instance: dict) -> None:
+    if not _runtime_available("multipass"):
+        instance.setdefault("container_status", "multipass-unavailable")
+        return
+    ref = instance.get("container_id") or instance.get("container_name")
+    if not ref:
+        return
+    status = _multipass_status(ref)
+    if not status:
+        if instance.get("state") != "terminated":
+            instance["state"] = "stopped"
+        instance["container_status"] = "missing"
+        return
+    instance["container_status"] = status
+    if status == "running":
+        instance["state"] = "running"
+        _update_multipass_ssh_metadata(instance)
+    elif status in {"stopped", "deleted", "suspended"} and instance.get("state") == "running":
+        instance["state"] = "stopped"
+
+
+def _start_multipass_instance(instance: dict) -> dict:
+    _ensure_multipass_instance(instance)
+    container_ref = instance.get("container_id") or instance["container_name"]
+    status = _multipass_status(container_ref)
+    if status != "running":
+        _multipass_run_checked(["start", container_ref], timeout=120)
+    instance["state"] = "running"
+    instance["container_status"] = "running"
+    instance["console_backend"] = "multipass-ssh"
+    instance["started_at"] = _now()
+    instance["stopped_at"] = ""
+    if instance.get("command"):
+        _start_instance_command(instance)
+    if instance.get("sample_app_id"):
+        _ensure_sample_app_server(instance)
+    _update_multipass_ssh_metadata(instance)
+    instance["pid"] = None
+    return instance
+
+
+def _stop_multipass_instance(instance: dict) -> dict:
+    if not _runtime_available("multipass"):
+        raise HTTPException(status_code=503, detail="MultipassUnavailable")
+    ref = instance.get("container_id") or instance.get("container_name")
+    if not ref:
+        raise HTTPException(409, detail="InstanceContainerMissing")
+    status = _multipass_status(ref)
+    if status == "running":
+        _multipass_run_checked(["stop", ref], timeout=120)
+    instance["state"] = "stopped"
+    instance["stopped_at"] = _now()
+    instance["container_status"] = "stopped"
+    instance["pid"] = None
+    instance["sample_app_status"] = "stopped" if instance.get("sample_app_id") else instance.get("sample_app_status", "stopped")
+    if instance.get("sample_app_id"):
+        _stop_sample_app_server(instance["instance_id"])
+    return instance
+
+
+def _reboot_multipass_instance(instance: dict) -> dict:
+    ref = instance.get("container_id") or instance.get("container_name")
+    if not ref:
+        raise HTTPException(409, detail="InstanceContainerMissing")
+    if _multipass_status(ref) != "running":
+        raise HTTPException(409, detail="InstanceNotRunning")
+    instance["state"] = "rebooting"
+    _multipass_run_checked(["restart", ref], timeout=180)
+    instance["state"] = "running"
+    instance["container_status"] = "running"
+    instance["console_backend"] = "multipass-ssh"
+    if instance.get("command"):
+        _start_instance_command(instance)
+    if instance.get("sample_app_id"):
+        _ensure_sample_app_server(instance)
+    instance["rebooted_at"] = _now()
+    return instance
+
+
+def _terminate_multipass_instance(instance: dict) -> dict:
+    if not _runtime_available("multipass"):
+        raise HTTPException(status_code=503, detail="MultipassUnavailable")
+    ref = instance.get("container_id") or instance.get("container_name")
+    if ref and _multipass_container_exists(ref):
+        try:
+            _multipass_run(["delete", "--purge", ref], timeout=180)
+        except HTTPException:
+            _multipass_run(["delete", ref], timeout=180)
+    instance["state"] = "terminated"
+    instance["terminated_at"] = _now()
+    instance["container_status"] = "removed"
+    instance["pid"] = None
+    instance["sample_app_status"] = "terminated" if instance.get("sample_app_id") else instance.get("sample_app_status", "terminated")
+    if instance.get("sample_app_id"):
+        _stop_sample_app_server(instance["instance_id"])
+    return instance
+
+
+def _spawn_multipass_console_session(instance: dict) -> dict:
+    instance_id = instance["instance_id"]
+    target = _multipass_ssh_args(instance, None)
+    if not target:
+        raise HTTPException(503, detail="MultipassUnavailable")
+    ref = instance.get("container_id") or instance.get("container_name") or instance_id
+    if _multipass_status(ref) != "running":
+        raise HTTPException(409, detail="InstanceNotRunning")
+    ssh_args, ssh_cmd = target
+
+    with CONSOLE_LOCK:
+        session = CONSOLE_SESSIONS.get(instance_id)
+        if session and not session.get("closed") and session.get("proc") and session["proc"].poll() is None:
+            instance["console_state"] = "running"
+            instance["console_backend"] = session.get("console_backend", "multipass-ssh")
+            return session
+        if session:
+            CONSOLE_SESSIONS.pop(instance_id, None)
+
+        master_fd, slave_fd = pty.openpty()
+        env = os.environ.copy()
+        env.update(
+            {
+                "TERM": env.get("TERM", "xterm"),
+                "CLOUDLEARN_INSTANCE_ID": instance_id,
+                "CLOUDLEARN_INSTANCE_NAME": instance.get("name", ""),
+                "CLOUDLEARN_AMI": instance.get("ami_name") or instance.get("ami") or "",
+                "CLOUDLEARN_CONTAINER_IMAGE": instance.get("container_image") or "",
+                "CLOUDLEARN_RUNTIME": instance.get("runtime") or "",
+            }
+        )
+        # The interactive console is SSH-backed; we only keep a local PTY to
+        # preserve the terminal UI while commands are executed via SSH.
+        proc = subprocess.Popen(
+            ["bash", "-lc", "sleep 0"],
+            stdin=slave_fd,
+            stdout=slave_fd,
+            stderr=slave_fd,
+            env=env,
+            start_new_session=True,
+            close_fds=True,
+        )
+        try:
+            os.close(slave_fd)
+        except Exception:
+            pass
+
+        session = {
+            "instance_id": instance_id,
+            "proc": proc,
+            "master_fd": master_fd,
+            "buffer": deque(maxlen=1000),
+            "created": _now(),
+            "last_output": _now(),
+            "closed": False,
+            "terminated": False,
+            "console_backend": "multipass-ssh",
+            "affects_instance_state": False,
+            "ssh_command": ssh_cmd,
+            "ssh_args": ssh_args,
+        }
+        session["buffer"].append(
+            f"{ssh_cmd}\nConnected to instance {ref} ({instance.get('runtime_image') or MULTIPASS_RUNTIME_IMAGE})\n"
+        )
+        CONSOLE_SESSIONS[instance_id] = session
+        instance["pid"] = proc.pid
+        instance["console_state"] = "running"
+        instance["console_backend"] = "multipass-ssh"
+        instance["ssh_command"] = ssh_cmd
+        reader = threading.Thread(target=_console_reader_loop, args=(instance_id, session), daemon=True)
+        session["reader_thread"] = reader
+        reader.start()
+        return session
 
 
 def _start_simulated_instance(instance: dict) -> dict:
@@ -5193,6 +5970,46 @@ def _ami_profile(ami: str) -> dict:
     return fallback
 
 
+def _ec2_profile_supported_backends(profile: dict) -> list[str]:
+    backends = [str(backend).strip().lower() for backend in profile.get("supported_backends", []) if str(backend).strip()]
+    return list(dict.fromkeys(backends))
+
+
+def _ec2_profile_supported_host_os(profile: dict) -> list[str]:
+    host_os = [str(value).strip().lower() for value in profile.get("supported_host_os", []) if str(value).strip()]
+    return list(dict.fromkeys(host_os))
+
+
+def _ec2_choose_runtime_backend(profile: dict, requested_backend: str = "") -> str:
+    requested = (requested_backend or "").strip().lower()
+    supported = _ec2_profile_supported_backends(profile)
+    host_os = _parent_os()
+    host_supported = _ec2_profile_supported_host_os(profile)
+    if host_supported and host_os not in host_supported:
+        raise HTTPException(503, detail=f"AMI '{profile.get('name', 'unknown')}' is not supported on {host_os}.")
+
+    ordered: list[str] = []
+    if requested:
+        ordered.append(requested)
+    default_backend = str(profile.get("default_runtime_backend") or "").strip().lower()
+    if default_backend:
+        ordered.append(default_backend)
+    if host_os in {"windows", "darwin"}:
+        ordered.extend(["multipass", "lxd"])
+    else:
+        ordered.extend(["multipass", "lxd"])
+
+    for backend in ordered:
+        if backend not in supported:
+            continue
+        if _runtime_available(backend):
+            return backend
+
+    if supported:
+        raise HTTPException(503, detail=f"No supported Multipass or LXD runtime is available for AMI '{profile.get('name', 'unknown')}'.")
+    raise HTTPException(503, detail=f"AMI '{profile.get('name', 'unknown')}' is not launchable on this host.")
+
+
 def _normalize_tier(tier: str) -> str:
     tier = tier.lower().strip()
     if tier not in {"free", "pro", "max", "enterprise"}:
@@ -5201,16 +6018,24 @@ def _normalize_tier(tier: str) -> str:
 
 
 def _cmd_prompt(instance: dict) -> str:
-    if instance.get("runtime_backend") == "docker":
+    os_family = str(instance.get("os_family") or "").lower()
+    if instance.get("runtime_backend") == "lxd" or os_family != "windows":
         name = instance.get("container_name") or instance.get("container_id") or instance.get("name") or instance["instance_id"]
-        return f"root@{name}:/workspace#"
+        user = "root" if os_family in {"", "linux", "ubuntu", "debian", "rhel", "suse", "fedora", "amazon-linux"} else "ubuntu"
+        return f"{user}@{name}:/workspace$"
     return "C:\\Users\\Administrator>"
 
 
 def _console_banner(instance: dict) -> str:
+    os_family = str(instance.get("os_family") or "").lower()
+    if os_family == "windows":
+        return (
+            "Microsoft Windows [Version 10.0.22631.0]\n"
+            "(c) CloudLearn Simulator. All rights reserved.\n\n"
+        )
     return (
-        "Microsoft Windows [Version 10.0.22631.0]\n"
-        "(c) CloudLearn Simulator. All rights reserved.\n\n"
+        "Ubuntu 24.04 LTS cloudlearn.local tty1\n"
+        "cloudlearn login: ubuntu\n\n"
     )
 
 
@@ -5227,7 +6052,7 @@ def _spawn_docker_console_session(instance: dict) -> dict:
     instance_id = instance["instance_id"]
     binary = _docker_cli()
     if not binary:
-        raise HTTPException(503, detail="DockerUnavailable")
+        raise HTTPException(503, detail="LXDUnavailable")
     ref = instance.get("container_id") or instance.get("container_name") or instance_id
     if _docker_status(ref) != "running":
         raise HTTPException(409, detail="InstanceNotRunning")
@@ -5236,7 +6061,7 @@ def _spawn_docker_console_session(instance: dict) -> dict:
         session = CONSOLE_SESSIONS.get(instance_id)
         if session and not session.get("closed") and session.get("proc") and session["proc"].poll() is None:
             instance["console_state"] = "running"
-            instance["console_backend"] = session.get("console_backend", "docker-pty")
+            instance["console_backend"] = session.get("console_backend", "lxd-pty")
             return session
         if session:
             CONSOLE_SESSIONS.pop(instance_id, None)
@@ -5277,16 +6102,16 @@ def _spawn_docker_console_session(instance: dict) -> dict:
             "last_output": _now(),
             "closed": False,
             "terminated": False,
-            "console_backend": "docker-pty",
+            "console_backend": "lxd-pty",
             "affects_instance_state": False,
         }
         session["buffer"].append(
-            f"docker exec -it {ref} /bin/sh\nConnected to container {ref} ({instance.get('runtime_image') or DOCKER_RUNTIME_IMAGE})\n"
+            f"Connected to container {ref} ({instance.get('runtime_image') or LXD_RUNTIME_IMAGE})\n"
         )
         CONSOLE_SESSIONS[instance_id] = session
         instance["pid"] = proc.pid
         instance["console_state"] = "running"
-        instance["console_backend"] = "docker-pty"
+        instance["console_backend"] = "lxd-pty"
         reader = threading.Thread(target=_console_reader_loop, args=(instance_id, session), daemon=True)
         session["reader_thread"] = reader
         reader.start()
@@ -5336,66 +6161,12 @@ def _console_reader_loop(instance_id: str, session: dict) -> None:
 
 def _spawn_console_session(instance: dict) -> dict:
     instance_id = instance["instance_id"]
-    if instance.get("runtime_backend") == "docker":
+    backend = str(instance.get("runtime_backend") or "").strip().lower()
+    if backend == "multipass":
+        return _spawn_multipass_console_session(instance)
+    if backend == "lxd":
         return _spawn_docker_console_session(instance)
-    with CONSOLE_LOCK:
-        session = CONSOLE_SESSIONS.get(instance_id)
-        if session and not session.get("closed") and session.get("proc") and session["proc"].poll() is None:
-            instance["console_state"] = "running"
-            instance["console_backend"] = session.get("console_backend", "pty-shell")
-            return session
-
-        if session:
-            CONSOLE_SESSIONS.pop(instance_id, None)
-
-        master_fd, slave_fd = pty.openpty()
-        env = os.environ.copy()
-        env.update(
-            {
-                "CLOUDLEARN_INSTANCE_ID": instance_id,
-                "CLOUDLEARN_INSTANCE_NAME": instance.get("name", ""),
-                "CLOUDLEARN_AMI": instance.get("ami_name") or instance.get("ami") or "",
-                "CLOUDLEARN_CONTAINER_IMAGE": instance.get("container_image") or "",
-                "CL_COMMAND": instance.get("command") or "",
-            }
-        )
-        script = _instance_console_script(instance)
-        proc = subprocess.Popen(
-            ["/bin/sh", "-lc", script],
-            stdin=slave_fd,
-            stdout=slave_fd,
-            stderr=slave_fd,
-            env=env,
-            start_new_session=True,
-            close_fds=True,
-        )
-        try:
-            os.close(slave_fd)
-        except Exception:
-            pass
-
-        session = {
-            "instance_id": instance_id,
-            "proc": proc,
-            "master_fd": master_fd,
-            "buffer": deque(maxlen=1000),
-            "created": _now(),
-            "last_output": _now(),
-            "closed": False,
-            "terminated": False,
-            "console_backend": "pty-shell",
-            "console_prompt": _cmd_prompt(instance),
-        }
-        session["buffer"].append(_console_banner(instance))
-        CONSOLE_SESSIONS[instance_id] = session
-        instance["pid"] = proc.pid
-        instance["console_state"] = "running"
-        instance["console_backend"] = "pty-shell"
-        instance["state"] = "running"
-        reader = threading.Thread(target=_console_reader_loop, args=(instance_id, session), daemon=True)
-        session["reader_thread"] = reader
-        reader.start()
-        return session
+    raise HTTPException(503, detail="RuntimeUnavailable")
 
 
 def _close_console_session(instance_id: str, terminate: bool = True) -> None:
@@ -5519,7 +6290,90 @@ def _console_execute(instance: dict, command: str) -> dict:
     if not command.strip():
         return {"cwd": workdir, "command": command, "exit_code": 0, "output": ""}
 
-    if instance.get("runtime_backend") == "docker":
+    if instance.get("runtime_backend") == "multipass":
+        stripped = command.strip()
+
+        def _resolve_target(target: str) -> str:
+            base = Path(workdir).resolve()
+            if not target or target in {"~", "."}:
+                dest = base
+            else:
+                dest = Path(target)
+                if not dest.is_absolute():
+                    dest = (base / dest).resolve()
+                else:
+                    dest = dest.resolve()
+            try:
+                dest.relative_to(_instance_workspace(instance["instance_id"]))
+            except Exception:
+                raise HTTPException(403, detail="ConsolePathEscapesInstanceRoot")
+            return str(dest)
+
+        if stripped == "pwd":
+            state["cwd"] = workdir
+            output = f"{_instance_workspace(instance['instance_id'])}\n"
+            instance.setdefault("console_log", []).append({"command": command, "cwd": workdir, "exit_code": 0, "output": output, "at": _now()})
+            return {"cwd": workdir, "command": command, "exit_code": 0, "output": output}
+
+        if stripped.startswith("cd"):
+            parts = stripped.split(maxsplit=1)
+            target = parts[1] if len(parts) > 1 else ""
+            state["cwd"] = _resolve_target(target)
+            instance.setdefault("console_log", []).append({"command": command, "cwd": state["cwd"], "exit_code": 0, "output": "", "at": _now()})
+            return {"cwd": state["cwd"], "command": command, "exit_code": 0, "output": ""}
+
+        if stripped in {"clear", "cls"}:
+            instance.setdefault("console_log", []).append({"command": command, "cwd": workdir, "exit_code": 0, "output": "\f", "at": _now()})
+            return {"cwd": workdir, "command": command, "exit_code": 0, "output": "\f"}
+
+        alias_map = {
+            "dir": "ls -la",
+            "ls": "ls -la",
+            "type": "cat",
+            "copy": "cp",
+            "move": "mv",
+            "del": "rm -f",
+            "erase": "rm -f",
+            "mkdir": "mkdir -p",
+            "md": "mkdir -p",
+            "rmdir": "rm -rf",
+            "rd": "rm -rf",
+        }
+        token = stripped.split(maxsplit=1)[0].lower()
+        translated = command
+        if token in alias_map:
+            rest = stripped[len(token):].strip()
+            translated = alias_map[token]
+            if rest:
+                translated = f"{translated} {rest}"
+
+        ssh_args = _multipass_ssh_args(instance, f"cd {shlex.quote(state.get('cwd') or workdir)} && {translated}")
+        if not ssh_args:
+            output = "error: SSH access is unavailable for this instance.\n"
+            instance.setdefault("console_log", []).append({"command": command, "cwd": workdir, "exit_code": 1, "output": output, "at": _now()})
+            return {"cwd": workdir, "command": command, "exit_code": 1, "output": output}
+
+        args, _ssh_cmd = ssh_args
+        try:
+            completed = _host_run(args, timeout=120)
+        except HTTPException as exc:
+            output = f"error: {exc.detail}\n"
+            instance.setdefault("console_log", []).append({"command": command, "cwd": workdir, "exit_code": 1, "output": output, "at": _now()})
+            return {"cwd": workdir, "command": command, "exit_code": 1, "output": output}
+
+        output = (completed.stdout or "") + (completed.stderr or "")
+        result = {
+            "cwd": state.get("cwd") or workdir,
+            "command": command,
+            "exit_code": completed.returncode,
+            "output": output,
+        }
+        instance.setdefault("console_log", []).append(
+            {"command": command, "cwd": result["cwd"], "exit_code": completed.returncode, "output": output, "at": _now()}
+        )
+        return result
+
+    if instance.get("runtime_backend") == "lxd":
         stripped = command.strip()
 
         def _display_path(host_path: str) -> str:
@@ -5678,6 +6532,7 @@ def _console_execute(instance: dict, command: str) -> dict:
 
 @app.get("/api/catalog")
 def api_catalog():
+    spaces_state = STATE.setdefault("spaces", {"spaces": {}, "active_space_id": "", "settings": {"max_spaces": 6, "default_provider": "aws", "default_region": "us-east-1", "max_memory_mb": 8192, "max_disk_mb": 32768}})
     return {
         "tier": STATE["license"].get("tier", "free"),
         "credits": STATE["license"].get("credits", 0),
@@ -5690,8 +6545,172 @@ def api_catalog():
             {"id": "apigateway", "name": "API Gateway", "active": STATE["packs"]["cloudlearn.apigateway.basic"].get("active", False), "status": "available"},
             {"id": "runtime.python", "name": "Python Runtime", "active": STATE["packs"]["cloudlearn.runtime.python"].get("active", False), "status": "available"},
         ],
+        "spaces": {
+            "count": len(spaces_state.get("spaces", {})),
+            "active_space_id": spaces_state.get("active_space_id", ""),
+            "active_space": copy.deepcopy(spaces_state.get("spaces", {}).get(spaces_state.get("active_space_id", ""), {})),
+            "settings": copy.deepcopy(spaces_state.get("settings", {})),
+        },
         "packs": _catalog(),
     }
+
+
+def _space_payload(space: dict) -> dict:
+    payload = copy.deepcopy(space)
+    if not isinstance(payload, dict):
+        return {}
+    payload.setdefault("space_id", "")
+    payload.setdefault("name", "")
+    payload.setdefault("provider", "aws")
+    payload.setdefault("status", "running")
+    payload.setdefault("active_region", "us-east-1")
+    payload.setdefault("active_account", "local-account")
+    payload.setdefault("estimated_memory_mb", 0)
+    payload.setdefault("estimated_disk_mb", 0)
+    payload.setdefault("runtime_count", 0)
+    payload.setdefault("ec2_count", 0)
+    payload.setdefault("lambda_count", 0)
+    payload.setdefault("rds_count", 0)
+    payload.setdefault("sqs_count", 0)
+    payload.setdefault("dynamodb_count", 0)
+    return payload
+
+
+def _spaces_state() -> dict:
+    spaces_state = STATE.setdefault("spaces", {"spaces": {}, "active_space_id": "", "settings": {"max_spaces": 6, "default_provider": "aws", "default_region": "us-east-1"}})
+    spaces_state.setdefault("spaces", {})
+    spaces_state.setdefault("active_space_id", "")
+    spaces_state.setdefault("settings", {})
+    spaces_state["settings"].setdefault("max_spaces", 6)
+    spaces_state["settings"].setdefault("default_provider", "aws")
+    spaces_state["settings"].setdefault("default_region", "us-east-1")
+    spaces_state["settings"].setdefault("max_memory_mb", 8192)
+    spaces_state["settings"].setdefault("max_disk_mb", 32768)
+    return spaces_state
+
+
+@app.get("/api/spaces")
+def api_list_spaces():
+    spaces = PLATFORM.list_spaces()
+    spaces_state = _spaces_state()
+    active_id = spaces_state.get("active_space_id", "")
+    return {
+        "spaces": [_space_payload(space) for space in spaces],
+        "count": len(spaces),
+        "active_space_id": active_id,
+        "active_space": _space_payload(spaces_state.get("spaces", {}).get(active_id, {})) if active_id else None,
+        "settings": copy.deepcopy(spaces_state.get("settings", {})),
+    }
+
+
+@app.get("/api/spaces/active")
+def api_active_space():
+    spaces_state = _spaces_state()
+    active_id = spaces_state.get("active_space_id", "")
+    space = spaces_state.get("spaces", {}).get(active_id, {}) if active_id else {}
+    return {"active_space_id": active_id, "space": _space_payload(space)}
+
+
+@app.get("/api/spaces/{space_id}")
+def api_get_space(space_id: str):
+    space = _spaces_state().get("spaces", {}).get(space_id)
+    if not isinstance(space, dict):
+        raise HTTPException(status_code=404, detail="SimulationSpaceNotFound")
+    return {"space": _space_payload(space)}
+
+
+@app.post("/api/spaces")
+def api_create_space(payload: dict[str, Any]):
+    spec = dict(payload or {})
+    try:
+        space = PLATFORM.create_space(spec)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    _record_usage("space.create", {"space_id": space.get("space_id"), "provider": space.get("provider"), "name": space.get("name")})
+    STATE.setdefault("cloudsim", {"summary": {}, "events": [], "last_reconcile_at": ""})["summary"]["spaces"] = len(_spaces_state().get("spaces", {}))
+    _persist_state()
+    return {"message": "Simulation space created", "space": _space_payload(space)}
+
+
+@app.post("/api/spaces/estimate")
+def api_estimate_space(payload: dict[str, Any]):
+    estimate = PLATFORM.estimate_space_cost(payload or {})
+    return {"estimate": estimate}
+
+
+@app.post("/api/spaces/{space_id}/switch")
+def api_switch_space(space_id: str):
+    try:
+        space = PLATFORM.switch_space(space_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="SimulationSpaceNotFound")
+    _record_usage("space.switch", {"space_id": space_id})
+    return {"message": "Active space switched", "space": _space_payload(space)}
+
+
+@app.post("/api/spaces/{space_id}/pause")
+def api_pause_space(space_id: str):
+    try:
+        space = PLATFORM.pause_space(space_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="SimulationSpaceNotFound")
+    _record_usage("space.pause", {"space_id": space_id})
+    return {"message": "Simulation space paused", "space": _space_payload(space)}
+
+
+@app.post("/api/spaces/{space_id}/resume")
+def api_resume_space(space_id: str):
+    try:
+        space = PLATFORM.resume_space(space_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="SimulationSpaceNotFound")
+    _record_usage("space.resume", {"space_id": space_id})
+    return {"message": "Simulation space resumed", "space": _space_payload(space)}
+
+
+@app.post("/api/spaces/{space_id}/archive")
+def api_archive_space(space_id: str):
+    try:
+        space = PLATFORM.archive_space(space_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="SimulationSpaceNotFound")
+    _record_usage("space.archive", {"space_id": space_id})
+    return {"message": "Simulation space archived", "space": _space_payload(space)}
+
+
+@app.delete("/api/spaces/{space_id}")
+def api_delete_space(space_id: str):
+    try:
+        PLATFORM.delete_space(space_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="SimulationSpaceNotFound")
+    _record_usage("space.delete", {"space_id": space_id})
+    STATE.setdefault("cloudsim", {"summary": {}, "events": [], "last_reconcile_at": ""})["summary"]["spaces"] = len(_spaces_state().get("spaces", {}))
+    _persist_state()
+    return {"message": "Simulation space deleted", "space_id": space_id}
+
+
+@app.get("/api/cloudsim/current")
+def api_cloudsim_current():
+    return PLATFORM.cloudsim_current()
+
+
+@app.get("/api/cloudsim/summary")
+def api_cloudsim_summary():
+    return PLATFORM.cloudsim_summary()
+
+
+@app.post("/api/cloudsim/reconcile")
+def api_cloudsim_reconcile():
+    payload = PLATFORM.cloudsim_reconcile()
+    _record_usage("cloudsim.reconcile", {"spaces": len(_spaces_state().get("spaces", {}))})
+    _persist_state()
+    return payload
+
+
+@app.get("/api/cloudsim/events")
+def api_cloudsim_events():
+    return PLATFORM.cloudsim_events()
 
 
 @app.get("/api/packs")
@@ -5701,28 +6720,86 @@ def api_list_packs():
 
 @app.get("/api/ec2/amis")
 def api_ec2_amis():
-    return {"amis": AMI_CATALOG, "count": len(AMI_CATALOG)}
+    runtime = _runtime_bootstrap_status()
+    return {"amis": AMI_CATALOG, "count": len(AMI_CATALOG), "runtime": runtime, "host_os": _parent_os()}
 
 
-@app.get("/api/ec2/runtime/docker")
-def api_ec2_runtime_docker():
-    status = _docker_bootstrap_status()
+@app.get("/api/ec2/runtime")
+def api_ec2_runtime():
+    status = _runtime_bootstrap_status()
+    host_os = _parent_os()
+    family = "Multipass" if host_os in {"windows", "darwin"} else "Multipass or LXD"
+    status["instructions"] = {
+        "label": status.get("preferred_backend", "runtime"),
+        "message": (
+            "The simulator uses Multipass on macOS for EC2-style sandboxes."
+            if host_os == "darwin"
+            else "The simulator uses Multipass on Windows for EC2-style sandboxes."
+            if host_os == "windows"
+            else "The simulator can use Multipass on Windows/macOS/Linux and LXD on Linux for EC2-style sandboxes."
+        ),
+        "helper": status.get("preferred_backend", "runtime"),
+        "family": family,
+    }
+    return status
+
+
+@app.get("/api/ec2/runtime/lxd")
+def api_ec2_runtime_lxd():
+    status = _runtime_bootstrap_status("lxd")
     status["mode"] = status.get("mode", "auto")
     status["next_step"] = "install" if not status["available"] else "ready"
     status["instructions"] = {
-        "label": status.get("label", "Install Docker runtime"),
+        "label": status.get("label", "LXD"),
         "message": status.get("message", ""),
         "helper": status.get("helper", "manual"),
     }
     return status
 
 
-@app.post("/api/ec2/runtime/docker/bootstrap")
-def api_ec2_runtime_docker_bootstrap():
-    status = _start_docker_bootstrap()
-    status["message"] = status.get("message") or "Docker bootstrap started."
+@app.get("/api/ec2/runtime/multipass")
+def api_ec2_runtime_multipass():
+    status = _runtime_bootstrap_status("multipass")
+    status["mode"] = status.get("mode", "auto")
+    status["next_step"] = "install" if not status["available"] else "ready"
     status["instructions"] = {
-        "label": status.get("label", "Install Docker runtime"),
+        "label": status.get("label", "Multipass"),
+        "message": status.get("message", ""),
+        "helper": status.get("helper", "manual"),
+    }
+    return status
+
+
+@app.post("/api/ec2/runtime/bootstrap")
+def api_ec2_runtime_bootstrap():
+    status = _start_docker_bootstrap()
+    status["message"] = status.get("message") or "Multipass and LXD runtime readiness checked."
+    status["instructions"] = {
+        "label": status.get("preferred_backend", "runtime"),
+        "message": status.get("message", ""),
+        "helper": status.get("helper", "manual"),
+    }
+    return status
+
+
+@app.post("/api/ec2/runtime/lxd/bootstrap")
+def api_ec2_runtime_lxd_bootstrap():
+    status = _start_docker_bootstrap()
+    status["message"] = status.get("message") or "LXD runtime readiness checked."
+    status["instructions"] = {
+        "label": status.get("label", "LXD"),
+        "message": status.get("message", ""),
+        "helper": status.get("helper", "manual"),
+    }
+    return status
+
+
+@app.post("/api/ec2/runtime/multipass/bootstrap")
+def api_ec2_runtime_multipass_bootstrap():
+    status = _start_docker_bootstrap()
+    status["message"] = status.get("message") or "Multipass runtime readiness checked."
+    status["instructions"] = {
+        "label": status.get("label", "Multipass"),
         "message": status.get("message", ""),
         "helper": status.get("helper", "manual"),
     }
@@ -6033,16 +7110,13 @@ def api_iam_update_account_settings(req: IAMAccountSettingsRequest):
 def api_ec2_list_instances():
     _prune_expired_terminated_instances()
     instance_ids = _ec2_instance_ids()
-    if _docker_available():
-        for instance_id in instance_ids:
-            instance = ec2_state["instances"].get(instance_id)
-            if isinstance(instance, dict) and instance.get("runtime_backend") == "docker":
-                _sync_docker_instance(instance)
-    else:
-        for instance_id in instance_ids:
-            instance = ec2_state["instances"].get(instance_id)
-            if isinstance(instance, dict) and instance.get("runtime_backend") == "docker":
-                instance.setdefault("container_status", "docker-unavailable")
+    for instance_id in instance_ids:
+        instance = ec2_state["instances"].get(instance_id)
+        if isinstance(instance, dict):
+            backend = str(instance.get("runtime_backend") or "").strip().lower()
+            if backend == "multipass":
+                _sync_multipass_instance(instance)
+            elif backend == "lxd":
                 _sync_docker_instance(instance)
     _prune_expired_terminated_instances()
     instances = []
@@ -6054,7 +7128,7 @@ def api_ec2_list_instances():
 
 
 @app.post("/api/ec2/instances")
-def api_ec2_create_instance(req: EC2InstanceRequest):
+def api_ec2_create_instance(req: EC2InstanceRequest, *, auto_start: bool = True):
     instance_id = _id("i")
     pack = _activate_pack("cloudlearn.ec2.basic")
     if req.vpc_id and req.vpc_id not in vpc_state["vpcs"]:
@@ -6069,10 +7143,13 @@ def api_ec2_create_instance(req: EC2InstanceRequest):
         req_runtime = profile.get("default_runtime", "python")
     else:
         req_runtime = req.runtime
-    runtime_backend = _preferred_runtime_backend()
-    host_port = _allocate_host_port() if runtime_backend == "docker" else None
+    runtime_backend = _ec2_choose_runtime_backend(profile, req.runtime_backend)
+    host_port = _allocate_host_port()
     workspace = _instance_workspace(instance_id)
     workspace.mkdir(parents=True, exist_ok=True)
+    runtime_image = profile.get("runtime_image") or (
+        MULTIPASS_RUNTIME_IMAGE if runtime_backend == "multipass" else LXD_RUNTIME_IMAGE
+    )
     instance = {
         "instance_id": instance_id,
         "reservation_id": f"r-{instance_id.replace('i-', '')}",
@@ -6083,8 +7160,9 @@ def api_ec2_create_instance(req: EC2InstanceRequest):
         "ami_name": profile["name"],
         "os_family": profile.get("os_family", "linux"),
         "container_image": profile.get("container_image", ""),
-        "runtime_image": profile.get("runtime_image") or DOCKER_RUNTIME_IMAGE,
+        "runtime_image": runtime_image,
         "runtime": req_runtime,
+        "runtime_backend_requested": (req.runtime_backend or "").strip().lower(),
         "key_pair": req.key_pair,
         "state": "pending",
         "az": req.az,
@@ -6099,13 +7177,13 @@ def api_ec2_create_instance(req: EC2InstanceRequest):
         "created": _now(),
         "pack_id": pack["id"],
         "runtime_backend": runtime_backend,
-        "container_download_state": "ready",
+        "container_download_state": "pending",
         "pid": None,
-        "container_name": f"cloudlearn-{instance_id}" if runtime_backend == "docker" else "",
+        "container_name": f"cloudlearn-{instance_id}",
         "container_id": "",
         "container_port": DOCKER_CONSOLE_PORT,
         "host_port": host_port,
-        "endpoint_url": f"http://127.0.0.1:{host_port}" if host_port else "",
+        "endpoint_url": f"{runtime_backend}://{instance_id}",
         "console_state": {"cwd": str(workspace)},
         "console_log": [],
         "sample_app_id": getattr(req, "sample_app_id", ""),
@@ -6115,8 +7193,8 @@ def api_ec2_create_instance(req: EC2InstanceRequest):
         "sample_app_port": DOCKER_CONSOLE_PORT,
         "deployment_path": str(workspace),
         "workspace": str(workspace),
-        "container_status": "created" if runtime_backend == "docker" else "simulated",
-        "console_backend": "docker-exec" if runtime_backend == "docker" else "pty-shell",
+        "container_status": "created",
+        "console_backend": "multipass-ssh" if runtime_backend == "multipass" else f"{runtime_backend}-exec",
         "console_prompt": _cmd_prompt({"runtime_backend": runtime_backend, "container_name": f"cloudlearn-{instance_id}", "container_id": ""}),
     }
     if instance["sample_app_id"]:
@@ -6131,30 +7209,82 @@ def api_ec2_create_instance(req: EC2InstanceRequest):
     if req.command:
         instance["public_ip"] = _public_ip()
     ec2_state["instances"][instance_id] = instance
+    if auto_start:
+        _queue_runtime_start(instance_id)
     _record_usage("ec2.create_instance", instance)
     return instance
 
 
 def _start_runtime_process(instance: dict) -> None:
-    if instance.get("runtime_backend") == "docker":
+    backend = str(instance.get("runtime_backend") or "lxd").strip().lower()
+    if backend == "multipass":
+        _start_multipass_instance(instance)
+        return
+    if backend == "lxd":
         _start_docker_instance(instance)
         return
-    _start_simulated_instance(instance)
+    raise HTTPException(status_code=503, detail="RuntimeUnavailable")
+
+
+def _queue_runtime_start(instance_id: str) -> None:
+    def _worker() -> None:
+        with STATE_LOCK:
+            instance = ec2_state["instances"].get(instance_id)
+            if not isinstance(instance, dict):
+                return
+            instance["launch_status"] = "starting"
+            _persist_state()
+        try:
+            _start_runtime_process(instance)
+            with STATE_LOCK:
+                instance = ec2_state["instances"].get(instance_id)
+                if isinstance(instance, dict):
+                    instance["launch_status"] = "ready"
+                    _persist_state()
+        except HTTPException as exc:
+            with STATE_LOCK:
+                instance = ec2_state["instances"].get(instance_id)
+                if isinstance(instance, dict):
+                    instance["launch_status"] = "error"
+                    instance["launch_error"] = str(exc.detail)
+                    if instance.get("state") == "pending":
+                        instance["state"] = "stopped"
+                    instance["container_status"] = "launch-failed"
+                    _persist_state()
+        except Exception as exc:
+            with STATE_LOCK:
+                instance = ec2_state["instances"].get(instance_id)
+                if isinstance(instance, dict):
+                    instance["launch_status"] = "error"
+                    instance["launch_error"] = str(exc)
+                    if instance.get("state") == "pending":
+                        instance["state"] = "stopped"
+                    instance["container_status"] = "launch-failed"
+                    _persist_state()
+
+    threading.Thread(target=_worker, name=f"cloudlearn-launch-{instance_id}", daemon=True).start()
 
 
 def _stop_runtime_process(instance: dict) -> None:
-    if instance.get("runtime_backend") == "docker":
+    backend = str(instance.get("runtime_backend") or "lxd").strip().lower()
+    if backend == "multipass":
+        _stop_multipass_instance(instance)
+        return
+    if backend == "lxd":
         _stop_docker_instance(instance)
         return
-    _stop_simulated_instance(instance)
+    raise HTTPException(status_code=503, detail="RuntimeUnavailable")
 
 
 def _reboot_runtime_process(instance: dict) -> None:
-    if instance.get("runtime_backend") == "docker":
+    backend = str(instance.get("runtime_backend") or "lxd").strip().lower()
+    if backend == "multipass":
+        _reboot_multipass_instance(instance)
+        return
+    if backend == "lxd":
         _reboot_docker_instance(instance)
         return
-    _stop_simulated_instance(instance)
-    _start_simulated_instance(instance)
+    raise HTTPException(status_code=503, detail="RuntimeUnavailable")
 
 
 @app.post("/api/ec2/instances/{instance_id}/start")
@@ -6162,7 +7292,8 @@ def api_ec2_start_instance(instance_id: str):
     instance = ec2_state["instances"].get(instance_id)
     if not instance:
         raise HTTPException(404, detail="NoSuchInstance")
-    _start_runtime_process(instance)
+    instance["state"] = "pending"
+    _queue_runtime_start(instance_id)
     _record_usage("ec2.start_instance", {"instance_id": instance_id})
     return instance
 
@@ -6192,7 +7323,10 @@ def api_ec2_terminate_instance(instance_id: str):
     instance = ec2_state["instances"].get(instance_id)
     if not instance:
         raise HTTPException(404, detail="NoSuchInstance")
-    if instance.get("runtime_backend") == "docker":
+    backend = str(instance.get("runtime_backend") or "").strip().lower()
+    if backend == "multipass":
+        _terminate_multipass_instance(instance)
+    elif backend == "lxd":
         _terminate_docker_instance(instance)
     else:
         _terminate_simulated_instance(instance)
@@ -6205,22 +7339,12 @@ def api_ec2_console(instance_id: str):
     instance = ec2_state["instances"].get(instance_id)
     if not instance:
         raise HTTPException(404, detail="NoSuchInstance")
-    if instance.get("runtime_backend") == "docker":
-        if not _docker_available():
-            return {
-                "instance_id": instance_id,
-                "state": instance.get("state", "unknown"),
-                "console_state": instance.get("state", "unknown"),
-                "backend": "docker-unavailable",
-                "output": "Docker is not available on this host.\n",
-                "runtime_image": instance.get("runtime_image", ""),
-                "console_prompt": instance.get("console_prompt", _cmd_prompt(instance)),
-                "sample_app_id": instance.get("sample_app_id", ""),
-                "sample_app_name": instance.get("sample_app_name", ""),
-                "sample_app_status": instance.get("sample_app_status", ""),
-                "endpoint_url": instance.get("endpoint_url", ""),
-            }
+    backend = str(instance.get("runtime_backend") or "").strip().lower()
+    if backend == "multipass":
+        _sync_multipass_instance(instance)
+    elif backend == "lxd":
         _sync_docker_instance(instance)
+    if backend in {"multipass", "lxd"}:
         with CONSOLE_LOCK:
             session = CONSOLE_SESSIONS.get(instance_id)
         if session:
@@ -6232,7 +7356,7 @@ def api_ec2_console(instance_id: str):
             "instance_id": instance_id,
             "state": instance.get("state", "unknown"),
             "console_state": instance.get("state", "unknown"),
-            "backend": "docker-exec",
+            "backend": "multipass-ssh" if backend == "multipass" else f"{backend}-exec",
             "output": output,
             "container_id": instance.get("container_id", ""),
             "container_status": instance.get("container_status", ""),
@@ -6243,11 +7367,7 @@ def api_ec2_console(instance_id: str):
             "sample_app_status": instance.get("sample_app_status", ""),
             "endpoint_url": instance.get("endpoint_url", ""),
         }
-    with CONSOLE_LOCK:
-        session = CONSOLE_SESSIONS.get(instance_id)
-    if instance.get("state") == "running" and (not session or session.get("closed") or not session.get("proc") or session["proc"].poll() is not None):
-        _spawn_console_session(instance)
-    return _console_snapshot(instance_id)
+    raise HTTPException(status_code=503, detail="RuntimeUnavailable")
 
 
 @app.post("/api/ec2/instances/{instance_id}/console/input")
@@ -6255,7 +7375,10 @@ def api_ec2_console_input(instance_id: str, req: EC2ConsoleInputRequest):
     instance = ec2_state["instances"].get(instance_id)
     if not instance:
         raise HTTPException(404, detail="NoSuchInstance")
-    if instance.get("runtime_backend") == "docker":
+    backend = str(instance.get("runtime_backend") or "").strip().lower()
+    if backend == "multipass":
+        _sync_multipass_instance(instance)
+    elif backend == "lxd":
         _sync_docker_instance(instance)
     if instance.get("state") != "running":
         raise HTTPException(409, detail="InstanceNotRunning")
@@ -6269,7 +7392,10 @@ def api_ec2_console_exec(instance_id: str, req: EC2ConsoleCommandRequest):
     instance = ec2_state["instances"].get(instance_id)
     if not instance:
         raise HTTPException(404, detail="NoSuchInstance")
-    if instance.get("runtime_backend") == "docker":
+    backend = str(instance.get("runtime_backend") or "").strip().lower()
+    if backend == "multipass":
+        _sync_multipass_instance(instance)
+    elif backend == "lxd":
         _sync_docker_instance(instance)
     if instance.get("state") != "running":
         raise HTTPException(409, detail="InstanceNotRunning")
@@ -6551,9 +7677,7 @@ def _ec2_query_run_instances(params: dict[str, Any]) -> Response:
             user_data="",
             sample_app_id=sample_app_id,
         )
-        instance = api_ec2_create_instance(req)
-        instance["state"] = "pending"
-        instance["instanceState"] = "pending"
+        instance = api_ec2_create_instance(req, auto_start=False)
         launched.append(instance)
 
     def build(root: ET.Element) -> None:
@@ -6618,7 +7742,8 @@ async def api_ec2_query(request: Request):
                 if not instance:
                     raise HTTPException(404, detail=f"InvalidInstanceID.NotFound: {instance_id}")
                 previous = instance.get("state", "stopped")
-                _start_runtime_process(instance)
+                instance["state"] = "pending"
+                _queue_runtime_start(instance_id)
                 changes.append((instance, previous, "pending"))
             return _ec2_query_state_change_response("StartInstancesResponse", changes)
         if action == "StopInstances":
@@ -6651,8 +7776,13 @@ async def api_ec2_query(request: Request):
                 if not instance:
                     raise HTTPException(404, detail=f"InvalidInstanceID.NotFound: {instance_id}")
                 previous = instance.get("state", "running")
-                _terminate_runtime_process = _terminate_docker_instance if instance.get("runtime_backend") == "docker" else _terminate_simulated_instance
-                _terminate_runtime_process(instance)
+                backend = str(instance.get("runtime_backend") or "").strip().lower()
+                if backend == "multipass":
+                    _terminate_multipass_instance(instance)
+                elif backend == "lxd":
+                    _terminate_docker_instance(instance)
+                else:
+                    _terminate_simulated_instance(instance)
                 changes.append((instance, previous, "shutting-down"))
             return _ec2_query_state_change_response("TerminateInstancesResponse", changes)
     except HTTPException as exc:
@@ -6670,7 +7800,10 @@ async def ws_ec2_console(websocket: WebSocket, instance_id: str):
         await websocket.close(code=1008)
         return
 
-    if instance.get("runtime_backend") == "docker":
+    backend = str(instance.get("runtime_backend") or "").strip().lower()
+    if backend == "multipass":
+        _sync_multipass_instance(instance)
+    elif backend == "lxd":
         _sync_docker_instance(instance)
 
     await websocket.accept()
@@ -6680,20 +7813,23 @@ async def ws_ec2_console(websocket: WebSocket, instance_id: str):
         return
 
     prompt = _cmd_prompt(instance) + " "
-    if instance.get("runtime_backend") == "docker":
+    if backend in {"multipass", "lxd"}:
         container_name = instance.get("container_name") or instance.get("container_id") or instance_id
-        runtime_image = instance.get("runtime_image") or DOCKER_RUNTIME_IMAGE
-        await websocket.send_text(
-            f"docker exec -it {container_name} /bin/sh\n"
-            f"Connected to container {container_name} ({runtime_image})\n"
-        )
+        runtime_image = instance.get("runtime_image") or (MULTIPASS_RUNTIME_IMAGE if backend == "multipass" else LXD_RUNTIME_IMAGE)
+        if backend == "multipass":
+            console_cmd = instance.get("ssh_command") or "ssh"
+            await websocket.send_text(
+                f"{console_cmd}\n"
+                f"Connected to instance {container_name} ({runtime_image})\n"
+            )
+        else:
+            await websocket.send_text(
+                f"Connected to instance {container_name} ({runtime_image})\n"
+            )
     else:
-        await websocket.send_text("Local EC2 simulator shell attached.\n")
-        await websocket.send_text(
-            "Microsoft Windows [Version 10.0.22631.0]\n"
-            "(c) CloudLearn Simulator. All rights reserved.\n\n"
-            f"{prompt}"
-        )
+        await websocket.send_text("A runtime sandbox is required for EC2 consoles.\n")
+        await websocket.close()
+        return
 
     try:
         while True:
@@ -6709,31 +7845,18 @@ async def ws_ec2_console(websocket: WebSocket, instance_id: str):
                 await websocket.send_text(prompt)
                 continue
             if command in {"exit", "logout"}:
-                if instance.get("runtime_backend") == "docker":
-                    await websocket.send_text("logout\n")
-                else:
-                    await websocket.send_text("logout\n")
+                await websocket.send_text("logout\n")
                 break
 
             try:
-                if instance.get("runtime_backend") == "docker":
-                    result = _console_execute(instance, command)
-                    transcript = ""
-                    if result.get("output"):
-                        transcript += result["output"]
-                        if not transcript.endswith("\n"):
-                            transcript += "\n"
-                    transcript += prompt
-                    await websocket.send_text(transcript)
-                else:
-                    result = _console_execute(instance, command)
-                    transcript = ""
-                    if result.get("output"):
-                        transcript += result["output"]
-                        if not transcript.endswith("\n"):
-                            transcript += "\n"
-                    transcript += prompt
-                    await websocket.send_text(transcript)
+                result = _console_execute(instance, command)
+                transcript = ""
+                if result.get("output"):
+                    transcript += result["output"]
+                    if not transcript.endswith("\n"):
+                        transcript += "\n"
+                transcript += prompt
+                await websocket.send_text(transcript)
             except HTTPException as exc:
                 await websocket.send_text(f"error: {exc.detail}\n{prompt}")
     finally:
@@ -8127,16 +9250,16 @@ def _rds_runtime_mysql_init_sql(db: dict) -> str:
 
 def _rds_runtime_pull_image(image: str) -> None:
     if not _docker_available():
-        raise HTTPException(503, detail="DockerUnavailable")
-    completed = _docker_run(["image", "inspect", image], timeout=30)
+        raise HTTPException(503, detail="LXDUnavailable")
+    # LXD caches images automatically on launch; a separate pull is unnecessary.
+    completed = _docker_run(["image", "info", image], timeout=30)
     if completed.returncode == 0:
         return
-    _docker_run_checked(["pull", image], timeout=1800)
 
 
 def _rds_runtime_ensure_container(db: dict) -> str:
     if not _docker_available():
-        raise HTTPException(503, detail="DockerUnavailable")
+        raise HTTPException(503, detail="LXDUnavailable")
 
     db_id = db["db_instance_identifier"]
     engine = (db.get("engine") or "postgres").lower()
@@ -8148,7 +9271,7 @@ def _rds_runtime_ensure_container(db: dict) -> str:
 
     _rds_runtime_pull_image(image)
 
-    db["runtime_backend"] = "docker"
+    db["runtime_backend"] = "lxd"
     db["runtime_image"] = image
     db["container_name"] = container_name
     db["host_port"] = host_port
@@ -8163,51 +9286,49 @@ def _rds_runtime_ensure_container(db: dict) -> str:
             db["container_id"] = ref
         return ref
 
-    run_args = [
-        "create",
-        "--name", container_name,
-        "--label", f"cloudlearn.db_instance_identifier={db_id}",
-        "--label", "cloudlearn.runtime=rds",
-        "--label", f"cloudlearn.engine={engine}",
-    ]
-    if engine == "postgres":
-        run_args += [
-            "-v", f"{_rds_runtime_data_volume(db_id)}:/var/lib/postgresql/data",
-            "-e", f"POSTGRES_USER={db.get('master_username') or 'dbadmin'}",
-            "-e", f"POSTGRES_PASSWORD={db.get('master_user_password') or 'Password123!'}",
-            "-e", f"POSTGRES_DB={db_id}",
-            "-p", f"127.0.0.1:{host_port}:{container_port}",
-            image,
-        ]
-    else:
-        init_sql = _rds_runtime_mysql_init_sql(db)
-        (dirs["init"] / "init.sql").write_text(init_sql, encoding="utf-8")
-        run_args += [
-            "-v", f"{_rds_runtime_data_volume(db_id)}:/var/lib/mysql",
-            "-v", f"{dirs['init']}:/docker-entrypoint-initdb.d:ro",
-            "-e", f"MYSQL_ROOT_PASSWORD={db.get('master_user_password') or 'Password123!'}",
-            "-e", f"MYSQL_DATABASE={db_id}",
-            "-e", "MYSQL_ROOT_HOST=%",
-            "-p", f"127.0.0.1:{host_port}:{container_port}",
-            image,
-        ]
-
-    completed = _docker_run_checked(run_args, timeout=300)
-    db["container_id"] = (completed.stdout or "").strip() or container_name
+    launch_args = ["launch", image, container_name]
+    completed = _docker_run_checked(launch_args, timeout=300)
+    db["container_id"] = container_name
     db["container_status"] = "created"
+
+    proxy_name = f"{container_name}-proxy"
+    _docker_run_checked([
+        "config",
+        "device",
+        "add",
+        container_name,
+        proxy_name,
+        "proxy",
+        f"listen=tcp:127.0.0.1:{host_port}",
+        f"connect=tcp:127.0.0.1:{container_port}",
+    ], timeout=120)
+
+    if engine == "postgres":
+        db_user = _rds_runtime_sql_escape(db.get("master_username") or "dbadmin")
+        db_pass = _rds_runtime_sql_escape(db.get("master_user_password") or "Password123!")
+        init_command = (
+            "apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y postgresql postgresql-contrib && "
+            "service postgresql start && "
+            f"su - postgres -c \"psql -c \\\"CREATE USER {db_user} WITH PASSWORD '{db_pass}';\\\"\" && "
+            f"su - postgres -c \"createdb {db_id} -O {db_user}\""
+        )
+        _docker_run_checked(["exec", container_name, "--", "/bin/sh", "-lc", init_command], timeout=1800)
+    else:
+        init_command = (
+            "apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y mariadb-server && "
+            "service mysql start && "
+            f"mysql -uroot -e \"CREATE DATABASE IF NOT EXISTS `{db_id}`; "
+            f"CREATE USER IF NOT EXISTS '{db.get('master_username') or 'dbadmin'}'@'%' IDENTIFIED BY '{db.get('master_user_password') or 'Password123!'}'; "
+            f"GRANT ALL PRIVILEGES ON `{db_id}`.* TO '{db.get('master_username') or 'dbadmin'}'@'%'; FLUSH PRIVILEGES;\""
+        )
+        _docker_run_checked(["exec", container_name, "--", "/bin/sh", "-lc", init_command], timeout=1800)
+
     return db["container_id"]
 
 
 def _rds_runtime_start(db: dict) -> dict:
     if not _docker_available():
-        db["runtime_backend"] = "simulated"
-        db["runtime_image"] = _rds_runtime_image(db.get("engine", "postgres"), db.get("engine_version"))
-        db["container_name"] = db.get("container_name") or _rds_runtime_container_name(db["db_instance_identifier"])
-        db["container_status"] = "docker-unavailable"
-        db["endpoint_address"] = db.get("endpoint_address") or f"{db['db_instance_identifier']}.rds.local"
-        db["endpoint_port"] = db.get("endpoint_port") or _rds_runtime_engine_port(db.get("engine", "postgres"))
-        db["endpoint_url"] = db.get("endpoint_url") or f"{db['endpoint_address']}:{db['endpoint_port']}"
-        return db
+        raise HTTPException(503, detail="LXDUnavailable")
     ref = _rds_runtime_ensure_container(db)
     if _docker_status(ref) != "running":
         _docker_run_checked(["start", ref], timeout=300)
@@ -8220,11 +9341,7 @@ def _rds_runtime_start(db: dict) -> dict:
 
 def _rds_runtime_stop(db: dict) -> dict:
     if not _docker_available():
-        db["runtime_backend"] = "simulated"
-        db["db_instance_status"] = "stopped"
-        db["container_status"] = "docker-unavailable"
-        db["updated"] = _now()
-        return db
+        raise HTTPException(503, detail="LXDUnavailable")
     ref = db.get("container_id") or db.get("container_name")
     if not ref:
         raise HTTPException(409, detail="DBInstanceContainerMissing")
@@ -8238,11 +9355,7 @@ def _rds_runtime_stop(db: dict) -> dict:
 
 def _rds_runtime_reboot(db: dict) -> dict:
     if not _docker_available():
-        db["runtime_backend"] = "simulated"
-        db["db_instance_status"] = "available"
-        db["container_status"] = "docker-unavailable"
-        db["updated"] = _now()
-        return db
+        raise HTTPException(503, detail="LXDUnavailable")
     ref = db.get("container_id") or db.get("container_name")
     if not ref:
         raise HTTPException(409, detail="DBInstanceContainerMissing")
@@ -8259,9 +9372,7 @@ def _rds_runtime_reboot(db: dict) -> dict:
 
 def _rds_runtime_delete(db: dict) -> None:
     if not _docker_available():
-        db["runtime_backend"] = "simulated"
-        db["container_status"] = "docker-unavailable"
-        return
+        raise HTTPException(503, detail="LXDUnavailable")
     ref = db.get("container_id") or db.get("container_name")
     if ref and _docker_container_exists(ref):
         _docker_run(["rm", "-f", ref], timeout=300)
@@ -8419,7 +9530,7 @@ def _rds_db_view(db: dict) -> dict[str, Any]:
         "endpoint_address": db.get("endpoint_address", ""),
         "endpoint_port": db.get("endpoint_port", 0),
         "endpoint_url": f"{db.get('endpoint_address', '')}:{db.get('endpoint_port', 0)}" if db.get("endpoint_address") else "",
-        "runtime_backend": db.get("runtime_backend", "simulated"),
+        "runtime_backend": db.get("runtime_backend", "lxd"),
         "runtime_image": db.get("runtime_image", ""),
         "container_name": db.get("container_name", ""),
         "container_id": db.get("container_id", ""),
@@ -8492,7 +9603,9 @@ def _rds_prepare_db_instance(payload: RDSDatabaseRequest, source_snapshot: dict 
         payload.master_username = source_snapshot.get("master_username", payload.master_username)
         vpc_id = source_snapshot.get("vpc_id", vpc_id)
     endpoint_address = f"{db_id}.rds.local"
-    runtime_backend = "docker" if _docker_available() else "simulated"
+    if not _docker_available():
+        raise HTTPException(503, detail="LXDUnavailable")
+    runtime_backend = "lxd"
     resolved_engine_version = _rds_resolve_engine_version(payload.engine, payload.engine_version)
     runtime_image = _rds_runtime_image(payload.engine, resolved_engine_version)
     db = {
@@ -8530,19 +9643,15 @@ def _rds_prepare_db_instance(payload: RDSDatabaseRequest, source_snapshot: dict 
         "runtime_image": runtime_image,
         "container_name": _rds_runtime_container_name(db_id),
         "container_id": "",
-        "container_status": "simulated" if runtime_backend == "simulated" else "created",
+        "container_status": "created",
         "host_port": 0,
         "container_port": engine_profile["port"],
     }
     db["subnet_ids"] = list(subnet_group.get("subnet_ids", []))
-    if runtime_backend == "docker":
+    if runtime_backend == "lxd":
         _rds_runtime_ensure_container(db)
         db["db_instance_status"] = "available"
         db["container_status"] = "running" if _docker_status(db.get("container_id") or db.get("container_name")) == "running" else "created"
-    else:
-        db["endpoint_port"] = engine_profile["port"]
-        db["endpoint_address"] = f"{db_id}.rds.local"
-        db["endpoint_url"] = f"{db['endpoint_address']}:{db['endpoint_port']}"
     rds_state["db_instances"][db_id] = db
     _rds_emit_event("CreateDBInstance", {"db_instance_identifier": db_id, "engine": db["engine"], "vpc_id": vpc_id})
     return db
@@ -9769,6 +10878,694 @@ def api_sqs_untag_queue(queue_name: str, payload: dict[str, Any]):
         current.pop(str(key), None)
     _sqs_set_tags(queue, current)
     return {"untagged": True, "queue_name": queue["queue_name"], "tags": _sqs_tags_view(queue)}
+
+
+def _ddb_state() -> dict:
+    return ddb_state
+
+
+def _ddb_tables() -> dict:
+    return _ddb_state().setdefault("tables", {})
+
+
+def _ddb_table_arn(table_name: str) -> str:
+    return _iam_dynamodb_table_arn(table_name)
+
+
+def _ddb_is_typed_value(value: Any) -> bool:
+    return isinstance(value, dict) and len(value) == 1 and next(iter(value.keys())) in {"S", "N", "BOOL", "NULL", "M", "L", "SS", "NS", "BS", "B"}
+
+
+def _ddb_json_to_native(value: Any) -> Any:
+    if isinstance(value, dict):
+        if _ddb_is_typed_value(value):
+            type_key, raw = next(iter(value.items()))
+            if type_key == "S":
+                return str(raw)
+            if type_key == "N":
+                raw_text = str(raw)
+                try:
+                    return int(raw_text) if re.fullmatch(r"-?\d+", raw_text) else float(raw_text)
+                except Exception:
+                    return raw_text
+            if type_key == "BOOL":
+                return bool(raw)
+            if type_key == "NULL":
+                return None
+            if type_key == "B":
+                return raw
+            if type_key == "SS":
+                return [str(item) for item in (raw or [])]
+            if type_key == "NS":
+                values = []
+                for item in raw or []:
+                    try:
+                        item_text = str(item)
+                        values.append(int(item_text) if re.fullmatch(r"-?\d+", item_text) else float(item_text))
+                    except Exception:
+                        values.append(str(item))
+                return values
+            if type_key == "BS":
+                return list(raw or [])
+            if type_key == "L":
+                return [_ddb_json_to_native(item) for item in (raw or [])]
+            if type_key == "M":
+                return {k: _ddb_json_to_native(v) for k, v in (raw or {}).items()}
+        return {k: _ddb_json_to_native(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_ddb_json_to_native(v) for v in value]
+    return copy.deepcopy(value)
+
+
+def _ddb_native_to_json(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {"M": {k: _ddb_native_to_json(v) for k, v in value.items()}}
+    if isinstance(value, list):
+        if all(isinstance(item, str) for item in value):
+            return {"SS": [str(item) for item in value]}
+        if all(isinstance(item, (int, float)) and not isinstance(item, bool) for item in value):
+            return {"NS": [str(item) for item in value]}
+        return {"L": [_ddb_native_to_json(item) for item in value]}
+    if isinstance(value, bool):
+        return {"BOOL": value}
+    if value is None:
+        return {"NULL": True}
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return {"N": str(value)}
+    return {"S": str(value)}
+
+
+def _ddb_native_item_to_json(item: dict[str, Any]) -> dict[str, Any]:
+    return {k: _ddb_native_to_json(v) for k, v in (item or {}).items()}
+
+
+def _ddb_item_to_native_item(item: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(item, dict):
+        raise HTTPException(400, detail="ValidationException: Item must be an object.")
+    return {k: _ddb_json_to_native(v) for k, v in item.items()}
+
+
+def _ddb_table_key_fields(table: dict) -> tuple[str, str]:
+    return str(table.get("partition_key_name", "id")), str(table.get("sort_key_name", "") or "")
+
+
+def _ddb_item_key_tuple(table: dict, item: dict[str, Any]) -> tuple[Any, Any | None]:
+    pk_name, sk_name = _ddb_table_key_fields(table)
+    if pk_name not in item:
+        raise HTTPException(400, detail=f"ValidationException: Missing partition key '{pk_name}'.")
+    pk = item.get(pk_name)
+    sk = item.get(sk_name) if sk_name else None
+    if sk_name and sk is None:
+        raise HTTPException(400, detail=f"ValidationException: Missing sort key '{sk_name}'.")
+    return pk, sk
+
+
+def _ddb_item_key_string(table: dict, item: dict[str, Any]) -> str:
+    return json.dumps(_ddb_item_key_tuple(table, item), default=str, separators=(",", ":"))
+
+
+def _ddb_normalize_table(table_name: str, table: dict) -> dict:
+    table.setdefault("table_name", table_name)
+    table.setdefault("table_arn", _ddb_table_arn(table_name))
+    table.setdefault("table_status", "ACTIVE")
+    table.setdefault("partition_key_name", "id")
+    table.setdefault("partition_key_type", "S")
+    table.setdefault("sort_key_name", "")
+    table.setdefault("sort_key_type", "S")
+    table.setdefault("billing_mode", "PAY_PER_REQUEST")
+    table.setdefault("provisioned_throughput", {"ReadCapacityUnits": 5, "WriteCapacityUnits": 5})
+    table.setdefault("tags", {})
+    table.setdefault("indexes", [])
+    table.setdefault("streams", {"enabled": False, "latest_stream_label": ""})
+    table.setdefault("items", {})
+    table.setdefault("created", _now())
+    table.setdefault("last_modified", _now())
+    return table
+
+
+def _ddb_find_table(table_name: str) -> dict | None:
+    table = _ddb_tables().get(table_name)
+    if isinstance(table, dict):
+        return _ddb_normalize_table(table_name, table)
+    return None
+
+
+def _ddb_refresh_table_metrics(table: dict) -> None:
+    records = list((table.get("items") or {}).values())
+    table["item_count"] = len(records)
+    try:
+        table["table_size_bytes"] = sum(len(json.dumps(rec.get("item", {}), sort_keys=True, default=str).encode("utf-8")) for rec in records)
+    except Exception:
+        table["table_size_bytes"] = 0
+    table["last_modified"] = _now()
+
+
+def _ddb_item_record_view(table: dict, key: str, record: dict) -> dict:
+    native = copy.deepcopy(record.get("item", {}))
+    pk_name, sk_name = _ddb_table_key_fields(table)
+    key_obj = {pk_name: native.get(pk_name)}
+    if sk_name:
+        key_obj[sk_name] = native.get(sk_name)
+    return {
+        "key": key_obj,
+        "item": native,
+        "item_json": _ddb_native_item_to_json(native),
+        "created": record.get("created", ""),
+        "updated": record.get("updated", ""),
+        "size_bytes": int(record.get("size_bytes", 0) or 0),
+        "size_human": _fmt_size(int(record.get("size_bytes", 0) or 0)),
+    }
+
+
+def _ddb_table_view(table: dict, include_items: bool = True, native_items: bool = True) -> dict:
+    table = _ddb_normalize_table(table.get("table_name", ""), table)
+    _ddb_refresh_table_metrics(table)
+    records = sorted((table.get("items") or {}).items(), key=lambda kv: json.dumps(_ddb_item_key_tuple(table, kv[1].get("item", {})), default=str))
+    view = {
+        "table_name": table.get("table_name", ""),
+        "table_arn": table.get("table_arn", ""),
+        "table_status": table.get("table_status", "ACTIVE"),
+        "partition_key_name": table.get("partition_key_name", "id"),
+        "partition_key_type": table.get("partition_key_type", "S"),
+        "sort_key_name": table.get("sort_key_name", ""),
+        "sort_key_type": table.get("sort_key_type", "S"),
+        "billing_mode": table.get("billing_mode", "PAY_PER_REQUEST"),
+        "provisioned_throughput": copy.deepcopy(table.get("provisioned_throughput", {})),
+        "tags": copy.deepcopy(table.get("tags", {})),
+        "indexes": copy.deepcopy(table.get("indexes", [])),
+        "streams": copy.deepcopy(table.get("streams", {"enabled": False, "latest_stream_label": ""})),
+        "created": table.get("created", ""),
+        "last_modified": table.get("last_modified", ""),
+        "item_count": int(table.get("item_count", 0) or 0),
+        "table_size_bytes": int(table.get("table_size_bytes", 0) or 0),
+        "table_size_human": _fmt_size(int(table.get("table_size_bytes", 0) or 0)),
+    }
+    if include_items:
+        items = [ _ddb_item_record_view(table, key, record) for key, record in records ]
+        view["items"] = [item["item"] if native_items else item["item_json"] for item in items]
+        view["item_rows"] = items
+    return view
+
+
+def _ddb_create_table_record(payload: dict[str, Any]) -> dict:
+    table_name = str(payload.get("table_name") or payload.get("TableName") or "").strip()
+    if not table_name:
+        raise HTTPException(400, detail="ValidationException: TableName is required.")
+    tables = _ddb_tables()
+    if table_name in tables:
+        raise HTTPException(409, detail="ResourceInUseException: Table already exists.")
+    pk_name = str(payload.get("partition_key_name") or payload.get("PartitionKeyName") or "id").strip() or "id"
+    pk_type = str(payload.get("partition_key_type") or payload.get("PartitionKeyType") or "S").strip().upper() or "S"
+    sk_name = str(payload.get("sort_key_name") or payload.get("SortKeyName") or "").strip()
+    sk_type = str(payload.get("sort_key_type") or payload.get("SortKeyType") or "S").strip().upper() or "S"
+    billing_mode = str(payload.get("billing_mode") or payload.get("BillingMode") or "PAY_PER_REQUEST").strip().upper() or "PAY_PER_REQUEST"
+    throughput = payload.get("provisioned_throughput") or payload.get("ProvisionedThroughput") or {}
+    tags = payload.get("tags") or payload.get("Tags") or {}
+    if isinstance(tags, list):
+        tags = {str(tag.get("Key", tag.get("key", ""))): str(tag.get("Value", tag.get("value", ""))) for tag in tags if isinstance(tag, dict)}
+    table = {
+        "table_name": table_name,
+        "table_arn": _ddb_table_arn(table_name),
+        "table_status": "ACTIVE",
+        "partition_key_name": pk_name,
+        "partition_key_type": pk_type,
+        "sort_key_name": sk_name,
+        "sort_key_type": sk_type,
+        "billing_mode": billing_mode,
+        "provisioned_throughput": {
+            "ReadCapacityUnits": int(throughput.get("ReadCapacityUnits", payload.get("read_capacity_units", 5)) or 5),
+            "WriteCapacityUnits": int(throughput.get("WriteCapacityUnits", payload.get("write_capacity_units", 5)) or 5),
+        },
+        "tags": copy.deepcopy(tags or {}),
+        "indexes": [],
+        "streams": {"enabled": False, "latest_stream_label": ""},
+        "items": {},
+        "created": _now(),
+        "last_modified": _now(),
+    }
+    table["attribute_definitions"] = [{"AttributeName": pk_name, "AttributeType": pk_type}]
+    table["key_schema"] = [{"AttributeName": pk_name, "KeyType": "HASH"}]
+    if sk_name:
+        table["attribute_definitions"].append({"AttributeName": sk_name, "AttributeType": sk_type})
+        table["key_schema"].append({"AttributeName": sk_name, "KeyType": "RANGE"})
+    tables[table_name] = table
+    _persist_state()
+    _record_usage("dynamodb.create_table", {"table_name": table_name})
+    return table
+
+
+def _ddb_delete_table_record(table_name: str) -> None:
+    tables = _ddb_tables()
+    if table_name not in tables:
+        raise HTTPException(404, detail="ResourceNotFoundException: Table not found.")
+    tables.pop(table_name, None)
+    _persist_state()
+    _record_usage("dynamodb.delete_table", {"table_name": table_name})
+
+
+def _ddb_put_item_record(table: dict, payload: dict[str, Any]) -> dict:
+    native_item = _ddb_item_to_native_item(payload.get("item") or payload.get("Item") or {})
+    key = _ddb_item_key_string(table, native_item)
+    items = table.setdefault("items", {})
+    existing = items.get(key)
+    items[key] = {
+        "item": native_item,
+        "created": existing.get("created", _now()) if existing else _now(),
+        "updated": _now(),
+        "size_bytes": len(json.dumps(native_item, sort_keys=True, default=str).encode("utf-8")),
+    }
+    _ddb_refresh_table_metrics(table)
+    _persist_state()
+    _record_usage("dynamodb.put_item", {"table_name": table["table_name"]})
+    return existing or {}
+
+
+def _ddb_get_item_record(table: dict, payload: dict[str, Any]) -> dict | None:
+    native_key = _ddb_item_to_native_item(payload.get("key") or payload.get("Key") or {})
+    key = _ddb_item_key_string(table, native_key)
+    return table.get("items", {}).get(key)
+
+
+def _ddb_delete_item_record(table: dict, payload: dict[str, Any]) -> dict:
+    native_key = _ddb_item_to_native_item(payload.get("key") or payload.get("Key") or {})
+    key = _ddb_item_key_string(table, native_key)
+    removed = table.get("items", {}).pop(key, None)
+    _ddb_refresh_table_metrics(table)
+    _persist_state()
+    _record_usage("dynamodb.delete_item", {"table_name": table["table_name"]})
+    return removed or {}
+
+
+def _ddb_update_item_record(table: dict, payload: dict[str, Any]) -> dict:
+    native_key = _ddb_item_to_native_item(payload.get("key") or payload.get("Key") or {})
+    key = _ddb_item_key_string(table, native_key)
+    current = copy.deepcopy(table.get("items", {}).get(key, {}).get("item", {}))
+    updates = payload.get("attribute_updates") or payload.get("AttributeUpdates") or {}
+    if not current:
+        current = copy.deepcopy(native_key)
+    if updates:
+        for name, spec in updates.items():
+            if not isinstance(spec, dict):
+                continue
+            action = str(spec.get("Action", "PUT")).upper()
+            value = spec.get("Value")
+            if action == "DELETE":
+                current.pop(name, None)
+            elif value is not None:
+                current[name] = _ddb_json_to_native(value)
+    else:
+        expr = str(payload.get("update_expression") or payload.get("UpdateExpression") or "").strip()
+        values = payload.get("expression_attribute_values") or payload.get("ExpressionAttributeValues") or {}
+        if expr.upper().startswith("SET "):
+            for clause in expr[4:].split(","):
+                if "=" not in clause:
+                    continue
+                left, right = clause.split("=", 1)
+                attr_name = left.strip()
+                token = right.strip()
+                current[attr_name] = _ddb_json_to_native(values.get(token, token))
+    items = table.setdefault("items", {})
+    items[key] = {
+        "item": current,
+        "created": items.get(key, {}).get("created", _now()),
+        "updated": _now(),
+        "size_bytes": len(json.dumps(current, sort_keys=True, default=str).encode("utf-8")),
+    }
+    _ddb_refresh_table_metrics(table)
+    _persist_state()
+    _record_usage("dynamodb.update_item", {"table_name": table["table_name"]})
+    return items[key]
+
+
+def _ddb_sort_key(table: dict, native_item: dict[str, Any]) -> tuple[str, str]:
+    pk_name, sk_name = _ddb_table_key_fields(table)
+    return (str(native_item.get(pk_name, "")), str(native_item.get(sk_name, "")) if sk_name else "")
+
+
+def _ddb_sorted_records(table: dict) -> list[dict]:
+    records = list((table.get("items") or {}).values())
+    records.sort(key=lambda rec: _ddb_sort_key(table, rec.get("item", {})))
+    return records
+
+
+def _ddb_expr_value(raw: Any) -> Any:
+    return _ddb_json_to_native(raw)
+
+
+def _ddb_query_filter(table: dict, payload: dict[str, Any]) -> tuple[list[dict], int]:
+    records = _ddb_sorted_records(table)
+    if not records:
+        return [], 0
+    pk_name, sk_name = _ddb_table_key_fields(table)
+    pk_value = payload.get("partition_key_value")
+    sk_equals = payload.get("sort_key_equals")
+    sk_begins = str(payload.get("sort_key_begins_with") or "")
+    sk_between = payload.get("sort_key_between") or []
+    expr = str(payload.get("key_condition_expression") or payload.get("KeyConditionExpression") or "").strip()
+    names = payload.get("expression_attribute_names") or payload.get("ExpressionAttributeNames") or {}
+    values = payload.get("expression_attribute_values") or payload.get("ExpressionAttributeValues") or {}
+    if expr:
+        for alias, actual in (names or {}).items():
+            expr = expr.replace(str(alias), str(actual))
+        if pk_value is None:
+            m = re.search(rf"\b{re.escape(pk_name)}\s*=\s*(:\w+)", expr, flags=re.I)
+            if m:
+                pk_value = _ddb_expr_value(values.get(m.group(1)))
+        if sk_name and not sk_equals and not sk_begins and not sk_between:
+            m = re.search(rf"\b{re.escape(sk_name)}\s*=\s*(:\w+)", expr, flags=re.I)
+            if m:
+                sk_equals = _ddb_expr_value(values.get(m.group(1)))
+            m = re.search(rf"begins_with\s*\(\s*{re.escape(sk_name)}\s*,\s*(:\w+)\s*\)", expr, flags=re.I)
+            if m:
+                sk_begins = str(_ddb_expr_value(values.get(m.group(1))) or "")
+            m = re.search(rf"\b{re.escape(sk_name)}\s+BETWEEN\s+(:\w+)\s+AND\s+(:\w+)", expr, flags=re.I)
+            if m:
+                sk_between = [_ddb_expr_value(values.get(m.group(1))), _ddb_expr_value(values.get(m.group(2)))]
+    matched = []
+    for rec in records:
+        item = rec.get("item", {})
+        if pk_value is not None and item.get(pk_name) != pk_value:
+            continue
+        if sk_name:
+            current_sk = item.get(sk_name)
+            if sk_equals is not None and current_sk != sk_equals:
+                continue
+            if sk_begins and not str(current_sk or "").startswith(sk_begins):
+                continue
+            if isinstance(sk_between, list) and len(sk_between) == 2:
+                low, high = sk_between
+                if not (str(low) <= str(current_sk) <= str(high)):
+                    continue
+        matched.append(rec)
+    limit = max(1, min(int(payload.get("limit") or payload.get("Limit") or 100), 1000))
+    return matched[:limit], len(matched)
+
+
+def _ddb_scan_filter(table: dict, payload: dict[str, Any]) -> tuple[list[dict], int]:
+    records = _ddb_sorted_records(table)
+    limit = max(1, min(int(payload.get("limit") or payload.get("Limit") or 100), 1000))
+    return records[:limit], len(records)
+
+
+def _ddb_table_response(table: dict, include_items: bool = True) -> dict:
+    view = _ddb_table_view(table, include_items=include_items, native_items=True)
+    if include_items:
+        view["items"] = [copy.deepcopy(item["item"]) for item in view.get("item_rows", [])]
+    return {"table": view}
+
+
+def _ddb_list_tables_response() -> dict:
+    tables = [_ddb_table_view(table, include_items=False) for _, table in sorted(_ddb_tables().items(), key=lambda kv: kv[0])]
+    return {"table_names": [table["table_name"] for table in tables], "tables": tables, "count": len(tables)}
+
+
+def _ddb_item_rows(table: dict, records: list[dict], native_items: bool = True) -> list[dict]:
+    rows = [_ddb_item_record_view(table, key, record) for key, record in [(key, record) for key, record in ((k, r) for k, r in ((k, v) for k, v in (table.get("items") or {}).items()))]]
+    return rows
+
+
+def _ddb_tag_map(table: dict) -> dict[str, str]:
+    tags = table.setdefault("tags", {})
+    if isinstance(tags, list):
+        tags = {str(tag.get("Key", "")): str(tag.get("Value", "")) for tag in tags if isinstance(tag, dict)}
+        table["tags"] = tags
+    return tags
+
+
+def _ddb_tags_view(table: dict) -> dict[str, str]:
+    return copy.deepcopy(_ddb_tag_map(table))
+
+
+def _ddb_set_tags(table: dict, tags: dict[str, str]) -> None:
+    table["tags"] = {str(k): str(v) for k, v in (tags or {}).items()}
+    table["last_modified"] = _now()
+    _persist_state()
+
+
+def _ddb_json_response(payload: dict[str, Any], status: int = 200) -> Response:
+    return JSONResponse(status_code=status, content=payload, headers={"x-amzn-requestid": _req_id()})
+
+
+def _ddb_error_response(code: str, message: str, status: int = 400) -> Response:
+    return _ddb_json_response({"__type": code, "message": message}, status=status)
+
+
+@app.api_route("/api/dynamodb/aws", methods=["POST"], include_in_schema=False)
+@app.api_route("/dynamodb", methods=["POST"], include_in_schema=False)
+async def api_dynamodb_aws(request: Request):
+    target = request.headers.get("x-amz-target", "")
+    action = target.rsplit(".", 1)[-1] if target else ""
+    if not action:
+        return _ddb_error_response("MissingAction", "The request must include X-Amz-Target.", 400)
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    payload = payload if isinstance(payload, dict) else {}
+
+    def table_name_from_payload() -> str:
+        return str(payload.get("TableName") or payload.get("table_name") or "").strip()
+
+    if action == "ListTables":
+        return _ddb_json_response(_ddb_list_tables_response())
+    if action == "CreateTable":
+        table = _ddb_create_table_record(payload)
+        return _ddb_json_response({"TableDescription": _ddb_table_view(table, include_items=False)})
+    if action == "DescribeTable":
+        table = _ddb_find_table(table_name_from_payload())
+        if not table:
+            return _ddb_error_response("ResourceNotFoundException", f"Table {table_name_from_payload()} not found.", 404)
+        return _ddb_json_response({"Table": _ddb_table_view(table, include_items=True)})
+    if action == "DeleteTable":
+        name = table_name_from_payload()
+        _ddb_delete_table_record(name)
+        return _ddb_json_response({"TableDescription": {"TableName": name, "TableStatus": "DELETED"}})
+    if action == "PutItem":
+        table = _ddb_find_table(table_name_from_payload())
+        if not table:
+            return _ddb_error_response("ResourceNotFoundException", "Table not found.", 404)
+        old = _ddb_put_item_record(table, payload)
+        return _ddb_json_response({"Attributes": _ddb_native_item_to_json(copy.deepcopy(old.get("item", {}))) if old and payload.get("ReturnValues", "NONE").upper() in {"ALL_OLD", "UPDATED_OLD"} else {}})
+    if action == "GetItem":
+        table = _ddb_find_table(table_name_from_payload())
+        if not table:
+            return _ddb_error_response("ResourceNotFoundException", "Table not found.", 404)
+        record = _ddb_get_item_record(table, payload)
+        return _ddb_json_response({"Item": _ddb_native_item_to_json(record.get("item", {}))} if record else {})
+    if action == "DeleteItem":
+        table = _ddb_find_table(table_name_from_payload())
+        if not table:
+            return _ddb_error_response("ResourceNotFoundException", "Table not found.", 404)
+        removed = _ddb_delete_item_record(table, payload)
+        return _ddb_json_response({"Attributes": _ddb_native_item_to_json(removed.get("item", {}))} if removed else {})
+    if action == "UpdateItem":
+        table = _ddb_find_table(table_name_from_payload())
+        if not table:
+            return _ddb_error_response("ResourceNotFoundException", "Table not found.", 404)
+        updated = _ddb_update_item_record(table, payload)
+        return _ddb_json_response({"Attributes": _ddb_native_item_to_json(updated.get("item", {}))})
+    if action == "Query":
+        table = _ddb_find_table(table_name_from_payload())
+        if not table:
+            return _ddb_error_response("ResourceNotFoundException", "Table not found.", 404)
+        matched, scanned = _ddb_query_filter(table, payload)
+        return _ddb_json_response({"Items": [_ddb_native_item_to_json(rec.get("item", {})) for rec in matched], "Count": len(matched), "ScannedCount": scanned})
+    if action == "Scan":
+        table = _ddb_find_table(table_name_from_payload())
+        if not table:
+            return _ddb_error_response("ResourceNotFoundException", "Table not found.", 404)
+        matched, scanned = _ddb_scan_filter(table, payload)
+        return _ddb_json_response({"Items": [_ddb_native_item_to_json(rec.get("item", {})) for rec in matched], "Count": len(matched), "ScannedCount": scanned})
+    if action == "BatchGetItem":
+        responses = {}
+        request_items = payload.get("RequestItems") or {}
+        for tname, req in request_items.items():
+            table = _ddb_find_table(str(tname))
+            if not table:
+                continue
+            keys = req.get("Keys") or []
+            rows = []
+            for key in keys:
+                record = _ddb_get_item_record(table, {"key": key})
+                if record:
+                    rows.append(_ddb_native_item_to_json(record.get("item", {})))
+            responses[tname] = rows
+        return _ddb_json_response({"Responses": responses})
+    if action == "BatchWriteItem":
+        request_items = payload.get("RequestItems") or {}
+        for tname, ops in request_items.items():
+            table = _ddb_find_table(str(tname))
+            if not table:
+                continue
+            for op in ops or []:
+                if "PutRequest" in op:
+                    _ddb_put_item_record(table, {"item": op["PutRequest"].get("Item", {})})
+                elif "DeleteRequest" in op:
+                    _ddb_delete_item_record(table, {"key": op["DeleteRequest"].get("Key", {})})
+        return _ddb_json_response({})
+    if action == "TagResource":
+        table = _ddb_find_table(table_name_from_payload())
+        if not table:
+            return _ddb_error_response("ResourceNotFoundException", "Table not found.", 404)
+        tags = payload.get("Tags") or payload.get("tags") or {}
+        if isinstance(tags, list):
+            tags = {str(tag.get("Key", "")): str(tag.get("Value", "")) for tag in tags if isinstance(tag, dict)}
+        _ddb_set_tags(table, tags if isinstance(tags, dict) else {})
+        return _ddb_json_response({})
+    if action == "UntagResource":
+        table = _ddb_find_table(table_name_from_payload())
+        if not table:
+            return _ddb_error_response("ResourceNotFoundException", "Table not found.", 404)
+        keys = payload.get("TagKeys") or payload.get("tag_keys") or []
+        tags = _ddb_tag_map(table)
+        for key in keys:
+            tags.pop(str(key), None)
+        _ddb_set_tags(table, tags)
+        return _ddb_json_response({})
+    if action == "ListTagsOfResource":
+        table = _ddb_find_table(table_name_from_payload())
+        if not table:
+            return _ddb_error_response("ResourceNotFoundException", "Table not found.", 404)
+        return _ddb_json_response({"Tags": [{"Key": k, "Value": v} for k, v in _ddb_tags_view(table).items()]})
+    return _ddb_error_response("UnknownOperationException", f"The action {action} is not implemented.", 400)
+
+
+@app.get("/api/dynamodb/tables")
+def api_dynamodb_list_tables():
+    return _ddb_list_tables_response()
+
+
+@app.post("/api/dynamodb/tables")
+def api_dynamodb_create_table(req: DynamoDBTableRequest):
+    table = _ddb_create_table_record({
+        "table_name": req.table_name,
+        "partition_key_name": req.partition_key_name,
+        "partition_key_type": req.partition_key_type,
+        "sort_key_name": req.sort_key_name,
+        "sort_key_type": req.sort_key_type,
+        "billing_mode": req.billing_mode,
+        "read_capacity_units": req.read_capacity_units,
+        "write_capacity_units": req.write_capacity_units,
+        "tags": req.tags or {},
+    })
+    return _ddb_table_response(table, include_items=False)
+
+
+@app.get("/api/dynamodb/tables/{table_name}")
+def api_dynamodb_get_table(table_name: str):
+    table = _ddb_find_table(table_name)
+    if not table:
+        raise HTTPException(404, detail="TableNotFound")
+    return _ddb_table_response(table, include_items=True)
+
+
+@app.delete("/api/dynamodb/tables/{table_name}")
+def api_dynamodb_delete_table(table_name: str):
+    _ddb_delete_table_record(table_name)
+    return {"deleted": True, "table_name": table_name}
+
+
+@app.get("/api/dynamodb/tables/{table_name}/items")
+def api_dynamodb_list_items(table_name: str):
+    table = _ddb_find_table(table_name)
+    if not table:
+        raise HTTPException(404, detail="TableNotFound")
+    rows = _ddb_table_view(table, include_items=True)["item_rows"]
+    return {"table_name": table_name, "items": rows, "count": len(rows)}
+
+
+@app.post("/api/dynamodb/tables/{table_name}/items")
+def api_dynamodb_put_item(table_name: str, req: DynamoDBItemRequest):
+    table = _ddb_find_table(table_name)
+    if not table:
+        raise HTTPException(404, detail="TableNotFound")
+    old = _ddb_put_item_record(table, {"item": req.item})
+    native_item = _ddb_item_to_native_item(req.item)
+    key = _ddb_item_key_string(table, native_item)
+    record = table.get("items", {}).get(key, {})
+    return {"table_name": table_name, "item": _ddb_item_record_view(table, key, record), "previous": old.get("item", {}) if old else {}}
+
+
+@app.put("/api/dynamodb/tables/{table_name}/items")
+def api_dynamodb_update_item(table_name: str, req: DynamoDBItemRequest):
+    table = _ddb_find_table(table_name)
+    if not table:
+        raise HTTPException(404, detail="TableNotFound")
+    updated = _ddb_update_item_record(table, {
+        "key": req.key,
+        "attribute_updates": req.attribute_updates or {},
+        "update_expression": req.update_expression,
+        "expression_attribute_values": req.expression_attribute_values or {},
+    })
+    return {"table_name": table_name, "item": updated.get("item", {})}
+
+
+@app.delete("/api/dynamodb/tables/{table_name}/items")
+def api_dynamodb_delete_item(table_name: str, req: DynamoDBItemRequest):
+    table = _ddb_find_table(table_name)
+    if not table:
+        raise HTTPException(404, detail="TableNotFound")
+    removed = _ddb_delete_item_record(table, {"key": req.key})
+    return {"table_name": table_name, "deleted": True, "item": removed.get("item", {})}
+
+
+@app.post("/api/dynamodb/tables/{table_name}/query")
+def api_dynamodb_query_items(table_name: str, req: DynamoDBQueryRequest):
+    table = _ddb_find_table(table_name)
+    if not table:
+        raise HTTPException(404, detail="TableNotFound")
+    payload = {
+        "partition_key_value": req.partition_key_value,
+        "sort_key_equals": req.sort_key_equals,
+        "sort_key_begins_with": req.sort_key_begins_with,
+        "sort_key_between": req.sort_key_between or [],
+        "limit": req.limit,
+        "key_condition_expression": req.key_condition_expression,
+        "expression_attribute_values": req.expression_attribute_values or {},
+        "expression_attribute_names": req.expression_attribute_names or {},
+    }
+    rows, count = _ddb_query_filter(table, payload)
+    return {"table_name": table_name, "items": [_ddb_item_record_view(table, row.get("key", ""), row) for row in rows], "count": len(rows), "scanned_count": count}
+
+
+@app.post("/api/dynamodb/tables/{table_name}/scan")
+def api_dynamodb_scan_items(table_name: str, req: DynamoDBScanRequest):
+    table = _ddb_find_table(table_name)
+    if not table:
+        raise HTTPException(404, detail="TableNotFound")
+    rows, count = _ddb_scan_filter(table, {"limit": req.limit})
+    return {"table_name": table_name, "items": [_ddb_item_record_view(table, row.get("key", ""), row) for row in rows], "count": len(rows), "scanned_count": count}
+
+
+@app.get("/api/dynamodb/tables/{table_name}/tags")
+def api_dynamodb_list_tags(table_name: str):
+    table = _ddb_find_table(table_name)
+    if not table:
+        raise HTTPException(404, detail="TableNotFound")
+    return {"table_name": table_name, "tags": _ddb_tags_view(table)}
+
+
+@app.post("/api/dynamodb/tables/{table_name}/tags")
+def api_dynamodb_tag_table(table_name: str, req: DynamoDBTagRequest):
+    table = _ddb_find_table(table_name)
+    if not table:
+        raise HTTPException(404, detail="TableNotFound")
+    tags = _ddb_tags_view(table)
+    tags.update({str(k): str(v) for k, v in (req.tags or {}).items()})
+    _ddb_set_tags(table, tags)
+    return {"table_name": table_name, "tags": _ddb_tags_view(table)}
+
+
+@app.delete("/api/dynamodb/tables/{table_name}/tags")
+def api_dynamodb_untag_table(table_name: str, payload: dict[str, Any]):
+    table = _ddb_find_table(table_name)
+    if not table:
+        raise HTTPException(404, detail="TableNotFound")
+    tags = _ddb_tags_view(table)
+    for key in payload.get("keys", []) if isinstance(payload, dict) else []:
+        tags.pop(str(key), None)
+    _ddb_set_tags(table, tags)
+    return {"table_name": table_name, "tags": _ddb_tags_view(table)}
 
 
 @app.api_route("/rds", methods=["GET", "POST"], include_in_schema=False)
