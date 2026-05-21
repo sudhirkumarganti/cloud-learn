@@ -7,18 +7,15 @@ class CloudLearn < Formula
 
   def install
     libexec.install "Dockerfile"
-    libexec.install "CLOUDLEARN_DESIGN.md"
-    libexec.install "CLOUDLEARN_FULL_ARCHITECTURE.md"
-    libexec.install "CLOUDLEARN_LLD.md"
-    libexec.install "cloudlearn_platform.py"
+    libexec.install "core"
     libexec.install "cloudsim-backbone"
     libexec.install "docker-compose.yml"
-    libexec.install "generate_cloudlearn_full_architecture_pdf.py"
-    libexec.install "generate_cloudlearn_lld_pdf.py"
     libexec.install "requirements.txt"
     libexec.install "scripts"
     libexec.install "server.py"
+    libexec.install "docs"
     libexec.install "static"
+    libexec.install "tools"
 
     (bin/"cloud-learn").write <<~EOS
       #!/usr/bin/env bash

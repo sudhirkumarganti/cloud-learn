@@ -1,0 +1,448 @@
+from __future__ import annotations
+
+from fastapi import HTTPException, Request
+
+
+def _server():
+    import server as server_module
+
+    return server_module
+
+
+def api_gcp_storage_list_buckets(request: Request):
+    s = _server()
+    project = s._gcp_project_name(request.query_params.get("project"))
+    buckets = []
+    for bucket in s.gcp_storage_state.get("buckets", {}).values():
+        if str(bucket.get("project") or project) != project:
+            continue
+        buckets.append(s._gcp_storage_bucket_view(project, bucket))
+    buckets.sort(key=lambda item: item.get("name", ""))
+    return {"kind": "storage#buckets", "items": buckets, "prefixes": [], "nextPageToken": ""}
+
+
+async def api_gcp_storage_create_bucket(request: Request):
+    s = _server()
+    payload = {}
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    if not isinstance(payload, dict):
+        payload = {}
+    project = s._gcp_project_name(request.query_params.get("project") or payload.get("project") or payload.get("projectId"))
+    name = str(payload.get("name") or payload.get("bucket") or "").strip()
+    if not name:
+        raise HTTPException(400, detail="Bucket name is required")
+    bucket = s._gcp_storage_bucket_record(project, name, payload)
+    s.gcp_storage_state.setdefault("buckets", {})[name] = bucket
+    s.gcp_storage_state.setdefault("objects", {}).setdefault(name, {})
+    return s._gcp_storage_bucket_view(project, bucket)
+
+
+def api_gcp_storage_get_bucket(bucket: str):
+    s = _server()
+    bucket_rec = s.gcp_storage_state.get("buckets", {}).get(bucket)
+    if not bucket_rec:
+        raise HTTPException(404, detail="Bucket not found")
+    project = str(bucket_rec.get("project") or "cloudlearn")
+    return s._gcp_storage_bucket_view(project, bucket_rec)
+
+
+def api_gcp_storage_delete_bucket(bucket: str):
+    s = _server()
+    if bucket not in s.gcp_storage_state.get("buckets", {}):
+        raise HTTPException(404, detail="Bucket not found")
+    s.gcp_storage_state.setdefault("buckets", {}).pop(bucket, None)
+    s.gcp_storage_state.setdefault("objects", {}).pop(bucket, None)
+    return {"kind": "storage#empty", "deleted": True, "bucket": bucket}
+
+
+def api_gcp_storage_list_objects(bucket: str, request: Request):
+    s = _server()
+    bucket_rec = s.gcp_storage_state.get("buckets", {}).get(bucket)
+    if not bucket_rec:
+        raise HTTPException(404, detail="Bucket not found")
+    prefix = str(request.query_params.get("prefix") or "")
+    objects = []
+    for name, obj in s.gcp_storage_state.get("objects", {}).get(bucket, {}).items():
+        if prefix and not name.startswith(prefix):
+            continue
+        objects.append(s._gcp_storage_object_view(str(bucket_rec.get("project") or "cloudlearn"), bucket, name, obj))
+    objects.sort(key=lambda item: item.get("name", ""))
+    return {"kind": "storage#objects", "items": objects, "prefixes": [], "nextPageToken": ""}
+
+
+async def api_gcp_storage_create_object(bucket: str, request: Request):
+    s = _server()
+    bucket_rec = s.gcp_storage_state.get("buckets", {}).get(bucket)
+    if not bucket_rec:
+        raise HTTPException(404, detail="Bucket not found")
+    payload = {}
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    if not isinstance(payload, dict):
+        payload = {}
+    name = str(payload.get("name") or payload.get("object") or "").strip()
+    if not name:
+        raise HTTPException(400, detail="Object name is required")
+    obj = s._gcp_storage_object_record(bucket, name, payload)
+    s.gcp_storage_state.setdefault("objects", {}).setdefault(bucket, {})[name] = obj
+    return s._gcp_storage_object_view(str(bucket_rec.get("project") or "cloudlearn"), bucket, name, obj)
+
+
+def api_gcp_storage_get_object(bucket: str, object_name: str):
+    s = _server()
+    bucket_rec = s.gcp_storage_state.get("buckets", {}).get(bucket)
+    obj = s.gcp_storage_state.get("objects", {}).get(bucket, {}).get(object_name)
+    if not bucket_rec or not obj:
+        raise HTTPException(404, detail="Object not found")
+    return s._gcp_storage_object_view(str(bucket_rec.get("project") or "cloudlearn"), bucket, object_name, obj)
+
+
+def api_gcp_storage_delete_object(bucket: str, object_name: str):
+    s = _server()
+    if bucket not in s.gcp_storage_state.get("objects", {}) or object_name not in s.gcp_storage_state["objects"][bucket]:
+        raise HTTPException(404, detail="Object not found")
+    del s.gcp_storage_state["objects"][bucket][object_name]
+    return {"kind": "storage#empty", "deleted": True, "bucket": bucket, "object": object_name}
+
+
+def api_gcp_sql_list_instances(project: str, request: Request):
+    s = _server()
+    project = s._gcp_project_name(project)
+    instances = []
+    for inst in s.gcp_sql_state.get("instances", {}).values():
+        if str(inst.get("project") or project) != project:
+            continue
+        instances.append(s._gcp_sql_instance_view(project, inst))
+    instances.sort(key=lambda item: item.get("name", ""))
+    return {"kind": "sql#instancesList", "items": instances, "warnings": []}
+
+
+async def api_gcp_sql_create_instance(project: str, request: Request):
+    s = _server()
+    project = s._gcp_project_name(project)
+    payload = {}
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    if not isinstance(payload, dict):
+        payload = {}
+    instance = s._gcp_sql_instance_record(project, payload)
+    if instance["name"] in s.gcp_sql_state.get("instances", {}):
+        raise HTTPException(409, detail="Instance already exists")
+    s.gcp_sql_state.setdefault("instances", {})[instance["name"]] = instance
+    return s._gcp_sql_instance_view(project, instance)
+
+
+def api_gcp_sql_get_instance(project: str, instance: str):
+    s = _server()
+    project = s._gcp_project_name(project)
+    rec = s.gcp_sql_state.get("instances", {}).get(instance)
+    if not rec or str(rec.get("project") or project) != project:
+        raise HTTPException(404, detail="Instance not found")
+    return s._gcp_sql_instance_view(project, rec)
+
+
+def api_gcp_sql_delete_instance(project: str, instance: str):
+    s = _server()
+    project = s._gcp_project_name(project)
+    rec = s.gcp_sql_state.get("instances", {}).get(instance)
+    if not rec or str(rec.get("project") or project) != project:
+        raise HTTPException(404, detail="Instance not found")
+    del s.gcp_sql_state["instances"][instance]
+    return {"kind": "sql#operation", "operationType": "DELETE", "status": "DONE", "targetLink": f"{s._gcp_sql_root()}/projects/{project}/instances/{instance}"}
+
+
+def api_gcp_sql_restart_instance(project: str, instance: str):
+    s = _server()
+    project = s._gcp_project_name(project)
+    rec = s.gcp_sql_state.get("instances", {}).get(instance)
+    if not rec or str(rec.get("project") or project) != project:
+        raise HTTPException(404, detail="Instance not found")
+    rec["state"] = "RUNNABLE"
+    rec["updateTime"] = s._now()
+    return {"kind": "sql#operation", "operationType": "RESTART", "status": "DONE", "targetLink": f"{s._gcp_sql_root()}/projects/{project}/instances/{instance}"}
+
+
+def api_gcp_vpc_list_networks(project: str):
+    s = _server()
+    project = s._gcp_project_name(project)
+    networks = []
+    for network in s.gcp_vpc_state.get("networks", {}).values():
+        if str(network.get("project") or project) != project:
+            continue
+        network_name = str(network.get("name") or "")
+        networks.append(
+            {
+                "kind": "compute#network",
+                "id": str(network.get("id") or s._gcp_compute_numeric_id(f"{project}:{network_name}")),
+                "creationTimestamp": network.get("createTime", s._now()),
+                "name": network_name,
+                "description": network.get("description", ""),
+                "IPv4Range": network.get("IPv4Range", ""),
+                "gatewayIPv4": network.get("gatewayIPv4", ""),
+                "selfLink": f"{s._gcp_compute_network_root()}/projects/{project}/global/networks/{network_name}",
+                "selfLinkWithId": network.get("selfLinkWithId", f"{s._gcp_compute_network_root()}/projects/{project}/global/networks/{network_name}?id={network.get('id') or s._gcp_compute_numeric_id(f'{project}:{network_name}')}"),
+                "autoCreateSubnetworks": bool(network.get("autoCreateSubnetworks", True)),
+                "subnetworks": network.get("subnetworks", []),
+                "peerings": network.get("peerings", []),
+                "routingConfig": {"routingMode": network.get("routingMode", "REGIONAL")},
+            }
+        )
+    return {"kind": "compute#networkList", "items": networks}
+
+
+async def api_gcp_vpc_create_network(project: str, request: Request):
+    s = _server()
+    project = s._gcp_project_name(project)
+    payload = {}
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    if not isinstance(payload, dict):
+        payload = {}
+    name = str(payload.get("name") or payload.get("network") or "").strip()
+    if not name:
+        raise HTTPException(400, detail="Network name is required")
+    rec = {
+        "id": s._gcp_compute_numeric_id(f"{project}:{name}"),
+        "name": name,
+        "project": project,
+        "description": str(payload.get("description") or ""),
+        "IPv4Range": str(payload.get("IPv4Range") or ""),
+        "gatewayIPv4": str(payload.get("gatewayIPv4") or ""),
+        "autoCreateSubnetworks": bool(payload.get("autoCreateSubnetworks", True)),
+        "routingMode": str(payload.get("routingMode") or "REGIONAL"),
+        "subnetworks": payload.get("subnetworks", []) if isinstance(payload.get("subnetworks"), list) else [],
+        "peerings": payload.get("peerings", []) if isinstance(payload.get("peerings"), list) else [],
+        "createTime": s._now(),
+    }
+    s.gcp_vpc_state.setdefault("networks", {})[name] = rec
+    return {
+        "kind": "compute#network",
+        "id": rec["id"],
+        "creationTimestamp": rec["createTime"],
+        "name": name,
+        "description": rec["description"],
+        "IPv4Range": rec["IPv4Range"],
+        "gatewayIPv4": rec["gatewayIPv4"],
+        "selfLink": f"{s._gcp_compute_network_root()}/projects/{project}/global/networks/{name}",
+        "selfLinkWithId": f"{s._gcp_compute_network_root()}/projects/{project}/global/networks/{name}?id={rec['id']}",
+        "autoCreateSubnetworks": rec["autoCreateSubnetworks"],
+        "subnetworks": rec["subnetworks"],
+        "peerings": rec["peerings"],
+        "routingConfig": {"routingMode": rec["routingMode"]},
+    }
+
+
+def api_gcp_vpc_get_network(project: str, network: str):
+    s = _server()
+    project = s._gcp_project_name(project)
+    rec = s.gcp_vpc_state.get("networks", {}).get(network)
+    if not rec or str(rec.get("project") or project) != project:
+        raise HTTPException(404, detail="Network not found")
+    return {
+        "kind": "compute#network",
+        "id": rec.get("id", s._gcp_compute_numeric_id(f"{project}:{network}")),
+        "creationTimestamp": rec.get("createTime", s._now()),
+        "name": rec["name"],
+        "description": rec.get("description", ""),
+        "IPv4Range": rec.get("IPv4Range", ""),
+        "gatewayIPv4": rec.get("gatewayIPv4", ""),
+        "selfLink": f"{s._gcp_compute_network_root()}/projects/{project}/global/networks/{network}",
+        "selfLinkWithId": f"{s._gcp_compute_network_root()}/projects/{project}/global/networks/{network}?id={rec.get('id', s._gcp_compute_numeric_id(f'{project}:{network}'))}",
+        "autoCreateSubnetworks": bool(rec.get("autoCreateSubnetworks", True)),
+        "subnetworks": rec.get("subnetworks", []),
+        "peerings": rec.get("peerings", []),
+        "routingConfig": {"routingMode": rec.get("routingMode", "REGIONAL")},
+    }
+
+
+def api_gcp_vpc_delete_network(project: str, network: str):
+    s = _server()
+    project = s._gcp_project_name(project)
+    rec = s.gcp_vpc_state.get("networks", {}).get(network)
+    if not rec or str(rec.get("project") or project) != project:
+        raise HTTPException(404, detail="Network not found")
+    del s.gcp_vpc_state["networks"][network]
+    return {"done": True}
+
+
+def api_gcp_vpc_list_subnetworks(project: str, region: str):
+    s = _server()
+    project = s._gcp_project_name(project)
+    subnetworks = []
+    for subnet in s.gcp_vpc_state.get("subnetworks", {}).values():
+        if str(subnet.get("project") or project) != project or str(subnet.get("region") or region) != region:
+            continue
+        subnetworks.append(
+            {
+                "kind": "compute#subnetwork",
+                "id": str(subnet.get("id") or s._gcp_compute_numeric_id(f"{project}:{subnet['name']}")),
+                "creationTimestamp": subnet.get("createTime", s._now()),
+                "name": subnet["name"],
+                "description": subnet.get("description", ""),
+                "region": region,
+                "network": f"{s._gcp_compute_network_root()}/projects/{project}/global/networks/{subnet.get('network','default')}",
+                "ipCidrRange": subnet.get("ipCidrRange", "10.0.0.0/24"),
+                "reservedInternalRange": subnet.get("reservedInternalRange", ""),
+                "gatewayAddress": subnet.get("gatewayAddress", ""),
+                "privateIpGoogleAccess": bool(subnet.get("privateIpGoogleAccess", False)),
+                "secondaryIpRanges": subnet.get("secondaryIpRanges", []),
+                "purpose": subnet.get("purpose", ""),
+                "role": subnet.get("role", ""),
+                "stackType": subnet.get("stackType", "IPV4_ONLY"),
+                "state": subnet.get("state", "READY"),
+                "selfLink": f"{s._gcp_compute_network_root()}/projects/{project}/regions/{region}/subnetworks/{subnet['name']}",
+            }
+        )
+    return {"kind": "compute#subnetworkList", "items": subnetworks}
+
+
+async def api_gcp_vpc_create_subnetwork(project: str, region: str, request: Request):
+    s = _server()
+    project = s._gcp_project_name(project)
+    payload = {}
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    if not isinstance(payload, dict):
+        payload = {}
+    name = str(payload.get("name") or "").strip()
+    if not name:
+        raise HTTPException(400, detail="Subnetwork name is required")
+    rec = {
+        "id": s._gcp_compute_numeric_id(f"{project}:{name}"),
+        "name": name,
+        "description": str(payload.get("description") or ""),
+        "project": project,
+        "region": region,
+        "network": str(payload.get("network") or "default").split("/")[-1],
+        "ipCidrRange": str(payload.get("ipCidrRange") or "10.0.0.0/24"),
+        "reservedInternalRange": str(payload.get("reservedInternalRange") or ""),
+        "gatewayAddress": str(payload.get("gatewayAddress") or ""),
+        "privateIpGoogleAccess": bool(payload.get("privateIpGoogleAccess", False)),
+        "secondaryIpRanges": payload.get("secondaryIpRanges", []) if isinstance(payload.get("secondaryIpRanges"), list) else [],
+        "purpose": str(payload.get("purpose") or ""),
+        "role": str(payload.get("role") or ""),
+        "stackType": str(payload.get("stackType") or "IPV4_ONLY"),
+        "state": str(payload.get("state") or "READY"),
+        "createTime": s._now(),
+    }
+    s.gcp_vpc_state.setdefault("subnetworks", {})[name] = rec
+    return {
+        "kind": "compute#subnetwork",
+        "id": rec["id"],
+        "creationTimestamp": rec["createTime"],
+        "name": name,
+        "description": rec["description"],
+        "region": region,
+        "network": f"{s._gcp_compute_network_root()}/projects/{project}/global/networks/{rec['network']}",
+        "ipCidrRange": rec["ipCidrRange"],
+        "reservedInternalRange": rec["reservedInternalRange"],
+        "gatewayAddress": rec["gatewayAddress"],
+        "privateIpGoogleAccess": rec["privateIpGoogleAccess"],
+        "secondaryIpRanges": rec["secondaryIpRanges"],
+        "purpose": rec["purpose"],
+        "role": rec["role"],
+        "stackType": rec["stackType"],
+        "state": rec["state"],
+        "selfLink": f"{s._gcp_compute_network_root()}/projects/{project}/regions/{region}/subnetworks/{name}",
+    }
+
+
+def api_gcp_vpc_list_firewalls(project: str):
+    s = _server()
+    project = s._gcp_project_name(project)
+    firewalls = []
+    for fw in s.gcp_vpc_state.get("firewalls", {}).values():
+        if str(fw.get("project") or project) != project:
+            continue
+        firewalls.append(
+            {
+                "kind": "compute#firewall",
+                "id": str(fw.get("id") or s._gcp_compute_numeric_id(f"{project}:{fw['name']}")),
+                "creationTimestamp": fw.get("createTime", s._now()),
+                "name": fw["name"],
+                "description": fw.get("description", ""),
+                "network": f"{s._gcp_compute_network_root()}/projects/{project}/global/networks/{fw.get('network','default')}",
+                "priority": int(fw.get("priority") or 1000),
+                "direction": fw.get("direction", "INGRESS"),
+                "allowed": fw.get("allowed", [{"IPProtocol": "tcp", "ports": ["22"]}]),
+                "denied": fw.get("denied", []),
+                "sourceRanges": fw.get("sourceRanges", ["0.0.0.0/0"]),
+                "destinationRanges": fw.get("destinationRanges", []),
+                "sourceTags": fw.get("sourceTags", []),
+                "targetTags": fw.get("targetTags", []),
+                "sourceServiceAccounts": fw.get("sourceServiceAccounts", []),
+                "targetServiceAccounts": fw.get("targetServiceAccounts", []),
+                "disabled": bool(fw.get("disabled", False)),
+                "logConfig": fw.get("logConfig", {}),
+                "selfLink": f"{s._gcp_compute_network_root()}/projects/{project}/global/firewalls/{fw['name']}",
+            }
+        )
+    return {"kind": "compute#firewallList", "items": firewalls}
+
+
+async def api_gcp_vpc_create_firewall(project: str, request: Request):
+    s = _server()
+    project = s._gcp_project_name(project)
+    payload = {}
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    if not isinstance(payload, dict):
+        payload = {}
+    name = str(payload.get("name") or "").strip()
+    if not name:
+        raise HTTPException(400, detail="Firewall name is required")
+    rec = {
+        "id": s._gcp_compute_numeric_id(f"{project}:{name}"),
+        "name": name,
+        "description": str(payload.get("description") or ""),
+        "project": project,
+        "network": str(payload.get("network") or "default").split("/")[-1],
+        "priority": int(payload.get("priority") or 1000),
+        "direction": str(payload.get("direction") or "INGRESS"),
+        "allowed": payload.get("allowed") if isinstance(payload.get("allowed"), list) else [{"IPProtocol": "tcp", "ports": ["22"]}],
+        "denied": payload.get("denied") if isinstance(payload.get("denied"), list) else [],
+        "sourceRanges": payload.get("sourceRanges") if isinstance(payload.get("sourceRanges"), list) else ["0.0.0.0/0"],
+        "destinationRanges": payload.get("destinationRanges") if isinstance(payload.get("destinationRanges"), list) else [],
+        "sourceTags": payload.get("sourceTags") if isinstance(payload.get("sourceTags"), list) else [],
+        "targetTags": payload.get("targetTags") if isinstance(payload.get("targetTags"), list) else [],
+        "sourceServiceAccounts": payload.get("sourceServiceAccounts") if isinstance(payload.get("sourceServiceAccounts"), list) else [],
+        "targetServiceAccounts": payload.get("targetServiceAccounts") if isinstance(payload.get("targetServiceAccounts"), list) else [],
+        "disabled": bool(payload.get("disabled", False)),
+        "logConfig": payload.get("logConfig") if isinstance(payload.get("logConfig"), dict) else {},
+        "createTime": s._now(),
+    }
+    s.gcp_vpc_state.setdefault("firewalls", {})[name] = rec
+    return {
+        "kind": "compute#firewall",
+        "id": rec["id"],
+        "creationTimestamp": rec["createTime"],
+        "name": name,
+        "description": rec["description"],
+        "network": f"{s._gcp_compute_network_root()}/projects/{project}/global/networks/{rec['network']}",
+        "priority": rec["priority"],
+        "direction": rec["direction"],
+        "allowed": rec["allowed"],
+        "denied": rec["denied"],
+        "sourceRanges": rec["sourceRanges"],
+        "destinationRanges": rec["destinationRanges"],
+        "sourceTags": rec["sourceTags"],
+        "targetTags": rec["targetTags"],
+        "sourceServiceAccounts": rec["sourceServiceAccounts"],
+        "targetServiceAccounts": rec["targetServiceAccounts"],
+        "disabled": rec["disabled"],
+        "logConfig": rec["logConfig"],
+        "selfLink": f"{s._gcp_compute_network_root()}/projects/{project}/global/firewalls/{name}",
+    }

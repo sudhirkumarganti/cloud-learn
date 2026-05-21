@@ -69,11 +69,11 @@ start_runtime_bridge() {
     printf '%s\n' 'python3 is required to start the local runtime bridge' >&2
     return 1
   fi
-  if [ ! -f "${ROOT_DIR}/runtime_bridge.py" ]; then
-    printf '%s\n' "runtime bridge script not found: ${ROOT_DIR}/runtime_bridge.py" >&2
+  if [ ! -f "${ROOT_DIR}/core/runtime_bridge.py" ]; then
+    printf '%s\n' "runtime bridge script not found: ${ROOT_DIR}/core/runtime_bridge.py" >&2
     return 1
   fi
-  nohup python3 "${ROOT_DIR}/runtime_bridge.py" --host "${RUNTIME_BRIDGE_HOST}" --port "${RUNTIME_BRIDGE_PORT}" >/tmp/cloudlearn-runtime-bridge.log 2>&1 &
+  nohup python3 "${ROOT_DIR}/core/runtime_bridge.py" --host "${RUNTIME_BRIDGE_HOST}" --port "${RUNTIME_BRIDGE_PORT}" >/tmp/cloudlearn-runtime-bridge.log 2>&1 &
   local waited=0
   while [ "$waited" -lt 20 ]; do
     if runtime_bridge_health; then

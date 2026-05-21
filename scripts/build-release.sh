@@ -38,20 +38,16 @@ copy_item() {
 }
 
 copy_item "Dockerfile"
-copy_item "CLOUDLEARN_DESIGN.md"
-copy_item "CLOUDLEARN_FULL_ARCHITECTURE.md"
-copy_item "CLOUDLEARN_LLD.md"
-copy_item "INSTALL.md"
 copy_item "VERSION"
-copy_item "cloudlearn_platform.py"
+copy_item "core"
 copy_item "cloudsim-backbone"
 copy_item "docker-compose.yml"
-copy_item "generate_cloudlearn_full_architecture_pdf.py"
-copy_item "generate_cloudlearn_lld_pdf.py"
 copy_item "requirements.txt"
 copy_item "scripts"
 copy_item "server.py"
+copy_item "docs"
 copy_item "static"
+copy_item "tools"
 copy_item "packaging"
 
 TARBALL="${DIST_DIR}/${RELEASE_NAME}-${VERSION}.tar.gz"

@@ -9,14 +9,17 @@ def build_pack(
     version: str,
     provider: str,
     api: dict[str, Any],
+    *,
+    core_provider_neutral: bool = False,
 ) -> dict[str, Any]:
     return {
         "id": pack_id,
         "type": pack_type,
         "version": version,
         "provider": provider,
-        "coreProviderNeutral": True,
+        "coreProviderNeutral": core_provider_neutral,
         "state": "available",
         "active": False,
         "api": api,
+        "surfaceProvider": provider if provider != "agnostic" else "other",
     }

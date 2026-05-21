@@ -56,12 +56,31 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.routing import APIRouter
 from pydantic import BaseModel
 
-from cloudlearn_platform import CloudLearnPlatform
-from pack_catalog import default_packs as load_default_packs
-from pack_catalog import fragment_for_pack
-from provider_registry import list_providers, normalize_provider as normalize_provider_key
+from core.cloudlearn_platform import CloudLearnPlatform
+from core.pack_catalog import default_packs as load_default_packs
+from core.pack_catalog import fragment_for_pack
+from core.pack_catalog import PROVIDER_PACK_GROUPS
+from core.pack_catalog import packs_for_provider
+from core.provider_registry import get_provider, list_providers, normalize_provider as normalize_provider_key, provider_matrix
+from providers.aws import tool_response as aws_tool_response
+from providers import aws_iam as provider_aws_iam
+from providers.aws_routes import register as register_aws_routes
+from providers.aws_ec2_routes import register as register_aws_ec2_routes
+from providers.capabilities import provider_capabilities, provider_services
+from providers.gcp import tool_response as gcp_tool_response
+from providers.gcp_compute_routes import register as register_gcp_compute_routes
+from providers.gcp_routes import gcloud_resolve as gcp_gcloud_resolve
+from providers.gcp_routes import gcutil_resolve as gcp_gcutil_resolve
+from providers.gcp_routes import sdk_go_snippet as gcp_sdk_go_snippet
+from providers.gcp_routes import sdk_java_snippet as gcp_sdk_java_snippet
+from providers.gcp_routes import register as register_gcp_routes
+from core.tooling_simulators import aws_cli_resolve, sdk_snippet
 
 app = FastAPI(title="CloudLearn S3 Simulator", version="2.0.0")
+register_aws_ec2_routes(app, None)
+register_gcp_compute_routes(app, None)
+register_aws_routes(app, None)
+register_gcp_routes(app, None)
 REQUEST_PROVIDER: ContextVar[str] = ContextVar("cloudlearn_request_provider", default="aws")
 
 
@@ -961,7 +980,15 @@ def _default_state() -> dict:
             "events": [],
         },
         "runtime": {
-            "bundles": {"python": {"id": "cloudlearn.runtime.python", "installed": True, "active": False}},
+            "bundles": {
+                "python": {"id": "cloudlearn.runtime.python", "name": "Python Runtime", "kind": "language", "provider": "shared", "service": "python", "installed": True, "active": False},
+                "ec2": {"id": "cloudlearn.runtime.ec2", "name": "EC2 Runtime Bundle", "kind": "vm", "provider": "aws", "service": "ec2", "installed": True, "active": False},
+                "gcp_compute": {"id": "cloudlearn.runtime.gcp.compute", "name": "Compute Engine Runtime Bundle", "kind": "vm", "provider": "gcp", "service": "compute", "installed": True, "active": False},
+                "lambda": {"id": "cloudlearn.runtime.lambda", "name": "Lambda Runtime Bundle", "kind": "function", "provider": "aws", "service": "lambda", "installed": True, "active": False},
+                "gcp_functions": {"id": "cloudlearn.runtime.gcp.functions", "name": "Cloud Functions Runtime Bundle", "kind": "function", "provider": "gcp", "service": "functions", "installed": True, "active": False},
+                "rds": {"id": "cloudlearn.runtime.rds", "name": "RDS Runtime Bundle", "kind": "database", "provider": "aws", "service": "rds", "installed": True, "active": False},
+                "gcp_sql": {"id": "cloudlearn.runtime.gcp.sql", "name": "Cloud SQL Runtime Bundle", "kind": "database", "provider": "gcp", "service": "sql", "installed": True, "active": False},
+            },
             "lxd": {"status": "missing", "message": "", "mode": "auto", "last_checked": ""},
             "multipass": {"status": "missing", "message": "", "mode": "auto", "last_checked": ""},
         },
@@ -1031,7 +1058,20 @@ def _migrate_state(state: dict) -> dict:
         console_state = inst.get("console_state")
         if not isinstance(console_state, dict):
             inst["console_state"] = {"cwd": str((INSTANCE_WORK_ROOT / instance_id).resolve())}
-    runtime = state.setdefault("runtime", {"bundles": {"python": {"id": "cloudlearn.runtime.python", "installed": True, "active": False}}})
+    runtime = state.setdefault(
+        "runtime",
+        {
+            "bundles": {
+                "python": {"id": "cloudlearn.runtime.python", "name": "Python Runtime", "kind": "language", "provider": "shared", "service": "python", "installed": True, "active": False},
+                "ec2": {"id": "cloudlearn.runtime.ec2", "name": "EC2 Runtime Bundle", "kind": "vm", "provider": "aws", "service": "ec2", "installed": True, "active": False},
+                "gcp_compute": {"id": "cloudlearn.runtime.gcp.compute", "name": "Compute Engine Runtime Bundle", "kind": "vm", "provider": "gcp", "service": "compute", "installed": True, "active": False},
+                "lambda": {"id": "cloudlearn.runtime.lambda", "name": "Lambda Runtime Bundle", "kind": "function", "provider": "aws", "service": "lambda", "installed": True, "active": False},
+                "gcp_functions": {"id": "cloudlearn.runtime.gcp.functions", "name": "Cloud Functions Runtime Bundle", "kind": "function", "provider": "gcp", "service": "functions", "installed": True, "active": False},
+                "rds": {"id": "cloudlearn.runtime.rds", "name": "RDS Runtime Bundle", "kind": "database", "provider": "aws", "service": "rds", "installed": True, "active": False},
+                "gcp_sql": {"id": "cloudlearn.runtime.gcp.sql", "name": "Cloud SQL Runtime Bundle", "kind": "database", "provider": "gcp", "service": "sql", "installed": True, "active": False},
+            }
+        },
+    )
     runtime.setdefault("lxd", {"status": "missing", "message": "", "mode": "auto", "last_checked": ""})
     runtime.setdefault("multipass", {"status": "missing", "message": "", "mode": "auto", "last_checked": ""})
     federations = state.setdefault("federations", {"federations": {}, "links": {}, "tests": []})
@@ -1188,7 +1228,372 @@ def _persist_state() -> None:
 
 
 def _record_usage(event: str, detail: dict | None = None) -> None:
-    PLATFORM.record_event(event, detail or {})
+    payload = copy.deepcopy(detail or {})
+    PLATFORM.record_event(event, payload)
+    try:
+        _cloudsim_refresh_bridge(event, payload)
+    except Exception:
+        pass
+
+
+def _cloudsim_active_space_ref() -> dict | None:
+    spaces_state = _spaces_state()
+    active_id = spaces_state.get("active_space_id", "")
+    space = spaces_state.get("spaces", {}).get(active_id) if active_id else None
+    return space if isinstance(space, dict) else None
+
+
+def _cloudsim_runtime_bundle_catalog() -> dict[str, dict]:
+    bundles = runtime_state.setdefault("bundles", {})
+    defaults = {
+        "python": {"id": "cloudlearn.runtime.python", "name": "Python Runtime", "kind": "language", "provider": "shared", "service": "python", "installed": True, "active": False},
+        "ec2": {"id": "cloudlearn.runtime.ec2", "name": "EC2 Runtime Bundle", "kind": "vm", "provider": "aws", "service": "ec2", "installed": True, "active": False},
+        "gcp_compute": {"id": "cloudlearn.runtime.gcp.compute", "name": "Compute Engine Runtime Bundle", "kind": "vm", "provider": "gcp", "service": "compute", "installed": True, "active": False},
+        "lambda": {"id": "cloudlearn.runtime.lambda", "name": "Lambda Runtime Bundle", "kind": "function", "provider": "aws", "service": "lambda", "installed": True, "active": False},
+        "gcp_functions": {"id": "cloudlearn.runtime.gcp.functions", "name": "Cloud Functions Runtime Bundle", "kind": "function", "provider": "gcp", "service": "functions", "installed": True, "active": False},
+        "rds": {"id": "cloudlearn.runtime.rds", "name": "RDS Runtime Bundle", "kind": "database", "provider": "aws", "service": "rds", "installed": True, "active": False},
+        "gcp_sql": {"id": "cloudlearn.runtime.gcp.sql", "name": "Cloud SQL Runtime Bundle", "kind": "database", "provider": "gcp", "service": "sql", "installed": True, "active": False},
+    }
+    for key, bundle in defaults.items():
+        bundles.setdefault(key, copy.deepcopy(bundle))
+    return bundles
+
+
+def _cloudsim_runtime_bundle(bundle_key: str | None) -> dict:
+    bundles = _cloudsim_runtime_bundle_catalog()
+    key = (bundle_key or "python").strip().lower()
+    bundle = bundles.get(key) or bundles.get("python") or {"id": "cloudlearn.runtime.python", "name": "Python Runtime", "kind": "language", "provider": "shared", "service": "python", "installed": True, "active": False}
+    return copy.deepcopy(bundle)
+
+
+def _cloudsim_service_state(space: dict | None, *keys: str) -> dict:
+    if not isinstance(space, dict):
+        return {}
+    service_states = space.setdefault("service_states", {})
+    if not isinstance(service_states, dict):
+        space["service_states"] = {}
+        service_states = space["service_states"]
+    for key in keys:
+        if key in service_states and isinstance(service_states[key], dict):
+            return service_states[key]
+    for key in keys:
+        prefixed = f"gcp_{key}"
+        if prefixed in service_states and isinstance(service_states[prefixed], dict):
+            return service_states[prefixed]
+    return service_states.setdefault(keys[0], {})
+
+
+def _cloudsim_resource_id(resource: dict, *candidates: str) -> str:
+    if not isinstance(resource, dict):
+        return ""
+    for key in ("resource_id", "id", *candidates):
+        value = resource.get(key)
+        if value is not None and str(value).strip():
+            return str(value)
+    if resource.get("name") is not None and str(resource.get("name")).strip():
+        return str(resource.get("name"))
+    return ""
+
+
+def _cloudsim_resource_location(resource: dict) -> str:
+    if not isinstance(resource, dict):
+        return ""
+    for key in ("region", "zone", "location", "az", "availability_zone"):
+        value = resource.get(key)
+        if value is not None and str(value).strip():
+            return str(value)
+    return ""
+
+
+def _cloudsim_resource_state(resource: dict) -> str:
+    if not isinstance(resource, dict):
+        return ""
+    for key in ("state", "status", "db_instance_status", "launch_status", "container_status"):
+        value = resource.get(key)
+        if value is not None and str(value).strip():
+            return str(value)
+    return ""
+
+
+def _cloudsim_add_runtime_instance(runtime_instances: dict, resource_id: str, provider: str, service: str, bundle_key: str, resource: dict) -> None:
+    bundle = _cloudsim_runtime_bundle(bundle_key)
+    runtime_instances[resource_id] = {
+        "resource_id": resource_id,
+        "provider": provider,
+        "service": service,
+        "bundle_id": bundle.get("id", ""),
+        "bundle_name": bundle.get("name", ""),
+        "bundle_kind": bundle.get("kind", ""),
+        "bundle_provider": bundle.get("provider", ""),
+        "bundle_service": bundle.get("service", ""),
+        "name": str(resource.get("name") or resource_id),
+        "location": _cloudsim_resource_location(resource),
+        "state": _cloudsim_resource_state(resource),
+        "updated_at": resource.get("updated") or resource.get("updatedAt") or resource.get("updateTime") or resource.get("created") or resource.get("createTime") or _now(),
+    }
+
+
+def _cloudsim_collect_resources(space: dict | None) -> tuple[list[dict], dict[str, int], dict[str, dict]]:
+    if not isinstance(space, dict):
+        return [], {}, {}
+    service_states = space.setdefault("service_states", {})
+    if not isinstance(service_states, dict):
+        service_states = {}
+    nodes: list[dict] = []
+    counts: dict[str, int] = {}
+    runtime_instances: dict[str, dict] = {}
+
+    def add(provider: str, service: str, kind: str, resource_id: str, resource: dict, bundle_key: str | None = None) -> None:
+        if not resource_id:
+            return
+        bundle = _cloudsim_runtime_bundle(bundle_key) if bundle_key else None
+        node = {
+            "provider": provider,
+            "service": service,
+            "kind": kind,
+            "resource_id": resource_id,
+            "name": str(resource.get("name") or resource.get("bucket") or resource.get("queue_name") or resource.get("table_name") or resource.get("db_instance_identifier") or resource.get("function_name") or resource.get("api_id") or resource.get("topicId") or resource.get("subscriptionId") or resource_id),
+            "location": _cloudsim_resource_location(resource),
+            "state": _cloudsim_resource_state(resource),
+            "updated_at": resource.get("updated") or resource.get("updatedAt") or resource.get("updateTime") or resource.get("created") or resource.get("createTime") or _now(),
+        }
+        if bundle:
+            node.update({
+                "runtime_bundle_id": bundle.get("id", ""),
+                "runtime_bundle_name": bundle.get("name", ""),
+                "runtime_bundle_kind": bundle.get("kind", ""),
+                "runtime_bundle_provider": bundle.get("provider", ""),
+                "runtime_bundle_service": bundle.get("service", ""),
+            })
+            _cloudsim_add_runtime_instance(runtime_instances, resource_id, provider, service, bundle_key or "", resource)
+        nodes.append(node)
+        counts[f"{provider}.{service}.{kind}"] = counts.get(f"{provider}.{service}.{kind}", 0) + 1
+
+    aws_ec2 = _cloudsim_service_state(space, "ec2")
+    for instance_id, instance in aws_ec2.get("instances", {}).items():
+        if isinstance(instance, dict):
+            add("aws", "ec2", "instance", instance_id, instance, "ec2")
+
+    aws_s3 = _cloudsim_service_state(space, "s3")
+    for bucket_name, bucket in aws_s3.get("buckets", {}).items():
+        if isinstance(bucket, dict):
+            add("aws", "s3", "bucket", bucket_name, bucket)
+
+    aws_vpc = _cloudsim_service_state(space, "vpc")
+    for vpc_id, vpc in aws_vpc.get("vpcs", {}).items():
+        if isinstance(vpc, dict):
+            add("aws", "vpc", "vpc", vpc_id, vpc)
+    for subnet_id, subnet in aws_vpc.get("subnets", {}).items():
+        if isinstance(subnet, dict):
+            add("aws", "vpc", "subnet", subnet_id, subnet)
+    for sg_id, sg in aws_vpc.get("security_groups", {}).items():
+        if isinstance(sg, dict):
+            add("aws", "vpc", "security_group", sg_id, sg)
+    for rt_id, rt in aws_vpc.get("route_tables", {}).items():
+        if isinstance(rt, dict):
+            add("aws", "vpc", "route_table", rt_id, rt)
+    for igw_id, igw in aws_vpc.get("internet_gateways", {}).items():
+        if isinstance(igw, dict):
+            add("aws", "vpc", "internet_gateway", igw_id, igw)
+
+    aws_rds = _cloudsim_service_state(space, "rds")
+    for db_id, db in aws_rds.get("db_instances", {}).items():
+        if isinstance(db, dict):
+            add("aws", "rds", "db_instance", db_id, db, "rds")
+    for group_id, group in aws_rds.get("db_subnet_groups", {}).items():
+        if isinstance(group, dict):
+            add("aws", "rds", "subnet_group", group_id, group, "rds")
+    for group_id, group in aws_rds.get("db_parameter_groups", {}).items():
+        if isinstance(group, dict):
+            add("aws", "rds", "parameter_group", group_id, group, "rds")
+    for snapshot_id, snapshot in aws_rds.get("db_snapshots", {}).items():
+        if isinstance(snapshot, dict):
+            add("aws", "rds", "snapshot", snapshot_id, snapshot, "rds")
+
+    aws_apigw = _cloudsim_service_state(space, "apigateway")
+    for api_id, api in aws_apigw.get("apis", {}).items():
+        if isinstance(api, dict):
+            add("aws", "apigateway", "api", api_id, api)
+
+    aws_lambda = _cloudsim_service_state(space, "lambda")
+    for fn_name, fn in aws_lambda.get("functions", {}).items():
+        if isinstance(fn, dict):
+            add("aws", "lambda", "function", fn_name, fn, "lambda")
+
+    aws_sqs = _cloudsim_service_state(space, "sqs")
+    for queue_name, queue in aws_sqs.get("queues", {}).items():
+        if isinstance(queue, dict):
+            add("aws", "sqs", "queue", queue_name, queue)
+
+    aws_ddb = _cloudsim_service_state(space, "dynamodb")
+    for table_name, table in aws_ddb.get("tables", {}).items():
+        if isinstance(table, dict):
+            add("aws", "dynamodb", "table", table_name, table)
+
+    gcp_compute = _cloudsim_service_state(space, "gcp_compute")
+    for instance_id, instance in gcp_compute.get("instances", {}).items():
+        if isinstance(instance, dict):
+            add("gcp", "compute", "instance", instance_id, instance, "gcp_compute")
+
+    gcp_storage = _cloudsim_service_state(space, "gcp_storage")
+    for bucket_name, bucket in gcp_storage.get("buckets", {}).items():
+        if isinstance(bucket, dict):
+            add("gcp", "storage", "bucket", bucket_name, bucket)
+
+    gcp_sql = _cloudsim_service_state(space, "gcp_sql")
+    for instance_id, instance in gcp_sql.get("instances", {}).items():
+        if isinstance(instance, dict):
+            add("gcp", "sql", "instance", instance_id, instance, "gcp_sql")
+
+    gcp_pubsub = _cloudsim_service_state(space, "gcp_pubsub")
+    for topic_id, topic in gcp_pubsub.get("topics", {}).items():
+        if isinstance(topic, dict):
+            add("gcp", "pubsub", "topic", topic_id, topic)
+    for subscription_id, sub in gcp_pubsub.get("subscriptions", {}).items():
+        if isinstance(sub, dict):
+            add("gcp", "pubsub", "subscription", subscription_id, sub)
+
+    gcp_firestore = _cloudsim_service_state(space, "gcp_firestore")
+    for db_id, db in gcp_firestore.get("databases", {}).items():
+        if isinstance(db, dict):
+            add("gcp", "firestore", "database", db_id, db)
+
+    gcp_functions = _cloudsim_service_state(space, "gcp_functions")
+    for fn_name, fn in gcp_functions.get("functions", {}).items():
+        if isinstance(fn, dict):
+            add("gcp", "functions", "function", fn_name, fn, "gcp_functions")
+
+    gcp_apigw = _cloudsim_service_state(space, "gcp_apigateway")
+    for api_id, api in gcp_apigw.get("apis", {}).items():
+        if isinstance(api, dict):
+            add("gcp", "apigateway", "api", api_id, api)
+    for cfg_id, cfg in gcp_apigw.get("api_configs", {}).items():
+        if isinstance(cfg, dict):
+            add("gcp", "apigateway", "api_config", cfg_id, cfg)
+    for gw_id, gw in gcp_apigw.get("gateways", {}).items():
+        if isinstance(gw, dict):
+            add("gcp", "apigateway", "gateway", gw_id, gw)
+
+    gcp_vpc = _cloudsim_service_state(space, "gcp_vpc")
+    for network_id, network in gcp_vpc.get("networks", {}).items():
+        if isinstance(network, dict):
+            add("gcp", "vpc", "network", network_id, network)
+    for subnet_id, subnet in gcp_vpc.get("subnetworks", {}).items():
+        if isinstance(subnet, dict):
+            add("gcp", "vpc", "subnetwork", subnet_id, subnet)
+    for firewall_id, firewall in gcp_vpc.get("firewalls", {}).items():
+        if isinstance(firewall, dict):
+            add("gcp", "vpc", "firewall", firewall_id, firewall)
+    for route_id, route in gcp_vpc.get("routes", {}).items():
+        if isinstance(route, dict):
+            add("gcp", "vpc", "route", route_id, route)
+
+    gcp_iam = _cloudsim_service_state(space, "gcp_iam")
+    for account_id, account in gcp_iam.get("service_accounts", {}).items():
+        if isinstance(account, dict):
+            add("gcp", "iam", "service_account", account_id, account)
+    for policy_id, policy in gcp_iam.get("policies", {}).items():
+        if isinstance(policy, dict):
+            add("gcp", "iam", "policy", policy_id, policy)
+
+    return nodes, counts, runtime_instances
+
+
+def _cloudsim_refresh_bridge(reason: str, detail: dict | None = None) -> None:
+    with STATE_LOCK:
+        now = _now()
+        spaces_state = _spaces_state()
+        active_id = spaces_state.get("active_space_id", "")
+        active_space = spaces_state.get("spaces", {}).get(active_id) if active_id else None
+        source_space = active_space if isinstance(active_space, dict) else {"service_states": STATE, "runtime": STATE.get("runtime", {})}
+        nodes: list[dict] = []
+        counts: dict[str, int] = {}
+        runtime_instances: dict[str, dict] = {}
+        nodes, counts, runtime_instances = _cloudsim_collect_resources(source_space)
+        if isinstance(active_space, dict):
+            runtime_state_ref = active_space.setdefault("runtime", {"mode": "sandboxed", "instances": {}, "sandbox_count": 0})
+            runtime_state_ref["instances"] = copy.deepcopy(runtime_instances)
+            runtime_state_ref["sandbox_count"] = len(runtime_instances)
+            active_cloudsim = active_space.setdefault("cloudsim", {"summary": {}, "events": [], "last_tick": ""})
+            active_cloudsim["last_tick"] = now
+            active_cloudsim["summary"] = {
+                "space_id": active_space.get("space_id", ""),
+                "space_name": active_space.get("name", ""),
+                "provider": active_space.get("provider", "aws"),
+                "status": active_space.get("status", "running"),
+                "active_region": active_space.get("active_region", "us-east-1"),
+                "spaces": len(spaces_state.get("spaces", {})),
+                "active_space_id": active_id,
+                "active_space_name": active_space.get("name", ""),
+                "resource_count": len(nodes),
+                "runtime_count": int(active_space.get("runtime_count", 0)),
+                "ec2_count": len(_cloudsim_service_state(source_space, "ec2").get("instances", {})),
+                "lambda_count": len(_cloudsim_service_state(source_space, "lambda").get("functions", {})),
+                "rds_count": len(_cloudsim_service_state(source_space, "rds").get("db_instances", {})),
+                "sqs_count": len(_cloudsim_service_state(source_space, "sqs").get("queues", {})),
+                "dynamodb_count": len(_cloudsim_service_state(source_space, "dynamodb").get("tables", {})),
+                "gcp_compute_count": len(_cloudsim_service_state(source_space, "gcp_compute").get("instances", {})),
+                "gcp_storage_bucket_count": len(_cloudsim_service_state(source_space, "gcp_storage").get("buckets", {})),
+                "gcp_sql_count": len(_cloudsim_service_state(source_space, "gcp_sql").get("instances", {})),
+                "gcp_pubsub_topic_count": len(_cloudsim_service_state(source_space, "gcp_pubsub").get("topics", {})),
+                "gcp_pubsub_subscription_count": len(_cloudsim_service_state(source_space, "gcp_pubsub").get("subscriptions", {})),
+                "gcp_functions_count": len(_cloudsim_service_state(source_space, "gcp_functions").get("functions", {})),
+                "gcp_apigateway_count": len(_cloudsim_service_state(source_space, "gcp_apigateway").get("apis", {})),
+                "gcp_vpc_count": len(_cloudsim_service_state(source_space, "gcp_vpc").get("networks", {})),
+                "gcp_iam_count": len(_cloudsim_service_state(source_space, "gcp_iam").get("service_accounts", {})),
+                "s3_bucket_count": len(_cloudsim_service_state(source_space, "s3").get("buckets", {})),
+                "vpc_count": len(_cloudsim_service_state(source_space, "vpc").get("vpcs", {})),
+                "apigateway_count": len(_cloudsim_service_state(source_space, "apigateway").get("apis", {})),
+                "resource_counts": copy.deepcopy(counts),
+                "last_tick": now,
+                "last_action": reason,
+                "last_action_detail": copy.deepcopy(detail or {}),
+                "bundle_count": len(runtime_state.setdefault("bundles", {})),
+                "sandbox_count": len(runtime_instances),
+                "event_count": len(active_cloudsim.get("events", [])),
+            }
+            active_space["resources"] = {"nodes": copy.deepcopy(nodes), "count": len(nodes), "updated_at": now, "reason": reason}
+        cloudsim = STATE.setdefault("cloudsim", {"summary": {}, "events": [], "last_reconcile_at": ""})
+        summary = cloudsim.setdefault("summary", {})
+        summary.update(
+            {
+                "spaces": len(spaces_state.get("spaces", {})),
+                "active_space_id": active_id,
+                "active_space_name": active_space.get("name", "") if isinstance(active_space, dict) else "",
+                "resource_count": len(nodes),
+                "runtime_count": int(source_space.get("runtime_count", 0)) if isinstance(source_space, dict) else 0,
+                "ec2_count": len(_cloudsim_service_state(source_space, "ec2").get("instances", {})) if isinstance(source_space, dict) else 0,
+                "lambda_count": len(_cloudsim_service_state(source_space, "lambda").get("functions", {})) if isinstance(source_space, dict) else 0,
+                "rds_count": len(_cloudsim_service_state(source_space, "rds").get("db_instances", {})) if isinstance(source_space, dict) else 0,
+                "sqs_count": len(_cloudsim_service_state(source_space, "sqs").get("queues", {})) if isinstance(source_space, dict) else 0,
+                "dynamodb_count": len(_cloudsim_service_state(source_space, "dynamodb").get("tables", {})) if isinstance(source_space, dict) else 0,
+                "gcp_compute_count": len(_cloudsim_service_state(source_space, "gcp_compute").get("instances", {})) if isinstance(source_space, dict) else 0,
+                "gcp_storage_bucket_count": len(_cloudsim_service_state(source_space, "gcp_storage").get("buckets", {})) if isinstance(source_space, dict) else 0,
+                "gcp_sql_count": len(_cloudsim_service_state(source_space, "gcp_sql").get("instances", {})) if isinstance(source_space, dict) else 0,
+                "gcp_pubsub_topic_count": len(_cloudsim_service_state(source_space, "gcp_pubsub").get("topics", {})) if isinstance(source_space, dict) else 0,
+                "gcp_pubsub_subscription_count": len(_cloudsim_service_state(source_space, "gcp_pubsub").get("subscriptions", {})) if isinstance(source_space, dict) else 0,
+                "gcp_functions_count": len(_cloudsim_service_state(source_space, "gcp_functions").get("functions", {})) if isinstance(source_space, dict) else 0,
+                "gcp_apigateway_count": len(_cloudsim_service_state(source_space, "gcp_apigateway").get("apis", {})) if isinstance(source_space, dict) else 0,
+                "gcp_vpc_count": len(_cloudsim_service_state(source_space, "gcp_vpc").get("networks", {})) if isinstance(source_space, dict) else 0,
+                "gcp_iam_count": len(_cloudsim_service_state(source_space, "gcp_iam").get("service_accounts", {})) if isinstance(source_space, dict) else 0,
+                "s3_bucket_count": len(_cloudsim_service_state(source_space, "s3").get("buckets", {})) if isinstance(source_space, dict) else 0,
+                "vpc_count": len(_cloudsim_service_state(source_space, "vpc").get("vpcs", {})) if isinstance(source_space, dict) else 0,
+                "apigateway_count": len(_cloudsim_service_state(source_space, "apigateway").get("apis", {})) if isinstance(source_space, dict) else 0,
+                "resource_counts": copy.deepcopy(counts),
+                "last_tick": now,
+                "last_action": reason,
+                "last_action_detail": copy.deepcopy(detail or {}),
+                "bundle_count": len(runtime_state.setdefault("bundles", {})),
+                "event_count": len(cloudsim.get("events", [])),
+                "last_reconcile_at": cloudsim.get("last_reconcile_at", ""),
+            }
+        )
+        cloudsim["summary"] = summary
+        cloudsim["last_tick"] = now
+        if active_space and isinstance(active_space, dict):
+            active_space.setdefault("cloudsim", {}).setdefault("summary", {}).update(copy.deepcopy(summary))
+            active_space["cloudsim"]["last_tick"] = now
+        _persist_state()
 
 
 def _license_secret() -> bytes:
@@ -3373,6 +3778,8 @@ def _reconcile_runtime_instances(instances: dict[str, dict]) -> None:
                     _stop_sample_app_server(instance_id)
             except Exception:
                 instance["sample_app_status"] = "error"
+        if instance.get("state") == "pending" and backend in {"multipass", "lxd"}:
+            _queue_runtime_start_for_store(instances, instance_id)
 
 
 def _prune_expired_terminated_instances_from(instances: dict[str, dict]) -> None:
@@ -3502,7 +3909,20 @@ apigw_state = _SpaceScopedDictProxy("apigateway", lambda: {"apis": {}, "logs": [
 lambda_state = _SpaceScopedDictProxy("lambda", lambda: {"functions": {}, "events": [], "invocations": []})
 sqs_state = _SpaceScopedDictProxy("sqs", lambda: {"queues": {}, "events": []})
 ddb_state = _SpaceScopedDictProxy("dynamodb", lambda: {"tables": {}, "events": []})
-runtime_state = STATE.setdefault("runtime", {"bundles": {"python": {"id": "cloudlearn.runtime.python", "installed": True, "active": False}}})
+runtime_state = STATE.setdefault(
+    "runtime",
+    {
+        "bundles": {
+            "python": {"id": "cloudlearn.runtime.python", "name": "Python Runtime", "kind": "language", "provider": "shared", "service": "python", "installed": True, "active": False},
+            "ec2": {"id": "cloudlearn.runtime.ec2", "name": "EC2 Runtime Bundle", "kind": "vm", "provider": "aws", "service": "ec2", "installed": True, "active": False},
+            "gcp_compute": {"id": "cloudlearn.runtime.gcp.compute", "name": "Compute Engine Runtime Bundle", "kind": "vm", "provider": "gcp", "service": "compute", "installed": True, "active": False},
+            "lambda": {"id": "cloudlearn.runtime.lambda", "name": "Lambda Runtime Bundle", "kind": "function", "provider": "aws", "service": "lambda", "installed": True, "active": False},
+            "gcp_functions": {"id": "cloudlearn.runtime.gcp.functions", "name": "Cloud Functions Runtime Bundle", "kind": "function", "provider": "gcp", "service": "functions", "installed": True, "active": False},
+            "rds": {"id": "cloudlearn.runtime.rds", "name": "RDS Runtime Bundle", "kind": "database", "provider": "aws", "service": "rds", "installed": True, "active": False},
+            "gcp_sql": {"id": "cloudlearn.runtime.gcp.sql", "name": "Cloud SQL Runtime Bundle", "kind": "database", "provider": "gcp", "service": "sql", "installed": True, "active": False},
+        }
+    },
+)
 runtime_state.setdefault("lxd", {"status": "missing", "message": "", "mode": "auto", "last_checked": ""})
 github_state = STATE.setdefault("github", {"connections": {}, "repos": {}, "deployments": {}})
 
@@ -4591,6 +5011,7 @@ def api_create_bucket(name: str, region: str = Query(default="us-east-1")):
         "notifications": _s3_default_notifications(),
     }
     objects[name] = {}
+    _record_usage("s3.create_bucket", {"bucket": name, "region": region})
     return {"message": f"Bucket '{name}' created", "location": f"/{name}"}
 
 
@@ -4635,6 +5056,7 @@ def api_delete_bucket(name: str):
         raise HTTPException(409, detail="BucketNotEmpty — delete all objects first")
     del buckets[name]
     del objects[name]
+    _record_usage("s3.delete_bucket", {"bucket": name})
     return {"message": f"Bucket '{name}' deleted"}
 
 
@@ -4801,6 +5223,7 @@ async def api_upload_object(bucket: str, file: UploadFile = File(...)):
     )
     replace_version_id = "__overwrite__" if versioning_status == "Disabled" else ("null" if versioning_status == "Suspended" else None)
     entry = _s3_write_object_version(bucket, key, version, replace_version_id=replace_version_id, event_name="s3:ObjectCreated:Put", source="api_upload_object")
+    _record_usage("s3.upload_object", {"bucket": bucket, "key": key})
     return {"message": f"Object '{key}' uploaded", "etag": version["etag"], "size": len(data), "version_id": entry.get("current_version_id", version_id)}
 
 
@@ -4867,8 +5290,10 @@ def api_delete_object(bucket: str, key: str, version_id: str = Query(default="",
     if status == "Disabled":
         if key in objects.get(bucket, {}):
             del objects[bucket][key]
+        _record_usage("s3.delete_object", {"bucket": bucket, "key": key, "version_id": version_id or "null"})
         return {"message": f"Object '{key}' deleted"}
     entry = _s3_insert_simple_delete_marker(bucket, key, source="DeleteObject")
+    _record_usage("s3.delete_object", {"bucket": bucket, "key": key, "version_id": version_id or entry.get("current_version_id", "null")})
     return {
         "message": f"Delete marker created for '{key}'",
         "delete_marker": True,
@@ -5029,6 +5454,112 @@ def _runtime_bootstrap_status(backend: str | None = None) -> dict:
 
 def _runtime_bootstrap_target(backend: str | None = None) -> dict:
     return PLATFORM.runtime.bootstrap_target(backend)
+
+
+_HOST_CPU_SAMPLE_LOCK = threading.Lock()
+_HOST_CPU_SAMPLE_STATE = {"total": None, "idle": None, "pct": 0.0, "updated_at": None}
+
+
+def _read_host_cpu_snapshot():
+    try:
+        with open("/proc/stat", "r", encoding="utf-8") as fh:
+            first = fh.readline().strip().split()
+        if not first or first[0] != "cpu":
+            return None
+        values = [int(value) for value in first[1:]]
+        if not values:
+            return None
+        total = sum(values)
+        idle = values[3] + (values[4] if len(values) > 4 else 0)
+        return total, idle
+    except Exception:
+        return None
+
+
+def _sample_host_cpu_metrics():
+    now = datetime.now(timezone.utc)
+    load_1m = load_5m = load_15m = None
+    try:
+        load_1m, load_5m, load_15m = os.getloadavg()
+    except Exception:
+        pass
+    cpu_count = os.cpu_count() or 1
+    snapshot = _read_host_cpu_snapshot()
+    with _HOST_CPU_SAMPLE_LOCK:
+        previous_total = _HOST_CPU_SAMPLE_STATE.get("total")
+        previous_idle = _HOST_CPU_SAMPLE_STATE.get("idle")
+        pct = _HOST_CPU_SAMPLE_STATE.get("pct", 0.0) or 0.0
+        source = "loadavg"
+        if snapshot and previous_total is not None and snapshot[0] > previous_total:
+            total_delta = snapshot[0] - previous_total
+            idle_delta = snapshot[1] - (previous_idle or 0)
+            busy_delta = max(0, total_delta - idle_delta)
+            pct = round(min(100.0, max(0.0, (busy_delta / total_delta) * 100.0)), 1) if total_delta else 0.0
+            source = "proc_stat"
+            _HOST_CPU_SAMPLE_STATE.update({"total": snapshot[0], "idle": snapshot[1], "pct": pct, "updated_at": now})
+        else:
+            load_pct = (load_1m / cpu_count) * 100.0 if load_1m is not None else 0.0
+            pct = round(min(100.0, max(0.0, load_pct)), 1)
+            if snapshot:
+                _HOST_CPU_SAMPLE_STATE.update({"total": snapshot[0], "idle": snapshot[1], "pct": pct, "updated_at": now})
+    return {
+        "cpu_percent": pct,
+        "load_1m": round(load_1m or 0.0, 2),
+        "load_5m": round(load_5m or 0.0, 2),
+        "load_15m": round(load_15m or 0.0, 2),
+        "cpu_count": cpu_count,
+        "source": source,
+        "updated_at": now.isoformat(),
+    }
+
+
+def _legacy_provider_cards() -> list[dict]:
+    cards: list[dict] = []
+    descriptions = {
+        "aws": "AWS console-like simulations and tooling.",
+        "azure": "Reserved provider surface for future Azure simulator packs.",
+        "gcp": "GCP console-like simulations and Material-style tooling.",
+        "other": "Reserved provider surface for future community packs.",
+    }
+    provider_order = ("aws", "gcp", "azure", "other")
+    providers = list_providers()
+    for provider_id in provider_order:
+        provider = providers.get(provider_id)
+        if not isinstance(provider, dict):
+            continue
+        surface = provider.get("surface") or {}
+        theme = (surface.get("theme") if isinstance(surface, dict) else {}) or {}
+        tooling = provider.get("tooling") or {}
+        flattened_tooling: list[dict] = []
+        if isinstance(tooling, dict):
+            for group in tooling.values():
+                if not isinstance(group, list):
+                    continue
+                for item in group:
+                    if not isinstance(item, dict):
+                        continue
+                    flattened_tooling.append({
+                        "label": item.get("name") or item.get("label") or "",
+                        "status": item.get("status", "partial"),
+                        "notes": item.get("notes", ""),
+                    })
+        cards.append({
+            "provider_id": provider_id,
+            "display_name": provider.get("name") or provider_id.upper(),
+            "description": descriptions.get(provider_id, f"{provider_id.upper()} simulator surface."),
+            "surface": {
+                "theme": {
+                    "accent": theme.get("accent") or provider.get("theme", {}).get("accent") or "#0073bb",
+                    "accent_dark": theme.get("accent_dark") or provider.get("theme", {}).get("accent_dark") or "#005fa8",
+                    "panel": theme.get("panel") or "#ffffff",
+                    "border": theme.get("border") or "#eaeded",
+                    "canvas": theme.get("surface") or provider.get("theme", {}).get("surface") or "#f8fbff",
+                },
+            },
+            "implemented_services": list(provider.get("native_services") or []),
+            "tooling": flattened_tooling,
+        })
+    return cards
 
 
 def _gcp_firestore_engine():
@@ -5926,16 +6457,19 @@ def _ec2_choose_runtime_backend(profile: dict, requested_backend: str = "") -> s
     if host_supported and host_os not in host_supported:
         raise HTTPException(503, detail=f"AMI '{profile.get('name', 'unknown')}' is not supported on {host_os}.")
 
-    ordered: list[str] = []
     if requested:
-        ordered.append(requested)
+        if requested not in supported:
+            supported_label = ", ".join(supported) if supported else "no runtime backends"
+            raise HTTPException(400, detail=f"AMI '{profile.get('name', 'unknown')}' only supports {supported_label}.")
+        if _runtime_available(requested):
+            return requested
+        raise HTTPException(503, detail=f"Requested runtime backend '{requested}' is not available on this host.")
+
+    ordered: list[str] = []
     default_backend = str(profile.get("default_runtime_backend") or "").strip().lower()
     if default_backend:
         ordered.append(default_backend)
-    if host_os in {"windows", "darwin"}:
-        ordered.extend(["multipass", "lxd"])
-    else:
-        ordered.extend(["multipass", "lxd"])
+    ordered.extend(["multipass", "lxd"])
 
     for backend in ordered:
         if backend not in supported:
@@ -6604,7 +7138,7 @@ def api_list_spaces():
 @app.get("/api/providers")
 def api_list_providers():
     return {
-        "providers": list_providers(),
+        "providers": _legacy_provider_cards(),
         "default_provider": _spaces_state().get("settings", {}).get("default_provider", "aws"),
     }
 
@@ -6724,6 +7258,132 @@ def api_list_packs():
     return {"packs": _catalog(), "count": len(STATE["packs"])}
 
 
+@app.get("/api/providers/{provider}/packs")
+def api_list_provider_packs(provider: str):
+    provider_key = normalize_provider_key(provider)
+    packs = packs_for_provider(provider_key) if provider_key in PROVIDER_PACK_GROUPS else []
+    return {
+        "provider": provider_key,
+        "packs": packs,
+        "count": len(packs),
+    }
+
+
+@app.get("/api/providers/{provider}/matrix")
+def api_provider_matrix(provider: str):
+    provider_key = normalize_provider_key(provider)
+    if provider_key in {"aws", "gcp"}:
+        matrix = provider_capabilities(provider_key)
+    else:
+        provider_payload = get_provider(provider_key)
+        packs = packs_for_provider(provider_key) if provider_key in PROVIDER_PACK_GROUPS else []
+        matrix = provider_matrix(provider_key, packs)
+        matrix["surface"] = provider_payload.get("surface", matrix.get("surface", {}))
+        matrix["navigation"] = provider_payload.get("navigation", matrix.get("navigation", {}))
+        matrix["native_services"] = provider_payload.get("native_services", matrix.get("native_services", []))
+        matrix["space_facts"] = provider_payload.get("space_facts", matrix.get("space_facts", []))
+        matrix["tooling"] = provider_payload.get("tooling", matrix.get("tooling", {}))
+        matrix["gaps"] = provider_payload.get("gaps", matrix.get("gaps", []))
+    packs = packs_for_provider(provider_key) if provider_key in PROVIDER_PACK_GROUPS else []
+    services = provider_services(provider_key)
+    return {
+        "provider": provider_key,
+        "surface": matrix.get("surface", {}),
+        "navigation": matrix.get("navigation", {}),
+        "native_services": matrix.get("native_services", []),
+        "space_facts": matrix.get("space_facts", []),
+        "tooling": matrix.get("tooling", {}),
+        "services": matrix.get("services", services.get("services", [])),
+        "service_counts": matrix.get("service_counts", {"total": services.get("count", 0), "integrated": services.get("integrated", 0), "partial": services.get("partial", 0)}),
+        "packs": {
+            "service": [copy.deepcopy(pack) for pack in packs if pack.get("type") == "service"],
+            "runtime": [copy.deepcopy(pack) for pack in packs if pack.get("type") == "runtime"],
+            "tooling": [copy.deepcopy(pack) for pack in packs if pack.get("type") == "tooling"],
+        },
+        "gaps": matrix.get("gaps", []),
+    }
+
+
+@app.get("/api/providers/{provider}/services")
+def api_provider_services(provider: str):
+    return provider_services(provider)
+
+
+@app.get("/api/providers/{provider}/capabilities")
+def api_provider_capabilities(provider: str):
+    return provider_capabilities(provider)
+
+
+@app.get("/api/providers/aws/cli")
+def api_provider_aws_cli():
+    return aws_tool_response("cli")
+
+
+@app.get("/api/providers/aws/sdk/java")
+def api_provider_aws_sdk_java():
+    return aws_tool_response("sdk/java")
+
+
+@app.get("/api/providers/aws/sdk/go")
+def api_provider_aws_sdk_go():
+    return aws_tool_response("sdk/go")
+
+
+@app.post("/api/providers/aws/cli/resolve")
+def api_provider_aws_cli_resolve(payload: dict[str, Any]):
+    return aws_cli_resolve(str(payload.get("command", "")))
+
+
+@app.get("/api/providers/aws/sdk/java/snippet")
+def api_provider_aws_sdk_java_snippet():
+    return sdk_snippet("aws", "java")
+
+
+@app.get("/api/providers/aws/sdk/go/snippet")
+def api_provider_aws_sdk_go_snippet():
+    return sdk_snippet("aws", "go")
+
+
+@app.get("/api/providers/gcp/gcloud")
+def api_provider_gcp_gcloud():
+    return gcp_tool_response("gcloud")
+
+
+@app.get("/api/providers/gcp/gcutil")
+def api_provider_gcp_gcutil():
+    return gcp_tool_response("gcutil")
+
+
+@app.get("/api/providers/gcp/sdk/java")
+def api_provider_gcp_sdk_java():
+    return gcp_tool_response("sdk/java")
+
+
+@app.get("/api/providers/gcp/sdk/go")
+def api_provider_gcp_sdk_go():
+    return gcp_tool_response("sdk/go")
+
+
+@app.post("/api/providers/gcp/gcloud/resolve")
+def api_provider_gcp_gcloud_resolve(payload: dict[str, Any]):
+    return gcp_gcloud_resolve(payload)
+
+
+@app.post("/api/providers/gcp/gcutil/resolve")
+def api_provider_gcp_gcutil_resolve(payload: dict[str, Any]):
+    return gcp_gcutil_resolve(payload)
+
+
+@app.get("/api/providers/gcp/sdk/java/snippet")
+def api_provider_gcp_sdk_java_snippet():
+    return gcp_sdk_java_snippet()
+
+
+@app.get("/api/providers/gcp/sdk/go/snippet")
+def api_provider_gcp_sdk_go_snippet():
+    return gcp_sdk_go_snippet()
+
+
 @app.get("/api/packs/{pack_id}/fragment")
 def api_pack_fragment(pack_id: str):
     try:
@@ -6733,13 +7393,16 @@ def api_pack_fragment(pack_id: str):
     return Response(content=fragment, media_type="text/html; charset=utf-8")
 
 
-@app.get("/api/ec2/amis")
 def api_ec2_amis():
     runtime = _runtime_bootstrap_status()
     return {"amis": AMI_CATALOG, "count": len(AMI_CATALOG), "runtime": runtime, "host_os": _parent_os()}
 
 
-@app.get("/api/ec2/runtime")
+@app.get("/api/host/cpu")
+def api_host_cpu():
+    return _sample_host_cpu_metrics()
+
+
 def api_ec2_runtime():
     status = _runtime_bootstrap_status()
     host_os = _parent_os()
@@ -6758,8 +7421,29 @@ def api_ec2_runtime():
     }
     return status
 
+def api_ec2_runtime_docker():
+    backend = _preferred_runtime_backend()
+    status = _runtime_bootstrap_status(backend)
+    target = _runtime_bootstrap_target(backend)
+    status["instructions"] = {
+        "label": target.get("label", "Runtime sandbox"),
+        "message": target.get("message", ""),
+        "helper": target.get("helper", backend),
+    }
+    if "target" not in status:
+        status["target"] = {
+            "helper": target.get("helper", backend),
+            "label": target.get("label", "Runtime sandbox"),
+            "message": target.get("message", ""),
+        }
+    return status
 
-@app.get("/api/ec2/runtime/lxd")
+
+def api_ec2_runtime_docker_bootstrap():
+    _start_docker_bootstrap()
+    return api_ec2_runtime_docker()
+
+
 def api_ec2_runtime_lxd():
     status = _runtime_bootstrap_status("lxd")
     status["mode"] = status.get("mode", "auto")
@@ -6772,7 +7456,6 @@ def api_ec2_runtime_lxd():
     return status
 
 
-@app.get("/api/ec2/runtime/multipass")
 def api_ec2_runtime_multipass():
     status = _runtime_bootstrap_status("multipass")
     status["mode"] = status.get("mode", "auto")
@@ -6785,7 +7468,6 @@ def api_ec2_runtime_multipass():
     return status
 
 
-@app.post("/api/ec2/runtime/bootstrap")
 def api_ec2_runtime_bootstrap():
     status = _start_docker_bootstrap()
     status["message"] = status.get("message") or "Multipass and LXD runtime readiness checked."
@@ -6797,7 +7479,6 @@ def api_ec2_runtime_bootstrap():
     return status
 
 
-@app.post("/api/ec2/runtime/lxd/bootstrap")
 def api_ec2_runtime_lxd_bootstrap():
     status = _start_docker_bootstrap()
     status["message"] = status.get("message") or "LXD runtime readiness checked."
@@ -6809,7 +7490,6 @@ def api_ec2_runtime_lxd_bootstrap():
     return status
 
 
-@app.post("/api/ec2/runtime/multipass/bootstrap")
 def api_ec2_runtime_multipass_bootstrap():
     status = _start_docker_bootstrap()
     status["message"] = status.get("message") or "Multipass runtime readiness checked."
@@ -6863,265 +7543,6 @@ def api_license_activate(payload: dict[str, Any]):
     return {"message": "License activated", "license": license_data}
 
 
-@app.get("/api/iam/users")
-def api_iam_list_users():
-    return {"users": list(iam_state["users"].values()), "count": len(iam_state["users"])}
-
-
-@app.post("/api/iam/users")
-def api_iam_create_user(req: IAMUserRequest):
-    if not (req.user_name or "").strip():
-        raise HTTPException(400, detail="MissingParameter: user_name is required.")
-    user_id = _id("user")
-    user = {"user_id": user_id, "user_name": req.user_name, "path": req.path, "created": _now(), "policies": [], "groups": []}
-    iam_state["users"][user_id] = user
-    _record_usage("iam.create_user", user)
-    return user
-
-
-@app.delete("/api/iam/users/{user_id}")
-def api_iam_delete_user(user_id: str):
-    user = iam_state["users"].get(user_id) or _iam_find_user(user_id)
-    if not user:
-        raise HTTPException(404, detail="TargetNotFound")
-    for group in iam_state.get("groups", {}).values():
-        group["members"] = [member for member in group.get("members", []) if member != user.get("user_id")]
-    _iam_detach_policy_records("user", user.get("user_id", ""))
-    iam_state["users"].pop(user["user_id"], None)
-    _record_usage("iam.delete_user", user)
-    return {"message": "User deleted", "user": user}
-
-
-@app.get("/api/iam/groups")
-def api_iam_list_groups():
-    return {"groups": list(iam_state["groups"].values()), "count": len(iam_state["groups"])}
-
-
-@app.post("/api/iam/groups")
-def api_iam_create_group(req: IAMGroupRequest):
-    if not (req.group_name or "").strip():
-        raise HTTPException(400, detail="MissingParameter: group_name is required.")
-    group_id = _id("group")
-    group = {
-        "group_id": group_id,
-        "group_name": req.group_name,
-        "path": req.path,
-        "created": _now(),
-        "members": [],
-        "policies": [],
-    }
-    iam_state["groups"][group_id] = group
-    _record_usage("iam.create_group", group)
-    return group
-
-
-@app.delete("/api/iam/groups/{group_id}")
-def api_iam_delete_group(group_id: str):
-    group = iam_state["groups"].get(group_id) or _iam_find_group(group_id)
-    if not group:
-        raise HTTPException(404, detail="TargetNotFound")
-    for user in iam_state.get("users", {}).values():
-        user["groups"] = [gid for gid in user.get("groups", []) if gid != group.get("group_id")]
-    _iam_detach_policy_records("group", group.get("group_id", ""))
-    iam_state["groups"].pop(group["group_id"], None)
-    _record_usage("iam.delete_group", group)
-    return {"message": "Group deleted", "group": group}
-
-
-@app.post("/api/iam/groups/{group_id}/users")
-def api_iam_add_user_to_group(group_id: str, payload: dict[str, Any]):
-    group = iam_state["groups"].get(group_id) or _iam_find_group(group_id)
-    if not group:
-        raise HTTPException(404, detail="TargetNotFound")
-    user_id = (payload.get("user_id") or payload.get("user_name") or "").strip()
-    user = _iam_find_user(user_id)
-    if not user:
-        raise HTTPException(404, detail="TargetNotFound")
-    members = group.setdefault("members", [])
-    if user["user_id"] not in members:
-        members.append(user["user_id"])
-    user_groups = user.setdefault("groups", [])
-    if group["group_id"] not in user_groups:
-        user_groups.append(group["group_id"])
-    _record_usage("iam.add_user_to_group", {"group_id": group["group_id"], "user_id": user["user_id"]})
-    return {"message": "User added to group", "group": group, "user": user}
-
-
-@app.delete("/api/iam/groups/{group_id}/users/{user_id}")
-def api_iam_remove_user_from_group(group_id: str, user_id: str):
-    group = iam_state["groups"].get(group_id) or _iam_find_group(group_id)
-    if not group:
-        raise HTTPException(404, detail="TargetNotFound")
-    user = _iam_find_user(user_id)
-    if not user:
-        raise HTTPException(404, detail="TargetNotFound")
-    group["members"] = [member for member in group.get("members", []) if member != user["user_id"]]
-    user["groups"] = [gid for gid in user.get("groups", []) if gid != group["group_id"]]
-    _record_usage("iam.remove_user_from_group", {"group_id": group["group_id"], "user_id": user["user_id"]})
-    return {"message": "User removed from group", "group": group, "user": user}
-
-
-@app.get("/api/iam/roles")
-def api_iam_list_roles():
-    return {"roles": list(iam_state["roles"].values()), "count": len(iam_state["roles"])}
-
-
-@app.post("/api/iam/roles")
-def api_iam_create_role(req: IAMRoleRequest):
-    if not (req.role_name or "").strip():
-        raise HTTPException(400, detail="MissingParameter: role_name is required.")
-    role_id = _id("role")
-    role = {
-        "role_id": role_id,
-        "role_name": req.role_name,
-        "path": req.path,
-        "assume_role_policy_document": req.assume_role_policy_document,
-        "description": req.description,
-        "created": _now(),
-        "policies": [],
-    }
-    iam_state["roles"][role_id] = role
-    _record_usage("iam.create_role", role)
-    return role
-
-
-@app.delete("/api/iam/roles/{role_id}")
-def api_iam_delete_role(role_id: str):
-    role = iam_state["roles"].get(role_id)
-    if not role:
-        for candidate in iam_state.get("roles", {}).values():
-            if role_id in {candidate.get("role_id", ""), candidate.get("role_name", ""), _iam_role_arn(candidate.get("role_name", ""))}:
-                role = candidate
-                break
-    if not role:
-        raise HTTPException(404, detail="TargetNotFound")
-    _iam_detach_policy_records("role", role.get("role_id", ""))
-    iam_state["roles"].pop(role["role_id"], None)
-    _record_usage("iam.delete_role", role)
-    return {"message": "Role deleted", "role": role}
-
-
-@app.get("/api/iam/policies")
-def api_iam_list_policies():
-    return {"policies": list(iam_state["policies"].values()), "count": len(iam_state["policies"])}
-
-
-@app.post("/api/iam/policies")
-def api_iam_create_policy(req: IAMPolicyRequest):
-    if not (req.policy_name or "").strip():
-        raise HTTPException(400, detail="MissingParameter: policy_name is required.")
-    policy_id = _id("policy")
-    policy = {"policy_id": policy_id, "policy_name": req.policy_name, "document": req.document, "created": _now()}
-    iam_state["policies"][policy_id] = policy
-    _record_usage("iam.create_policy", policy)
-    return policy
-
-
-@app.delete("/api/iam/policies/{policy_id}")
-def api_iam_delete_policy(policy_id: str):
-    policy = iam_state["policies"].get(policy_id)
-    if not policy:
-        raise HTTPException(404, detail="NoSuchPolicy")
-    _iam_remove_policy_from_all_principals(policy_id)
-    iam_state["policies"].pop(policy_id, None)
-    iam_state["attachments"] = [a for a in iam_state.get("attachments", []) if a.get("policy_id") != policy_id]
-    _record_usage("iam.delete_policy", policy)
-    return {"message": "Policy deleted", "policy": policy}
-
-
-@app.post("/api/iam/attach-policy")
-def api_iam_attach_policy(payload: dict[str, Any]):
-    target_type = payload.get("target_type", "user")
-    target_id = payload.get("target_id")
-    policy_id = payload.get("policy_id")
-    if policy_id not in iam_state["policies"]:
-        raise HTTPException(404, detail="NoSuchPolicy")
-    if target_type == "user":
-        target = iam_state["users"].get(target_id) or _iam_find_user(target_id)
-    elif target_type == "group":
-        target = iam_state["groups"].get(target_id) or _iam_find_group(target_id)
-    else:
-        target = iam_state["roles"].get(target_id)
-        if not target:
-            for role in iam_state["roles"].values():
-                if target_id in {role.get("role_name", ""), _iam_role_arn(role.get("role_name", ""))}:
-                    target = role
-                    break
-    if not target:
-        raise HTTPException(404, detail="TargetNotFound")
-    target.setdefault("policies", []).append(policy_id)
-    iam_state["attachments"].append({"target_type": target_type, "target_id": target_id, "policy_id": policy_id, "at": _now()})
-    _record_usage("iam.attach_policy", {"target_type": target_type, "target_id": target_id, "policy_id": policy_id})
-    return {"message": "Policy attached", "target": target, "policy_id": policy_id}
-
-
-@app.delete("/api/iam/attachments")
-def api_iam_detach_policy(payload: dict[str, Any]):
-    target_type = (payload.get("target_type") or "user").strip().lower()
-    target_id = (payload.get("target_id") or "").strip()
-    policy_id = (payload.get("policy_id") or "").strip()
-    if not target_id or not policy_id:
-        raise HTTPException(400, detail="MissingParameter: target_id and policy_id are required.")
-    removed = _iam_detach_policy_records(target_type, target_id, policy_id)
-    if not removed:
-        raise HTTPException(404, detail="TargetNotFound")
-    _record_usage("iam.detach_policy", {"target_type": target_type, "target_id": target_id, "policy_id": policy_id})
-    return {"message": "Policy detached", "target_type": target_type, "target_id": target_id, "policy_id": policy_id}
-
-
-@app.get("/api/iam/attachments")
-def api_iam_list_attachments():
-    return {"attachments": list(iam_state["attachments"]), "count": len(iam_state["attachments"])}
-
-
-@app.get("/api/iam/identity-providers")
-def api_iam_list_identity_providers():
-    return {"identity_providers": list(iam_state.get("identity_providers", {}).values()), "count": len(iam_state.get("identity_providers", {}))}
-
-
-@app.post("/api/iam/identity-providers")
-def api_iam_create_identity_provider(req: IAMIdentityProviderRequest):
-    if not (req.provider_name or "").strip():
-        raise HTTPException(400, detail="MissingParameter: provider_name is required.")
-    provider_id = _id("idp")
-    provider = {
-        "provider_id": provider_id,
-        "provider_name": req.provider_name,
-        "provider_type": req.provider_type,
-        "url": req.url,
-        "created": _now(),
-        "tags": copy.deepcopy(req.tags or []),
-    }
-    iam_state.setdefault("identity_providers", {})[provider_id] = provider
-    _record_usage("iam.create_identity_provider", provider)
-    return provider
-
-
-@app.delete("/api/iam/identity-providers/{provider_id}")
-def api_iam_delete_identity_provider(provider_id: str):
-    providers = iam_state.setdefault("identity_providers", {})
-    provider = providers.pop(provider_id, None)
-    if not provider:
-        raise HTTPException(404, detail="TargetNotFound")
-    _record_usage("iam.delete_identity_provider", provider)
-    return {"message": "Identity provider deleted", "identity_provider": provider}
-
-
-@app.get("/api/iam/account-settings")
-def api_iam_get_account_settings():
-    return {"account_settings": copy.deepcopy(iam_state.get("account_settings", {}))}
-
-
-@app.put("/api/iam/account-settings")
-def api_iam_update_account_settings(req: IAMAccountSettingsRequest):
-    current = iam_state.setdefault("account_settings", {"password_policy": {}})
-    if req.password_policy:
-        current["password_policy"] = copy.deepcopy(req.password_policy)
-    _record_usage("iam.update_account_settings", current)
-    return {"account_settings": copy.deepcopy(current)}
-
-
-@app.get("/api/ec2/instances")
 def api_ec2_list_instances():
     _prune_expired_terminated_instances()
     instance_ids = _ec2_instance_ids()
@@ -7142,7 +7563,6 @@ def api_ec2_list_instances():
     return {"instances": instances, "count": len(instances)}
 
 
-@app.post("/api/ec2/instances")
 def api_ec2_create_instance(req: EC2InstanceRequest, *, auto_start: bool = True):
     instance_id = _id("i")
     pack = _activate_pack("cloudlearn.ec2.basic")
@@ -7154,11 +7574,16 @@ def api_ec2_create_instance(req: EC2InstanceRequest, *, auto_start: bool = True)
         if sg not in vpc_state["security_groups"]:
             raise HTTPException(404, detail=f"NoSuchSecurityGroup:{sg}")
     profile = _ami_profile(req.ami)
+    requested_backend = (req.runtime_backend or "").strip().lower()
+    supported_backends = _ec2_profile_supported_backends(profile)
+    if requested_backend and requested_backend not in supported_backends:
+        supported_label = ", ".join(supported_backends) if supported_backends else "no runtime backends"
+        raise HTTPException(400, detail=f"AMI '{profile.get('name', 'unknown')}' only supports {supported_label}.")
     if not req.runtime or req.runtime == "python":
         req_runtime = profile.get("default_runtime", "python")
     else:
         req_runtime = req.runtime
-    runtime_backend = _ec2_choose_runtime_backend(profile, req.runtime_backend)
+    runtime_backend = _ec2_choose_runtime_backend(profile, requested_backend)
     host_port = _allocate_host_port()
     workspace = _instance_workspace(instance_id)
     workspace.mkdir(parents=True, exist_ok=True)
@@ -7211,6 +7636,9 @@ def api_ec2_create_instance(req: EC2InstanceRequest, *, auto_start: bool = True)
         "container_status": "created",
         "console_backend": "multipass-ssh" if runtime_backend == "multipass" else f"{runtime_backend}-exec",
         "console_prompt": _cmd_prompt({"runtime_backend": runtime_backend, "container_name": f"cloudlearn-{instance_id}", "container_id": ""}),
+        "runtime_bundle_id": _cloudsim_runtime_bundle("ec2").get("id", ""),
+        "runtime_bundle_name": _cloudsim_runtime_bundle("ec2").get("name", ""),
+        "runtime_bundle_kind": _cloudsim_runtime_bundle("ec2").get("kind", ""),
     }
     if instance["sample_app_id"]:
         manifest = _sample_app_manifest(instance["sample_app_id"])
@@ -7306,7 +7734,6 @@ def _reboot_runtime_process(instance: dict) -> None:
     raise HTTPException(status_code=503, detail="RuntimeUnavailable")
 
 
-@app.post("/api/ec2/instances/{instance_id}/start")
 def api_ec2_start_instance(instance_id: str):
     instance = ec2_state["instances"].get(instance_id)
     if not instance:
@@ -7317,7 +7744,6 @@ def api_ec2_start_instance(instance_id: str):
     return instance
 
 
-@app.post("/api/ec2/instances/{instance_id}/stop")
 def api_ec2_stop_instance(instance_id: str):
     instance = ec2_state["instances"].get(instance_id)
     if not instance:
@@ -7327,7 +7753,6 @@ def api_ec2_stop_instance(instance_id: str):
     return instance
 
 
-@app.post("/api/ec2/instances/{instance_id}/reboot")
 def api_ec2_reboot_instance(instance_id: str):
     instance = ec2_state["instances"].get(instance_id)
     if not instance:
@@ -7337,7 +7762,6 @@ def api_ec2_reboot_instance(instance_id: str):
     return instance
 
 
-@app.post("/api/ec2/instances/{instance_id}/terminate")
 def api_ec2_terminate_instance(instance_id: str):
     instance = ec2_state["instances"].get(instance_id)
     if not instance:
@@ -7353,7 +7777,6 @@ def api_ec2_terminate_instance(instance_id: str):
     return instance
 
 
-@app.get("/api/ec2/instances/{instance_id}/console")
 def api_ec2_console(instance_id: str):
     instance = ec2_state["instances"].get(instance_id)
     if not instance:
@@ -7389,7 +7812,6 @@ def api_ec2_console(instance_id: str):
     raise HTTPException(status_code=503, detail="RuntimeUnavailable")
 
 
-@app.post("/api/ec2/instances/{instance_id}/console/input")
 def api_ec2_console_input(instance_id: str, req: EC2ConsoleInputRequest):
     instance = ec2_state["instances"].get(instance_id)
     if not instance:
@@ -7406,7 +7828,6 @@ def api_ec2_console_input(instance_id: str, req: EC2ConsoleInputRequest):
     return {"message": "Console command executed", "instance_id": instance_id, **result}
 
 
-@app.post("/api/ec2/instances/{instance_id}/console/exec")
 def api_ec2_console_exec(instance_id: str, req: EC2ConsoleCommandRequest):
     instance = ec2_state["instances"].get(instance_id)
     if not instance:
@@ -7423,12 +7844,10 @@ def api_ec2_console_exec(instance_id: str, req: EC2ConsoleCommandRequest):
     return {"message": "Console command executed", "instance_id": instance_id, **result}
 
 
-@app.get("/api/ec2/sample-apps")
 def api_ec2_sample_apps():
     return {"sample_apps": _sample_app_catalog(), "count": len(SAMPLE_APP_MANIFESTS)}
 
 
-@app.post("/api/ec2/instances/{instance_id}/sample-apps/{app_id}/deploy")
 def api_ec2_deploy_sample_app(instance_id: str, app_id: str):
     instance = ec2_state["instances"].get(instance_id)
     if not instance:
@@ -8113,14 +8532,10 @@ async def api_ec2_query(request: Request):
     return _ec2_error_response("InvalidAction", f"The action '{action}' is not implemented by the simulator.", 400)
 
 
-@app.get("/compute/v1/projects/{project}/zones/{zone}/instances")
-@app.get("/api/gcp/compute/v1/projects/{project}/zones/{zone}/instances")
 def api_gcp_compute_list_instances(project: str, zone: str):
     return _gcp_compute_json_list(project, zone)
 
 
-@app.post("/compute/v1/projects/{project}/zones/{zone}/instances")
-@app.post("/api/gcp/compute/v1/projects/{project}/zones/{zone}/instances")
 async def api_gcp_compute_create_instance(project: str, zone: str, request: Request):
     payload = {}
     try:
@@ -8134,14 +8549,15 @@ async def api_gcp_compute_create_instance(project: str, zone: str, request: Requ
     except Exception as exc:
         raise HTTPException(400, detail=f"InvalidComputeEngineRequest: {exc}")
     instance = _gcp_compute_create_instance_instance(project, zone, req.dict())
+    instance["runtime_bundle_id"] = _cloudsim_runtime_bundle("gcp_compute").get("id", "")
+    instance["runtime_bundle_name"] = _cloudsim_runtime_bundle("gcp_compute").get("name", "")
+    instance["runtime_bundle_kind"] = _cloudsim_runtime_bundle("gcp_compute").get("kind", "")
     gcp_compute_state["instances"][instance["instance_id"]] = instance
     _gcp_compute_queue_runtime_start(instance["instance_id"])
     _record_usage("gcp.compute.create_instance", instance)
     return _gcp_compute_operation_json(instance, "insert", "PENDING")
 
 
-@app.get("/compute/v1/projects/{project}/zones/{zone}/instances/{instance}")
-@app.get("/api/gcp/compute/v1/projects/{project}/zones/{zone}/instances/{instance}")
 def api_gcp_compute_get_instance(project: str, zone: str, instance: str):
     instance = _gcp_compute_find_instance(project, zone, instance)
     if not instance:
@@ -8149,8 +8565,6 @@ def api_gcp_compute_get_instance(project: str, zone: str, instance: str):
     return _gcp_compute_instance_json(instance)
 
 
-@app.post("/compute/v1/projects/{project}/zones/{zone}/instances/{instance}/start")
-@app.post("/api/gcp/compute/v1/projects/{project}/zones/{zone}/instances/{instance}/start")
 def api_gcp_compute_start_instance(project: str, zone: str, instance: str):
     instance = _gcp_compute_find_instance(project, zone, instance)
     if not instance:
@@ -8163,8 +8577,6 @@ def api_gcp_compute_start_instance(project: str, zone: str, instance: str):
     return _gcp_compute_operation_json(instance, "start", "PENDING")
 
 
-@app.post("/compute/v1/projects/{project}/zones/{zone}/instances/{instance}/stop")
-@app.post("/api/gcp/compute/v1/projects/{project}/zones/{zone}/instances/{instance}/stop")
 def api_gcp_compute_stop_instance(project: str, zone: str, instance: str):
     instance = _gcp_compute_find_instance(project, zone, instance)
     if not instance:
@@ -8178,8 +8590,6 @@ def api_gcp_compute_stop_instance(project: str, zone: str, instance: str):
     return _gcp_compute_operation_json(instance, "stop", "DONE")
 
 
-@app.post("/compute/v1/projects/{project}/zones/{zone}/instances/{instance}/reset")
-@app.post("/api/gcp/compute/v1/projects/{project}/zones/{zone}/instances/{instance}/reset")
 def api_gcp_compute_reset_instance(project: str, zone: str, instance: str):
     instance = _gcp_compute_find_instance(project, zone, instance)
     if not instance:
@@ -8193,8 +8603,6 @@ def api_gcp_compute_reset_instance(project: str, zone: str, instance: str):
     return _gcp_compute_operation_json(instance, "reset", "DONE")
 
 
-@app.delete("/compute/v1/projects/{project}/zones/{zone}/instances/{instance}")
-@app.delete("/api/gcp/compute/v1/projects/{project}/zones/{zone}/instances/{instance}")
 def api_gcp_compute_delete_instance(project: str, zone: str, instance: str):
     instance = _gcp_compute_find_instance(project, zone, instance)
     if not instance:
@@ -8208,6 +8616,30 @@ def api_gcp_compute_delete_instance(project: str, zone: str, instance: str):
         _terminate_simulated_instance(instance)
     _record_usage("gcp.compute.delete_instance", {"instance_id": instance.get("instance_id", ""), "project": project, "zone": zone})
     return _gcp_compute_operation_json(instance, "delete", "DONE")
+
+
+def api_gcp_compute_get_operation(project: str, zone: str, operation_id: str):
+    instance = None
+    for candidate in gcp_compute_state.get("instances", {}).values():
+        if not isinstance(candidate, dict):
+            continue
+        candidate_project = str(candidate.get("project") or "cloudlearn")
+        candidate_zone = str(candidate.get("zone") or candidate.get("az") or "us-central1-a")
+        candidate_name = str(candidate.get("name") or candidate.get("instance_id") or "gcp-instance")
+        if candidate_project != project or candidate_zone != zone:
+            continue
+        for operation_type in ("insert", "start", "stop", "reset", "delete"):
+            if operation_id in {f"{operation_type}-{candidate_name}", f"{operation_type}-{candidate.get('instance_id', '')}"}:
+                instance = candidate
+                break
+        if instance:
+            break
+    if not instance:
+        raise HTTPException(404, detail="OperationNotFound")
+    status = "DONE" if str(instance.get("state", "")).lower() not in {"pending", "stopping"} else "PENDING"
+    if operation_id.startswith("insert-") and str(instance.get("state", "")).lower() == "pending":
+        status = "PENDING"
+    return _gcp_compute_operation_json(instance, operation_id.split("-", 1)[0] or "insert", status)
 
 
 async def _instance_console_ws(websocket: WebSocket, instance: dict, instance_id: str, provider_name: str, empty_message: str) -> None:
@@ -8577,9 +9009,6 @@ def _gcp_iam_set_policy(project: str, payload: dict[str, Any]) -> dict:
     return policy
 
 
-@app.get("/storage/v1/b")
-@app.get("/api/gcp/storage/v1/b")
-@app.get("/api/gcp/s3/buckets")
 def api_gcp_storage_list_buckets(request: Request):
     project = _gcp_project_name(request.query_params.get("project"))
     buckets = []
@@ -8591,9 +9020,6 @@ def api_gcp_storage_list_buckets(request: Request):
     return {"kind": "storage#buckets", "items": buckets, "prefixes": [], "nextPageToken": ""}
 
 
-@app.post("/storage/v1/b")
-@app.post("/api/gcp/storage/v1/b")
-@app.post("/api/gcp/s3/buckets")
 async def api_gcp_storage_create_bucket(request: Request):
     payload = {}
     try:
@@ -8609,12 +9035,10 @@ async def api_gcp_storage_create_bucket(request: Request):
     bucket = _gcp_storage_bucket_record(project, name, payload)
     gcp_storage_state.setdefault("buckets", {})[name] = bucket
     gcp_storage_state.setdefault("objects", {}).setdefault(name, {})
+    _record_usage("gcp.storage.create_bucket", {"project": project, "bucket": name})
     return _gcp_storage_bucket_view(project, bucket)
 
 
-@app.get("/storage/v1/b/{bucket}")
-@app.get("/api/gcp/storage/v1/b/{bucket}")
-@app.get("/api/gcp/s3/buckets/{bucket}")
 def api_gcp_storage_get_bucket(bucket: str):
     bucket_rec = gcp_storage_state.get("buckets", {}).get(bucket)
     if not bucket_rec:
@@ -8623,20 +9047,15 @@ def api_gcp_storage_get_bucket(bucket: str):
     return _gcp_storage_bucket_view(project, bucket_rec)
 
 
-@app.delete("/storage/v1/b/{bucket}")
-@app.delete("/api/gcp/storage/v1/b/{bucket}")
-@app.delete("/api/gcp/s3/buckets/{bucket}")
 def api_gcp_storage_delete_bucket(bucket: str):
     if bucket not in gcp_storage_state.get("buckets", {}):
         raise HTTPException(404, detail="Bucket not found")
     gcp_storage_state.setdefault("buckets", {}).pop(bucket, None)
     gcp_storage_state.setdefault("objects", {}).pop(bucket, None)
+    _record_usage("gcp.storage.delete_bucket", {"bucket": bucket})
     return {"kind": "storage#empty", "deleted": True, "bucket": bucket}
 
 
-@app.get("/storage/v1/b/{bucket}/o")
-@app.get("/api/gcp/storage/v1/b/{bucket}/o")
-@app.get("/api/gcp/s3/buckets/{bucket}/objects")
 def api_gcp_storage_list_objects(bucket: str, request: Request):
     bucket_rec = gcp_storage_state.get("buckets", {}).get(bucket)
     if not bucket_rec:
@@ -8651,10 +9070,6 @@ def api_gcp_storage_list_objects(bucket: str, request: Request):
     return {"kind": "storage#objects", "items": objects, "prefixes": [], "nextPageToken": ""}
 
 
-@app.post("/storage/v1/b/{bucket}/o")
-@app.post("/upload/storage/v1/b/{bucket}/o")
-@app.post("/api/gcp/storage/v1/b/{bucket}/o")
-@app.post("/api/gcp/s3/buckets/{bucket}/objects")
 async def api_gcp_storage_create_object(bucket: str, request: Request):
     bucket_rec = gcp_storage_state.get("buckets", {}).get(bucket)
     if not bucket_rec:
@@ -8671,12 +9086,10 @@ async def api_gcp_storage_create_object(bucket: str, request: Request):
         raise HTTPException(400, detail="Object name is required")
     obj = _gcp_storage_object_record(bucket, name, payload)
     gcp_storage_state.setdefault("objects", {}).setdefault(bucket, {})[name] = obj
+    _record_usage("gcp.storage.create_object", {"bucket": bucket, "object": name})
     return _gcp_storage_object_view(str(bucket_rec.get("project") or "cloudlearn"), bucket, name, obj)
 
 
-@app.get("/storage/v1/b/{bucket}/o/{object_name:path}")
-@app.get("/api/gcp/storage/v1/b/{bucket}/o/{object_name:path}")
-@app.get("/api/gcp/s3/buckets/{bucket}/objects/{object_name:path}")
 def api_gcp_storage_get_object(bucket: str, object_name: str):
     bucket_rec = gcp_storage_state.get("buckets", {}).get(bucket)
     obj = gcp_storage_state.get("objects", {}).get(bucket, {}).get(object_name)
@@ -8685,18 +9098,14 @@ def api_gcp_storage_get_object(bucket: str, object_name: str):
     return _gcp_storage_object_view(str(bucket_rec.get("project") or "cloudlearn"), bucket, object_name, obj)
 
 
-@app.delete("/storage/v1/b/{bucket}/o/{object_name:path}")
-@app.delete("/api/gcp/storage/v1/b/{bucket}/o/{object_name:path}")
-@app.delete("/api/gcp/s3/buckets/{bucket}/objects/{object_name:path}")
 def api_gcp_storage_delete_object(bucket: str, object_name: str):
     if bucket not in gcp_storage_state.get("objects", {}) or object_name not in gcp_storage_state["objects"][bucket]:
         raise HTTPException(404, detail="Object not found")
     del gcp_storage_state["objects"][bucket][object_name]
+    _record_usage("gcp.storage.delete_object", {"bucket": bucket, "object": object_name})
     return {"kind": "storage#empty", "deleted": True, "bucket": bucket, "object": object_name}
 
 
-@app.get("/sql/v1beta4/projects/{project}/instances")
-@app.get("/api/gcp/rds/databases")
 def api_gcp_sql_list_instances(project: str, request: Request):
     project = _gcp_project_name(project)
     instances = []
@@ -8708,8 +9117,6 @@ def api_gcp_sql_list_instances(project: str, request: Request):
     return {"kind": "sql#instancesList", "items": instances, "warnings": []}
 
 
-@app.post("/sql/v1beta4/projects/{project}/instances")
-@app.post("/api/gcp/rds/databases")
 async def api_gcp_sql_create_instance(project: str, request: Request):
     project = _gcp_project_name(project)
     payload = {}
@@ -8722,12 +9129,15 @@ async def api_gcp_sql_create_instance(project: str, request: Request):
     instance = _gcp_sql_instance_record(project, payload)
     if instance["name"] in gcp_sql_state.get("instances", {}):
         raise HTTPException(409, detail="Instance already exists")
+    bundle = _cloudsim_runtime_bundle("gcp_sql")
+    instance["runtime_bundle_id"] = bundle.get("id", "")
+    instance["runtime_bundle_name"] = bundle.get("name", "")
+    instance["runtime_bundle_kind"] = bundle.get("kind", "")
     gcp_sql_state.setdefault("instances", {})[instance["name"]] = instance
+    _record_usage("gcp.sql.create_instance", {"project": project, "instance": instance["name"]})
     return _gcp_sql_instance_view(project, instance)
 
 
-@app.get("/sql/v1beta4/projects/{project}/instances/{instance}")
-@app.get("/api/gcp/rds/databases/{instance}")
 def api_gcp_sql_get_instance(project: str, instance: str):
     project = _gcp_project_name(project)
     rec = gcp_sql_state.get("instances", {}).get(instance)
@@ -8736,19 +9146,16 @@ def api_gcp_sql_get_instance(project: str, instance: str):
     return _gcp_sql_instance_view(project, rec)
 
 
-@app.delete("/sql/v1beta4/projects/{project}/instances/{instance}")
-@app.delete("/api/gcp/rds/databases/{instance}")
 def api_gcp_sql_delete_instance(project: str, instance: str):
     project = _gcp_project_name(project)
     rec = gcp_sql_state.get("instances", {}).get(instance)
     if not rec or str(rec.get("project") or project) != project:
         raise HTTPException(404, detail="Instance not found")
     del gcp_sql_state["instances"][instance]
+    _record_usage("gcp.sql.delete_instance", {"project": project, "instance": instance})
     return {"kind": "sql#operation", "operationType": "DELETE", "status": "DONE", "targetLink": f"{_gcp_sql_root()}/projects/{project}/instances/{instance}"}
 
 
-@app.post("/sql/v1beta4/projects/{project}/instances/{instance}/restart")
-@app.post("/api/gcp/rds/databases/{instance}/reboot")
 def api_gcp_sql_restart_instance(project: str, instance: str):
     project = _gcp_project_name(project)
     rec = gcp_sql_state.get("instances", {}).get(instance)
@@ -8756,11 +9163,10 @@ def api_gcp_sql_restart_instance(project: str, instance: str):
         raise HTTPException(404, detail="Instance not found")
     rec["state"] = "RUNNABLE"
     rec["updateTime"] = _now()
+    _record_usage("gcp.sql.restart_instance", {"project": project, "instance": instance})
     return {"kind": "sql#operation", "operationType": "RESTART", "status": "DONE", "targetLink": f"{_gcp_sql_root()}/projects/{project}/instances/{instance}"}
 
 
-@app.get("/v1/projects/{project}/topics")
-@app.get("/api/gcp/sqs/queues")
 def api_gcp_pubsub_list_topics(project: str):
     project = _gcp_project_name(project)
     topics = [_gcp_pubsub_topic_view(project, topic) for topic in gcp_pubsub_state.get("topics", {}).values() if str(topic.get("project") or project) == project]
@@ -8768,8 +9174,6 @@ def api_gcp_pubsub_list_topics(project: str):
     return {"topics": topics, "nextPageToken": "", "kind": "pubsub#topicList"}
 
 
-@app.post("/v1/projects/{project}/topics")
-@app.post("/api/gcp/sqs/queues")
 async def api_gcp_pubsub_create_topic(project: str, request: Request):
     project = _gcp_project_name(project)
     payload = {}
@@ -8792,11 +9196,10 @@ async def api_gcp_pubsub_create_topic(project: str, request: Request):
             "ackDeadlineSeconds": payload.get("ackDeadlineSeconds", 10),
         })
         gcp_pubsub_state.setdefault("subscriptions", {})[default_sub_id] = default_sub
+    _record_usage("gcp.pubsub.create_topic", {"project": project, "topic": topic_id})
     return _gcp_pubsub_topic_view(project, topic)
 
 
-@app.get("/v1/projects/{project}/topics/{topic}")
-@app.get("/api/gcp/sqs/queues/{topic}")
 def api_gcp_pubsub_get_topic(project: str, topic: str):
     project = _gcp_project_name(project)
     rec = gcp_pubsub_state.get("topics", {}).get(topic)
@@ -8805,8 +9208,6 @@ def api_gcp_pubsub_get_topic(project: str, topic: str):
     return _gcp_pubsub_topic_view(project, rec)
 
 
-@app.patch("/v1/projects/{project}/topics/{topic}")
-@app.patch("/api/gcp/sqs/queues/{topic}")
 async def api_gcp_pubsub_update_topic(project: str, topic: str, request: Request):
     project = _gcp_project_name(project)
     rec = gcp_pubsub_state.get("topics", {}).get(topic)
@@ -8827,10 +9228,10 @@ async def api_gcp_pubsub_update_topic(project: str, topic: str, request: Request
         rec["kmsKeyName"] = str(payload.get("kmsKeyName") or "")
     rec["updateTime"] = _now()
     gcp_pubsub_state.setdefault("topics", {})[topic] = rec
+    _record_usage("gcp.pubsub.update_topic", {"project": project, "topic": topic})
     return _gcp_pubsub_topic_view(project, rec)
 
 
-@app.get("/v1/projects/{project}/topics/{topic}/messages")
 def api_gcp_pubsub_list_topic_messages(project: str, topic: str):
     project = _gcp_project_name(project)
     rec = gcp_pubsub_state.get("topics", {}).get(topic)
@@ -8840,8 +9241,6 @@ def api_gcp_pubsub_list_topic_messages(project: str, topic: str):
     return {"messages": messages, "kind": "pubsub#messageList"}
 
 
-@app.delete("/v1/projects/{project}/topics/{topic}")
-@app.delete("/api/gcp/sqs/queues/{topic}")
 def api_gcp_pubsub_delete_topic(project: str, topic: str):
     project = _gcp_project_name(project)
     rec = gcp_pubsub_state.get("topics", {}).get(topic)
@@ -8853,11 +9252,10 @@ def api_gcp_pubsub_delete_topic(project: str, topic: str):
             del gcp_pubsub_state["subscriptions"][sub_id]
             gcp_pubsub_state.get("messages", {}).pop(sub_id, None)
     gcp_pubsub_state.get("messages", {}).pop(topic, None)
+    _record_usage("gcp.pubsub.delete_topic", {"project": project, "topic": topic})
     return {"done": True}
 
 
-@app.post("/v1/projects/{project}/topics/{topic}:publish")
-@app.post("/api/gcp/sqs/queues/{topic}/messages")
 async def api_gcp_pubsub_publish(project: str, topic: str, request: Request):
     project = _gcp_project_name(project)
     rec = gcp_pubsub_state.get("topics", {}).get(topic)
@@ -8896,8 +9294,6 @@ async def api_gcp_pubsub_publish(project: str, topic: str, request: Request):
     return {"messageIds": message_ids}
 
 
-@app.get("/v1/projects/{project}/subscriptions")
-@app.get("/api/gcp/sqs/queues")
 def api_gcp_pubsub_list_subscriptions(project: str):
     project = _gcp_project_name(project)
     subs = [_gcp_pubsub_subscription_view(project, sub) for sub in gcp_pubsub_state.get("subscriptions", {}).values() if str(sub.get("project") or project) == project]
@@ -8905,8 +9301,6 @@ def api_gcp_pubsub_list_subscriptions(project: str):
     return {"subscriptions": subs, "nextPageToken": "", "kind": "pubsub#subscriptionList"}
 
 
-@app.post("/v1/projects/{project}/subscriptions")
-@app.post("/api/gcp/sqs/queues/{queue_name}")
 async def api_gcp_pubsub_create_subscription(project: str, request: Request, queue_name: str = ""):
     project = _gcp_project_name(project)
     payload = {}
@@ -8923,11 +9317,10 @@ async def api_gcp_pubsub_create_subscription(project: str, request: Request, que
     if not sub.get("topic"):
         raise HTTPException(400, detail="Topic is required")
     gcp_pubsub_state.setdefault("subscriptions", {})[sub_id] = sub
+    _record_usage("gcp.pubsub.create_subscription", {"project": project, "subscription": sub_id, "topic": sub.get("topic", "")})
     return _gcp_pubsub_subscription_view(project, sub)
 
 
-@app.get("/v1/projects/{project}/subscriptions/{subscription}")
-@app.get("/api/gcp/sqs/queues/{subscription}")
 def api_gcp_pubsub_get_subscription(project: str, subscription: str):
     project = _gcp_project_name(project)
     rec = gcp_pubsub_state.get("subscriptions", {}).get(subscription)
@@ -8936,7 +9329,6 @@ def api_gcp_pubsub_get_subscription(project: str, subscription: str):
     return _gcp_pubsub_subscription_view(project, rec)
 
 
-@app.get("/v1/projects/{project}/subscriptions/{subscription}/messages")
 def api_gcp_pubsub_list_subscription_messages(project: str, subscription: str):
     project = _gcp_project_name(project)
     rec = gcp_pubsub_state.get("subscriptions", {}).get(subscription)
@@ -8946,7 +9338,6 @@ def api_gcp_pubsub_list_subscription_messages(project: str, subscription: str):
     return {"receivedMessages": messages, "kind": "pubsub#receivedMessageList"}
 
 
-@app.post("/v1/projects/{project}/subscriptions/{subscription}:purge")
 def api_gcp_pubsub_purge_subscription(project: str, subscription: str):
     project = _gcp_project_name(project)
     rec = gcp_pubsub_state.get("subscriptions", {}).get(subscription)
@@ -8956,8 +9347,6 @@ def api_gcp_pubsub_purge_subscription(project: str, subscription: str):
     return {"done": True}
 
 
-@app.delete("/v1/projects/{project}/subscriptions/{subscription}")
-@app.delete("/api/gcp/sqs/queues/{subscription}")
 def api_gcp_pubsub_delete_subscription(project: str, subscription: str):
     project = _gcp_project_name(project)
     rec = gcp_pubsub_state.get("subscriptions", {}).get(subscription)
@@ -8965,11 +9354,10 @@ def api_gcp_pubsub_delete_subscription(project: str, subscription: str):
         raise HTTPException(404, detail="Subscription not found")
     del gcp_pubsub_state["subscriptions"][subscription]
     gcp_pubsub_state.get("messages", {}).pop(subscription, None)
+    _record_usage("gcp.pubsub.delete_subscription", {"project": project, "subscription": subscription})
     return {"done": True}
 
 
-@app.post("/v1/projects/{project}/subscriptions/{subscription}:pull")
-@app.post("/api/gcp/sqs/queues/{subscription}/receive")
 async def api_gcp_pubsub_pull(project: str, subscription: str, request: Request):
     project = _gcp_project_name(project)
     rec = gcp_pubsub_state.get("subscriptions", {}).get(subscription)
@@ -8996,8 +9384,6 @@ async def api_gcp_pubsub_pull(project: str, subscription: str, request: Request)
     return {"receivedMessages": received}
 
 
-@app.post("/v1/projects/{project}/subscriptions/{subscription}:acknowledge")
-@app.post("/api/gcp/sqs/queues/{subscription}/messages/{receipt_handle}/delete")
 async def api_gcp_pubsub_ack(project: str, subscription: str, request: Request, receipt_handle: str = ""):
     project = _gcp_project_name(project)
     if subscription not in gcp_pubsub_state.get("subscriptions", {}):
@@ -9015,7 +9401,6 @@ async def api_gcp_pubsub_ack(project: str, subscription: str, request: Request, 
     return {"acknowledged": True}
 
 
-@app.post("/v1/projects/{project}/subscriptions/{subscription}:modifyAckDeadline")
 async def api_gcp_pubsub_modify_ack_deadline(project: str, subscription: str, request: Request):
     project = _gcp_project_name(project)
     if subscription not in gcp_pubsub_state.get("subscriptions", {}):
@@ -9039,7 +9424,6 @@ async def api_gcp_pubsub_modify_ack_deadline(project: str, subscription: str, re
     return {}
 
 
-@app.get("/v1/projects/{project}/topics/{topic}/subscriptions")
 def api_gcp_pubsub_list_topic_subscriptions(project: str, topic: str):
     project = _gcp_project_name(project)
     topic_name = f"projects/{project}/topics/{topic}"
@@ -9054,8 +9438,6 @@ def api_gcp_pubsub_list_topic_subscriptions(project: str, topic: str):
     return {"subscriptions": subscriptions, "nextPageToken": ""}
 
 
-@app.get("/firestore/v1/projects/{project}/databases/{database}/documents")
-@app.get("/api/gcp/dynamodb/tables")
 def api_gcp_firestore_list_root_documents(project: str, database: str):
     project = _gcp_project_name(project)
     database = str(database or "(default)")
@@ -9063,8 +9445,6 @@ def api_gcp_firestore_list_root_documents(project: str, database: str):
     return {"documents": docs, "nextPageToken": "", "kind": "firestore#documents"}
 
 
-@app.get("/firestore/v1/projects/{project}/databases/{database}/documents/{collection}")
-@app.get("/api/gcp/dynamodb/tables/{collection}/items")
 def api_gcp_firestore_list_documents(project: str, database: str, collection: str):
     project = _gcp_project_name(project)
     database = str(database or "(default)")
@@ -9072,8 +9452,6 @@ def api_gcp_firestore_list_documents(project: str, database: str, collection: st
     return {"documents": docs, "nextPageToken": "", "kind": "firestore#documents"}
 
 
-@app.post("/firestore/v1/projects/{project}/databases/{database}/documents/{collection}")
-@app.post("/api/gcp/dynamodb/tables/{collection}/items")
 async def api_gcp_firestore_create_document(project: str, database: str, collection: str, request: Request):
     project = _gcp_project_name(project)
     database = str(database or "(default)")
@@ -9089,11 +9467,10 @@ async def api_gcp_firestore_create_document(project: str, database: str, collect
         doc_id = doc_id.rsplit("/", 1)[-1]
     fields = payload.get("fields", {}) if isinstance(payload.get("fields"), dict) else {}
     doc = _gcp_firestore_engine().create_document(project, database, collection, _gcp_firestore_normalize_fields(fields), doc_id)
+    _record_usage("gcp.firestore.create_document", {"project": project, "database": database, "collection": collection, "document": doc_id})
     return doc
 
 
-@app.get("/firestore/v1/projects/{project}/databases/{database}/documents/{collection}/{doc_id}")
-@app.get("/api/gcp/dynamodb/tables/{collection}/items/{doc_id}")
 def api_gcp_firestore_get_document(project: str, database: str, collection: str, doc_id: str):
     project = _gcp_project_name(project)
     database = str(database or "(default)")
@@ -9103,8 +9480,6 @@ def api_gcp_firestore_get_document(project: str, database: str, collection: str,
     return doc
 
 
-@app.delete("/firestore/v1/projects/{project}/databases/{database}/documents/{collection}/{doc_id}")
-@app.delete("/api/gcp/dynamodb/tables/{collection}/items/{doc_id}")
 def api_gcp_firestore_delete_document(project: str, database: str, collection: str, doc_id: str):
     project = _gcp_project_name(project)
     database = str(database or "(default)")
@@ -9112,12 +9487,10 @@ def api_gcp_firestore_delete_document(project: str, database: str, collection: s
         _gcp_firestore_engine().delete_document(project, database, collection, doc_id)
     except KeyError:
         raise HTTPException(404, detail="Document not found")
+    _record_usage("gcp.firestore.delete_document", {"project": project, "database": database, "collection": collection, "document": doc_id})
     return {"done": True}
 
 
-@app.post("/v1/projects/{project}/databases/{database}/documents/{collection}/{doc_id}")
-@app.put("/v1/projects/{project}/databases/{database}/documents/{collection}/{doc_id}")
-@app.put("/api/gcp/dynamodb/tables/{collection}/items/{doc_id}")
 async def api_gcp_firestore_update_document(project: str, database: str, collection: str, doc_id: str, request: Request):
     project = _gcp_project_name(project)
     database = str(database or "(default)")
@@ -9133,11 +9506,10 @@ async def api_gcp_firestore_update_document(project: str, database: str, collect
         doc = _gcp_firestore_engine().update_document(project, database, collection, doc_id, _gcp_firestore_normalize_fields(fields))
     except KeyError:
         raise HTTPException(404, detail="Document not found")
+    _record_usage("gcp.firestore.update_document", {"project": project, "database": database, "collection": collection, "document": doc_id})
     return doc
 
 
-@app.post("/firestore/v1/projects/{project}/databases/{database}/documents:runQuery")
-@app.post("/api/gcp/dynamodb/tables/{collection}/query")
 async def api_gcp_firestore_run_query(project: str, database: str, request: Request, collection: str = ""):
     project = _gcp_project_name(project)
     database = str(database or "(default)")
@@ -9170,8 +9542,6 @@ async def api_gcp_firestore_run_query(project: str, database: str, request: Requ
     return results
 
 
-@app.get("/v1/projects/{project}/locations/{location}/functions")
-@app.get("/api/gcp/lambda/functions")
 def api_gcp_functions_list(project: str, location: str = "us-central1"):
     project = _gcp_project_name(project)
     location = _gcp_location_name(location)
@@ -9184,8 +9554,6 @@ def api_gcp_functions_list(project: str, location: str = "us-central1"):
     return {"functions": functions, "nextPageToken": "", "kind": "cloudfunctions#listFunctionsResponse"}
 
 
-@app.post("/v1/projects/{project}/locations/{location}/functions")
-@app.post("/api/gcp/lambda/functions")
 async def api_gcp_functions_create(project: str, request: Request, location: str = "us-central1"):
     project = _gcp_project_name(project)
     location = _gcp_location_name(location)
@@ -9198,13 +9566,15 @@ async def api_gcp_functions_create(project: str, request: Request, location: str
     if not isinstance(payload, dict):
         payload = {}
     fn = _gcp_functions_record(project, location, payload)
+    bundle = _cloudsim_runtime_bundle("gcp_functions")
+    fn["runtime_bundle_id"] = bundle.get("id", "")
+    fn["runtime_bundle_name"] = bundle.get("name", "")
+    fn["runtime_bundle_kind"] = bundle.get("kind", "")
     gcp_functions_state.setdefault("functions", {})[fn["name"]] = fn
+    _record_usage("gcp.functions.create_function", {"project": project, "location": location, "function": fn.get("name", "")})
     return _gcp_functions_view(project, location, fn)
 
 
-@app.patch("/v1/projects/{project}/locations/{location}/functions/{function}")
-@app.patch("/api/gcp/lambda/functions/{function}/configuration")
-@app.put("/api/gcp/lambda/functions/{function}/code")
 async def api_gcp_functions_update(project: str, location: str, function: str, request: Request):
     project = _gcp_project_name(project)
     location = _gcp_location_name(location)
@@ -9244,11 +9614,10 @@ async def api_gcp_functions_update(project: str, location: str, function: str, r
         fn["labels"] = payload["labels"]
     fn["updateTime"] = _now()
     gcp_functions_state.setdefault("functions", {})[function] = fn
+    _record_usage("gcp.functions.update_function", {"project": project, "location": location, "function": function})
     return _gcp_functions_view(project, location, fn)
 
 
-@app.post("/v1/projects/{project}/locations/{location}/functions/{function}")
-@app.post("/api/gcp/lambda/functions/{function}/versions")
 async def api_gcp_functions_publish_version(project: str, location: str, function: str, request: Request):
     project = _gcp_project_name(project)
     location = _gcp_location_name(location)
@@ -9281,8 +9650,6 @@ async def api_gcp_functions_publish_version(project: str, location: str, functio
     return {"version": version}
 
 
-@app.get("/v1/projects/{project}/locations/{location}/functions/{function}/versions")
-@app.get("/api/gcp/lambda/functions/{function}/versions")
 def api_gcp_functions_list_versions(project: str, location: str, function: str):
     project = _gcp_project_name(project)
     location = _gcp_location_name(location)
@@ -9292,8 +9659,6 @@ def api_gcp_functions_list_versions(project: str, location: str, function: str):
     return {"versions": list(fn.get("versions", []) if isinstance(fn.get("versions"), list) else [])}
 
 
-@app.get("/v1/projects/{project}/locations/{location}/functions/{function}/invocations")
-@app.get("/api/gcp/lambda/functions/{function}/invocations")
 def api_gcp_functions_list_invocations(project: str, location: str, function: str):
     project = _gcp_project_name(project)
     location = _gcp_location_name(location)
@@ -9303,8 +9668,6 @@ def api_gcp_functions_list_invocations(project: str, location: str, function: st
     return {"invocations": list(fn.get("invocations", []) if isinstance(fn.get("invocations"), list) else [])}
 
 
-@app.get("/v1/projects/{project}/locations/{location}/functions/{function}:getIamPolicy")
-@app.get("/api/gcp/lambda/functions/{function}/policy")
 def api_gcp_functions_get_policy(project: str, location: str, function: str):
     project = _gcp_project_name(project)
     location = _gcp_location_name(location)
@@ -9315,8 +9678,6 @@ def api_gcp_functions_get_policy(project: str, location: str, function: str):
     return policy
 
 
-@app.post("/v1/projects/{project}/locations/{location}/functions/{function}:setIamPolicy")
-@app.post("/api/gcp/lambda/functions/{function}/policy")
 async def api_gcp_functions_set_policy(project: str, location: str, function: str, request: Request):
     project = _gcp_project_name(project)
     location = _gcp_location_name(location)
@@ -9336,8 +9697,6 @@ async def api_gcp_functions_set_policy(project: str, location: str, function: st
     return {"version": int(payload.get("version") or 1), "etag": str(payload.get("etag") or ""), "bindings": bindings}
 
 
-@app.get("/v1/projects/{project}/locations/{location}/functions/{function}")
-@app.get("/api/gcp/lambda/functions/{function}")
 def api_gcp_functions_get(project: str, location: str, function: str):
     project = _gcp_project_name(project)
     location = _gcp_location_name(location)
@@ -9347,8 +9706,6 @@ def api_gcp_functions_get(project: str, location: str, function: str):
     return _gcp_functions_view(project, location, fn)
 
 
-@app.delete("/v1/projects/{project}/locations/{location}/functions/{function}")
-@app.delete("/api/gcp/lambda/functions/{function}")
 def api_gcp_functions_delete(project: str, location: str, function: str):
     project = _gcp_project_name(project)
     location = _gcp_location_name(location)
@@ -9356,11 +9713,10 @@ def api_gcp_functions_delete(project: str, location: str, function: str):
     if not fn or str(fn.get("project") or project) != project or str(fn.get("location") or location) != location:
         raise HTTPException(404, detail="Function not found")
     del gcp_functions_state["functions"][function]
+    _record_usage("gcp.functions.delete_function", {"project": project, "location": location, "function": function})
     return {"done": True}
 
 
-@app.post("/v1/projects/{project}/locations/{location}/functions/{function}:call")
-@app.post("/api/gcp/lambda/functions/{function}/invoke")
 async def api_gcp_functions_call(project: str, location: str, function: str, request: Request):
     project = _gcp_project_name(project)
     location = _gcp_location_name(location)
@@ -9382,8 +9738,6 @@ async def api_gcp_functions_call(project: str, location: str, function: str, req
     return response
 
 
-@app.get("/v1/projects/{project}/locations/{location}/apis")
-@app.get("/api/gcp/apigateway/apis")
 def api_gcp_apigw_list_apis(project: str, location: str = "global"):
     project = _gcp_project_name(project)
     location = _gcp_location_name(location, "global")
@@ -9396,8 +9750,6 @@ def api_gcp_apigw_list_apis(project: str, location: str = "global"):
     return {"apis": apis, "nextPageToken": "", "kind": "apigateway#listApisResponse"}
 
 
-@app.post("/v1/projects/{project}/locations/{location}/apis")
-@app.post("/api/gcp/apigateway/apis")
 async def api_gcp_apigw_create_api(project: str, request: Request, location: str = "global"):
     project = _gcp_project_name(project)
     location = _gcp_location_name(location, "global")
@@ -9411,11 +9763,10 @@ async def api_gcp_apigw_create_api(project: str, request: Request, location: str
         payload = {}
     api_rec = _gcp_apigw_api_record(project, location, payload)
     gcp_apigw_state.setdefault("apis", {})[api_rec["name"]] = api_rec
+    _record_usage("gcp.apigateway.create_api", {"project": project, "location": location, "api": api_rec["name"]})
     return _gcp_apigateway_api_view(project, location, api_rec)
 
 
-@app.get("/v1/projects/{project}/locations/{location}/apis/{api}")
-@app.get("/api/gcp/apigateway/apis/{api}")
 def api_gcp_apigw_get_api(project: str, location: str, api: str):
     project = _gcp_project_name(project)
     location = _gcp_location_name(location, "global")
@@ -9425,8 +9776,6 @@ def api_gcp_apigw_get_api(project: str, location: str, api: str):
     return _gcp_apigateway_api_view(project, location, rec)
 
 
-@app.delete("/v1/projects/{project}/locations/{location}/apis/{api}")
-@app.delete("/api/gcp/apigateway/apis/{api}")
 def api_gcp_apigw_delete_api(project: str, location: str, api: str):
     project = _gcp_project_name(project)
     location = _gcp_location_name(location, "global")
@@ -9434,11 +9783,10 @@ def api_gcp_apigw_delete_api(project: str, location: str, api: str):
     if not rec or str(rec.get("project") or project) != project or str(rec.get("location") or location) != location:
         raise HTTPException(404, detail="API not found")
     del gcp_apigw_state["apis"][api]
+    _record_usage("gcp.apigateway.delete_api", {"project": project, "location": location, "api": api})
     return {"done": True}
 
 
-@app.get("/v1/projects/{project}/locations/{location}/apiConfigs")
-@app.get("/api/gcp/apigateway/apis/{api}/resources")
 def api_gcp_apigw_list_configs(project: str, location: str = "global", api: str = ""):
     project = _gcp_project_name(project)
     location = _gcp_location_name(location, "global")
@@ -9453,8 +9801,6 @@ def api_gcp_apigw_list_configs(project: str, location: str = "global", api: str 
     return {"apiConfigs": configs, "nextPageToken": "", "kind": "apigateway#listApiConfigsResponse"}
 
 
-@app.post("/v1/projects/{project}/locations/{location}/apiConfigs")
-@app.post("/api/gcp/apigateway/apis/{api}/resources")
 async def api_gcp_apigw_create_config(project: str, request: Request, location: str = "global", api: str = ""):
     project = _gcp_project_name(project)
     location = _gcp_location_name(location, "global")
@@ -9470,11 +9816,10 @@ async def api_gcp_apigw_create_config(project: str, request: Request, location: 
         payload["api"] = api
     cfg = _gcp_apigw_cfg_record(project, location, payload)
     gcp_apigw_state.setdefault("api_configs", {})[cfg["name"]] = cfg
+    _record_usage("gcp.apigateway.create_config", {"project": project, "location": location, "config": cfg["name"], "api": api or cfg.get("api", "")})
     return _gcp_apigateway_config_view(project, location, cfg)
 
 
-@app.get("/v1/projects/{project}/locations/{location}/gateways")
-@app.get("/api/gcp/apigateway/apis/{api}/deployments")
 def api_gcp_apigw_list_gateways(project: str, location: str = "global", api: str = ""):
     project = _gcp_project_name(project)
     location = _gcp_location_name(location, "global")
@@ -9489,8 +9834,6 @@ def api_gcp_apigw_list_gateways(project: str, location: str = "global", api: str
     return {"gateways": gateways, "nextPageToken": "", "kind": "apigateway#listGatewaysResponse"}
 
 
-@app.post("/v1/projects/{project}/locations/{location}/gateways")
-@app.post("/api/gcp/apigateway/apis/{api}/stages")
 async def api_gcp_apigw_create_gateway(project: str, request: Request, location: str = "global", api: str = ""):
     project = _gcp_project_name(project)
     location = _gcp_location_name(location, "global")
@@ -9506,12 +9849,10 @@ async def api_gcp_apigw_create_gateway(project: str, request: Request, location:
         payload["apiConfig"] = api
     gw = _gcp_apigw_gateway_record(project, location, payload)
     gcp_apigw_state.setdefault("gateways", {})[gw["name"]] = gw
+    _record_usage("gcp.apigateway.create_gateway", {"project": project, "location": location, "gateway": gw["name"], "api": api or gw.get("apiConfig", "")})
     return _gcp_apigateway_gateway_view(project, location, gw)
 
 
-@app.get("/compute/v1/projects/{project}/global/networks")
-@app.get("/api/gcp/vpc/networks")
-@app.get("/api/gcp/vpc/vpcs")
 def api_gcp_vpc_list_networks(project: str):
     project = _gcp_project_name(project)
     networks = []
@@ -9537,9 +9878,6 @@ def api_gcp_vpc_list_networks(project: str):
     return {"kind": "compute#networkList", "items": networks}
 
 
-@app.post("/compute/v1/projects/{project}/global/networks")
-@app.post("/api/gcp/vpc/networks")
-@app.post("/api/gcp/vpc/vpcs")
 async def api_gcp_vpc_create_network(project: str, request: Request):
     project = _gcp_project_name(project)
     payload = {}
@@ -9566,6 +9904,7 @@ async def api_gcp_vpc_create_network(project: str, request: Request):
         "createTime": _now(),
     }
     gcp_vpc_state.setdefault("networks", {})[name] = rec
+    _record_usage("gcp.vpc.create_network", {"project": project, "network": name})
     return {
         "kind": "compute#network",
         "id": rec["id"],
@@ -9583,9 +9922,6 @@ async def api_gcp_vpc_create_network(project: str, request: Request):
     }
 
 
-@app.get("/compute/v1/projects/{project}/global/networks/{network}")
-@app.get("/api/gcp/vpc/networks/{network}")
-@app.get("/api/gcp/vpc/vpcs/{network}")
 def api_gcp_vpc_get_network(project: str, network: str):
     project = _gcp_project_name(project)
     rec = gcp_vpc_state.get("networks", {}).get(network)
@@ -9608,21 +9944,16 @@ def api_gcp_vpc_get_network(project: str, network: str):
     }
 
 
-@app.delete("/compute/v1/projects/{project}/global/networks/{network}")
-@app.delete("/api/gcp/vpc/networks/{network}")
-@app.delete("/api/gcp/vpc/vpcs/{network}")
 def api_gcp_vpc_delete_network(project: str, network: str):
     project = _gcp_project_name(project)
     rec = gcp_vpc_state.get("networks", {}).get(network)
     if not rec or str(rec.get("project") or project) != project:
         raise HTTPException(404, detail="Network not found")
     del gcp_vpc_state["networks"][network]
+    _record_usage("gcp.vpc.delete_network", {"project": project, "network": network})
     return {"done": True}
 
 
-@app.get("/compute/v1/projects/{project}/regions/{region}/subnetworks")
-@app.get("/api/gcp/vpc/subnetworks")
-@app.get("/api/gcp/vpc/subnets")
 def api_gcp_vpc_list_subnetworks(project: str, region: str):
     project = _gcp_project_name(project)
     subnetworks = []
@@ -9651,9 +9982,6 @@ def api_gcp_vpc_list_subnetworks(project: str, region: str):
     return {"kind": "compute#subnetworkList", "items": subnetworks}
 
 
-@app.post("/compute/v1/projects/{project}/regions/{region}/subnetworks")
-@app.post("/api/gcp/vpc/subnetworks")
-@app.post("/api/gcp/vpc/subnets")
 async def api_gcp_vpc_create_subnetwork(project: str, region: str, request: Request):
     project = _gcp_project_name(project)
     payload = {}
@@ -9685,6 +10013,7 @@ async def api_gcp_vpc_create_subnetwork(project: str, region: str, request: Requ
         "createTime": _now(),
     }
     gcp_vpc_state.setdefault("subnetworks", {})[name] = rec
+    _record_usage("gcp.vpc.create_subnetwork", {"project": project, "region": region, "subnetwork": name})
     return {
         "kind": "compute#subnetwork",
         "id": rec["id"],
@@ -9706,9 +10035,6 @@ async def api_gcp_vpc_create_subnetwork(project: str, region: str, request: Requ
     }
 
 
-@app.get("/compute/v1/projects/{project}/global/firewalls")
-@app.get("/api/gcp/vpc/firewalls")
-@app.get("/api/gcp/vpc/security-groups")
 def api_gcp_vpc_list_firewalls(project: str):
     project = _gcp_project_name(project)
     firewalls = []
@@ -9739,9 +10065,6 @@ def api_gcp_vpc_list_firewalls(project: str):
     return {"kind": "compute#firewallList", "items": firewalls}
 
 
-@app.post("/compute/v1/projects/{project}/global/firewalls")
-@app.post("/api/gcp/vpc/firewalls")
-@app.post("/api/gcp/vpc/security-groups")
 async def api_gcp_vpc_create_firewall(project: str, request: Request):
     project = _gcp_project_name(project)
     payload = {}
@@ -9775,6 +10098,7 @@ async def api_gcp_vpc_create_firewall(project: str, request: Request):
         "createTime": _now(),
     }
     gcp_vpc_state.setdefault("firewalls", {})[name] = rec
+    _record_usage("gcp.vpc.create_firewall", {"project": project, "firewall": name})
     return {
         "kind": "compute#firewall",
         "id": rec["id"],
@@ -9796,294 +10120,6 @@ async def api_gcp_vpc_create_firewall(project: str, request: Request):
         "logConfig": rec["logConfig"],
         "selfLink": f"{_gcp_compute_network_root()}/projects/{project}/global/firewalls/{name}",
     }
-
-
-@app.get("/v1/projects/{project}:getIamPolicy")
-@app.get("/api/gcp/iam/policy")
-def api_gcp_iam_get_policy(project: str):
-    project = _gcp_project_name(project)
-    return _gcp_iam_policy_view(project)
-
-
-@app.post("/v1/projects/{project}:setIamPolicy")
-@app.post("/api/gcp/iam/policy")
-async def api_gcp_iam_set_policy(project: str, request: Request):
-    project = _gcp_project_name(project)
-    payload = {}
-    try:
-        payload = await request.json()
-    except Exception:
-        payload = {}
-    if not isinstance(payload, dict):
-        payload = {}
-    policy = _gcp_iam_set_policy(project, payload.get("policy", payload) if isinstance(payload.get("policy"), dict) else payload)
-    return policy
-
-
-@app.post("/v1/projects/{project}:testIamPermissions")
-@app.post("/api/gcp/iam/test-permissions")
-async def api_gcp_iam_test_permissions(project: str, request: Request):
-    project = _gcp_project_name(project)
-    payload = {}
-    try:
-        payload = await request.json()
-    except Exception:
-        payload = {}
-    permissions = payload.get("permissions", []) if isinstance(payload, dict) else []
-    return {"permissions": permissions if isinstance(permissions, list) else []}
-
-
-@app.get("/v1/projects/{project}/serviceAccounts")
-@app.get("/api/gcp/iam/service-accounts")
-def api_gcp_iam_list_service_accounts(project: str):
-    project = _gcp_project_name(project)
-    sas = []
-    for sa in gcp_iam_state.setdefault("service_accounts", {}).get(project, {}).values():
-        sas.append({
-            "name": sa["name"],
-            "projectId": project,
-            "uniqueId": sa.get("uniqueId", _gcp_compute_numeric_id(f"{project}:{sa['name']}")),
-            "email": sa["email"],
-            "displayName": sa.get("displayName", sa["name"]),
-            "description": sa.get("description", ""),
-            "oauth2ClientId": sa.get("oauth2ClientId", ""),
-            "disabled": bool(sa.get("disabled", False)),
-            "createTime": sa.get("createTime", _now()),
-            "etag": sa.get("etag", ""),
-        })
-    return {"accounts": sas, "nextPageToken": "", "kind": "iam#serviceAccountList"}
-
-
-@app.post("/v1/projects/{project}/serviceAccounts")
-@app.post("/api/gcp/iam/service-accounts")
-async def api_gcp_iam_create_service_account(project: str, request: Request):
-    project = _gcp_project_name(project)
-    payload = {}
-    try:
-        payload = await request.json()
-    except Exception:
-        payload = {}
-    if not isinstance(payload, dict):
-        payload = {}
-    sa_id = str(payload.get("accountId") or payload.get("serviceAccountId") or payload.get("name") or _id("sa")).split("/")[-1].strip()
-    display_name = str(payload.get("displayName") or payload.get("display_name") or sa_id)
-    email = f"{sa_id}@{project}.iam.gserviceaccount.com"
-    rec = {"name": sa_id, "project": project, "uniqueId": _gcp_compute_numeric_id(f"{project}:{sa_id}"), "email": email, "displayName": display_name, "description": str(payload.get("description") or ""), "oauth2ClientId": _id("oauth"), "disabled": bool(payload.get("disabled", False)), "createTime": _now(), "etag": _id("etag")}
-    gcp_iam_state.setdefault("service_accounts", {}).setdefault(project, {})[sa_id] = rec
-    return {"name": f"projects/{project}/serviceAccounts/{email}", "projectId": project, "uniqueId": rec["uniqueId"], "email": email, "displayName": display_name, "description": rec["description"], "oauth2ClientId": rec["oauth2ClientId"], "disabled": rec["disabled"], "etag": rec["etag"]}
-
-
-@app.delete("/v1/projects/{project}/serviceAccounts/{account}")
-@app.delete("/api/gcp/iam/service-accounts/{account}")
-def api_gcp_iam_delete_service_account(project: str, account: str):
-    project = _gcp_project_name(project)
-    accounts = gcp_iam_state.setdefault("service_accounts", {}).setdefault(project, {})
-    target = None
-    for key, rec in accounts.items():
-        if account in {key, rec.get("email", ""), rec.get("name", "")}:
-            target = key
-            break
-    if not target:
-        raise HTTPException(404, detail="Service account not found")
-    del accounts[target]
-    return {"done": True}
-
-
-@app.get("/api/gcp/iam/users")
-def api_gcp_iam_list_users():
-    project = _gcp_project_name(None)
-    users = list(gcp_iam_state.setdefault("users", {}).get(project, {}).values())
-    return {"users": users, "count": len(users)}
-
-
-@app.post("/api/gcp/iam/users")
-async def api_gcp_iam_create_user(request: Request):
-    project = _gcp_project_name(None)
-    payload = {}
-    try:
-        payload = await request.json()
-    except Exception:
-        payload = {}
-    if not isinstance(payload, dict):
-        payload = {}
-    name = str(payload.get("user_name") or payload.get("name") or "").strip()
-    if not name:
-        raise HTTPException(400, detail="User name is required")
-    rec = {"user_id": _id("user"), "user_name": name, "arn": f"{_gcp_iam_root()}/projects/{project}/users/{name}", "policies": [], "groups": [], "created": _now()}
-    gcp_iam_state.setdefault("users", {}).setdefault(project, {})[rec["user_id"]] = rec
-    return rec
-
-
-@app.delete("/api/gcp/iam/users/{user_id}")
-def api_gcp_iam_delete_user(user_id: str):
-    project = _gcp_project_name(None)
-    users = gcp_iam_state.setdefault("users", {}).setdefault(project, {})
-    if user_id not in users:
-        raise HTTPException(404, detail="User not found")
-    del users[user_id]
-    return {"deleted": True, "user_id": user_id}
-
-
-@app.get("/api/gcp/iam/groups")
-def api_gcp_iam_list_groups():
-    project = _gcp_project_name(None)
-    groups = list(gcp_iam_state.setdefault("groups", {}).get(project, {}).values())
-    return {"groups": groups, "count": len(groups)}
-
-
-@app.post("/api/gcp/iam/groups")
-async def api_gcp_iam_create_group(request: Request):
-    project = _gcp_project_name(None)
-    payload = {}
-    try:
-        payload = await request.json()
-    except Exception:
-        payload = {}
-    if not isinstance(payload, dict):
-        payload = {}
-    name = str(payload.get("group_name") or payload.get("name") or "").strip()
-    if not name:
-        raise HTTPException(400, detail="Group name is required")
-    rec = {"group_id": _id("group"), "group_name": name, "path": str(payload.get("path") or "/"), "users": [], "policies": [], "created": _now()}
-    gcp_iam_state.setdefault("groups", {}).setdefault(project, {})[rec["group_id"]] = rec
-    return rec
-
-
-@app.delete("/api/gcp/iam/groups/{group_id}")
-def api_gcp_iam_delete_group(group_id: str):
-    project = _gcp_project_name(None)
-    groups = gcp_iam_state.setdefault("groups", {}).setdefault(project, {})
-    if group_id not in groups:
-        raise HTTPException(404, detail="Group not found")
-    del groups[group_id]
-    return {"deleted": True, "group_id": group_id}
-
-
-@app.get("/api/gcp/iam/roles")
-def api_gcp_iam_list_roles():
-    project = _gcp_project_name(None)
-    roles = list(gcp_iam_state.setdefault("roles", {}).get(project, {}).values())
-    return {"roles": roles, "count": len(roles)}
-
-
-@app.post("/api/gcp/iam/roles")
-async def api_gcp_iam_create_role(request: Request):
-    project = _gcp_project_name(None)
-    payload = {}
-    try:
-        payload = await request.json()
-    except Exception:
-        payload = {}
-    if not isinstance(payload, dict):
-        payload = {}
-    name = str(payload.get("role_name") or payload.get("name") or "").strip()
-    if not name:
-        raise HTTPException(400, detail="Role name is required")
-    rec = {"role_id": _id("role"), "role_name": name, "policies": [], "created": _now()}
-    gcp_iam_state.setdefault("roles", {}).setdefault(project, {})[rec["role_id"]] = rec
-    return rec
-
-
-@app.delete("/api/gcp/iam/roles/{role_id}")
-def api_gcp_iam_delete_role(role_id: str):
-    project = _gcp_project_name(None)
-    roles = gcp_iam_state.setdefault("roles", {}).setdefault(project, {})
-    if role_id not in roles:
-        raise HTTPException(404, detail="Role not found")
-    del roles[role_id]
-    return {"deleted": True, "role_id": role_id}
-
-
-@app.get("/api/gcp/iam/policies")
-def api_gcp_iam_list_policies():
-    project = _gcp_project_name(None)
-    policies = list(gcp_iam_state.setdefault("policies", {}).get(project, {}).values())
-    return {"policies": policies, "count": len(policies)}
-
-
-@app.post("/api/gcp/iam/policies")
-async def api_gcp_iam_create_policy(request: Request):
-    project = _gcp_project_name(None)
-    payload = {}
-    try:
-        payload = await request.json()
-    except Exception:
-        payload = {}
-    if not isinstance(payload, dict):
-        payload = {}
-    name = str(payload.get("policy_name") or payload.get("name") or "").strip()
-    if not name:
-        raise HTTPException(400, detail="Policy name is required")
-    rec = {"policy_id": _id("policy"), "policy_name": name, "document": payload.get("document") or {}, "created": _now()}
-    gcp_iam_state.setdefault("policies", {}).setdefault(project, {})[rec["policy_id"]] = rec
-    return rec
-
-
-@app.delete("/api/gcp/iam/policies/{policy_id}")
-def api_gcp_iam_delete_policy(policy_id: str):
-    project = _gcp_project_name(None)
-    policies = gcp_iam_state.setdefault("policies", {}).setdefault(project, {})
-    if policy_id not in policies:
-        raise HTTPException(404, detail="Policy not found")
-    del policies[policy_id]
-    return {"deleted": True, "policy_id": policy_id}
-
-
-@app.get("/api/gcp/iam/account-settings")
-def api_gcp_iam_get_account_settings():
-    project = _gcp_project_name(None)
-    account_settings = gcp_iam_state.setdefault("account_settings", {}).setdefault(project, {"password_policy": {"minimum_length": 8, "require_symbols": True, "require_numbers": True, "require_uppercase": True, "require_lowercase": True}})
-    return {"account_settings": account_settings}
-
-
-@app.put("/api/gcp/iam/account-settings")
-async def api_gcp_iam_update_account_settings(request: Request):
-    project = _gcp_project_name(None)
-    payload = {}
-    try:
-        payload = await request.json()
-    except Exception:
-        payload = {}
-    if not isinstance(payload, dict):
-        payload = {}
-    account_settings = payload.get("account_settings") if isinstance(payload.get("account_settings"), dict) else payload
-    gcp_iam_state.setdefault("account_settings", {})[project] = account_settings
-    return {"account_settings": account_settings}
-
-
-@app.get("/api/gcp/iam/identity-providers")
-def api_gcp_iam_list_identity_providers():
-    project = _gcp_project_name(None)
-    providers = list(gcp_iam_state.setdefault("identity_providers", {}).get(project, {}).values())
-    return {"identity_providers": providers, "count": len(providers)}
-
-
-@app.post("/api/gcp/iam/identity-providers")
-async def api_gcp_iam_create_identity_provider(request: Request):
-    project = _gcp_project_name(None)
-    payload = {}
-    try:
-        payload = await request.json()
-    except Exception:
-        payload = {}
-    if not isinstance(payload, dict):
-        payload = {}
-    name = str(payload.get("provider_name") or payload.get("name") or "").strip()
-    if not name:
-        raise HTTPException(400, detail="Provider name is required")
-    rec = {"provider_id": _id("idp"), "provider_name": name, "provider_type": str(payload.get("provider_type") or "SAML"), "url": str(payload.get("url") or ""), "created": _now()}
-    gcp_iam_state.setdefault("identity_providers", {}).setdefault(project, {})[rec["provider_id"]] = rec
-    return rec
-
-
-@app.delete("/api/gcp/iam/identity-providers/{provider_id}")
-def api_gcp_iam_delete_identity_provider(provider_id: str):
-    project = _gcp_project_name(None)
-    providers = gcp_iam_state.setdefault("identity_providers", {}).setdefault(project, {})
-    if provider_id not in providers:
-        raise HTTPException(404, detail="Identity provider not found")
-    del providers[provider_id]
-    return {"deleted": True, "provider_id": provider_id}
 
 
 def _gcp_project_name(project: str | None) -> str:
@@ -10367,7 +10403,6 @@ def _gcp_iam_policy_view(project: str) -> dict:
     }
 
 
-@app.get("/api/vpc/vpcs")
 def api_vpc_list_vpcs():
     vpcs = []
     for vpc in vpc_state["vpcs"].values():
@@ -10387,7 +10422,6 @@ def api_vpc_list_vpcs():
     return {"vpcs": vpcs, "count": len(vpc_state["vpcs"])}
 
 
-@app.post("/api/vpc/vpcs")
 def api_vpc_create(req: VpcRequest):
     vpc_id = _id("vpc")
     default_rt_id = _id("rtb")
@@ -10433,7 +10467,6 @@ def api_vpc_create(req: VpcRequest):
     return vpc
 
 
-@app.delete("/api/vpc/vpcs/{vpc_id}")
 def api_vpc_delete(vpc_id: str, force: bool = False):
     vpc = vpc_state["vpcs"].get(vpc_id)
     if not vpc:
@@ -10477,7 +10510,6 @@ def api_vpc_delete(vpc_id: str, force: bool = False):
     return {"deleted": True, "vpc_id": vpc_id}
 
 
-@app.post("/api/vpc/subnets")
 def api_vpc_create_subnet(req: SubnetRequest):
     if req.vpc_id not in vpc_state["vpcs"]:
         raise HTTPException(404, detail="NoSuchVpc")
@@ -10500,7 +10532,6 @@ def api_vpc_create_subnet(req: SubnetRequest):
     return subnet
 
 
-@app.post("/api/vpc/security-groups")
 def api_vpc_create_security_group(req: SecurityGroupRequest):
     if req.vpc_id not in vpc_state["vpcs"]:
         raise HTTPException(404, detail="NoSuchVpc")
@@ -10511,7 +10542,6 @@ def api_vpc_create_security_group(req: SecurityGroupRequest):
     return sg
 
 
-@app.post("/api/vpc/security-groups/{sg_id}/ingress")
 def api_vpc_add_ingress(sg_id: str, payload: dict[str, Any]):
     sg = vpc_state["security_groups"].get(sg_id)
     if not sg:
@@ -10522,22 +10552,18 @@ def api_vpc_add_ingress(sg_id: str, payload: dict[str, Any]):
     return sg
 
 
-@app.get("/api/vpc/subnets")
 def api_vpc_list_subnets():
     return {"subnets": list(vpc_state["subnets"].values()), "count": len(vpc_state["subnets"])}
 
 
-@app.get("/api/vpc/security-groups")
 def api_vpc_list_security_groups():
     return {"security_groups": list(vpc_state["security_groups"].values()), "count": len(vpc_state["security_groups"])}
 
 
-@app.get("/api/vpc/route-tables")
 def api_vpc_list_route_tables():
     return {"route_tables": list(vpc_state["route_tables"].values()), "count": len(vpc_state["route_tables"])}
 
 
-@app.post("/api/vpc/route-tables")
 def api_vpc_create_route_table(req: RouteTableRequest):
     if req.vpc_id not in vpc_state["vpcs"]:
         raise HTTPException(404, detail="NoSuchVpc")
@@ -10557,12 +10583,10 @@ def api_vpc_create_route_table(req: RouteTableRequest):
     return rt
 
 
-@app.get("/api/vpc/internet-gateways")
 def api_vpc_list_internet_gateways():
     return {"internet_gateways": list(vpc_state["internet_gateways"].values()), "count": len(vpc_state["internet_gateways"])}
 
 
-@app.post("/api/vpc/internet-gateways")
 def api_vpc_create_internet_gateway(req: InternetGatewayRequest):
     igw_id = _id("igw")
     igw = {"internet_gateway_id": igw_id, "name": req.name or igw_id, "attached_vpc_id": "", "created": _now(), "tags": req.tags or []}
@@ -10571,7 +10595,6 @@ def api_vpc_create_internet_gateway(req: InternetGatewayRequest):
     return igw
 
 
-@app.post("/api/vpc/internet-gateways/{igw_id}/attach")
 def api_vpc_attach_internet_gateway(igw_id: str, payload: dict[str, Any]):
     vpc_id = payload.get("vpc_id", "")
     igw = _vpc_attach_internet_gateway_record(igw_id, vpc_id)
@@ -10579,7 +10602,6 @@ def api_vpc_attach_internet_gateway(igw_id: str, payload: dict[str, Any]):
     return igw
 
 
-@app.post("/api/vpc/route-tables/{rt_id}/routes")
 def api_vpc_add_route(rt_id: str, payload: dict[str, Any]):
     rt = vpc_state["route_tables"].get(rt_id)
     if not rt:
@@ -10596,14 +10618,12 @@ def api_vpc_add_route(rt_id: str, payload: dict[str, Any]):
     return rt
 
 
-@app.post("/api/vpc/route-tables/{rt_id}/associate-subnet")
 def api_vpc_associate_subnet(rt_id: str, req: SubnetAssociationRequest):
     _vpc_associate_subnet_to_route_table(rt_id, req.subnet_id)
     _record_usage("vpc.associate_subnet", {"route_table_id": rt_id, "subnet_id": req.subnet_id})
     return vpc_state["route_tables"][rt_id]
 
 
-@app.get("/api/vpc/vpcs/{vpc_id}/resources")
 def api_vpc_resources(vpc_id: str):
     if vpc_id not in vpc_state["vpcs"]:
         raise HTTPException(404, detail="NoSuchVpc")
@@ -12285,18 +12305,19 @@ def _rds_list_databases_view() -> dict[str, Any]:
     }
 
 
-@app.get("/api/rds/databases", include_in_schema=False)
 def api_rds_list_databases():
     return _rds_list_databases_view()
 
 
-@app.post("/api/rds/databases")
 def api_rds_create_database(req: RDSDatabaseRequest):
     db = _rds_prepare_db_instance(req)
+    db["runtime_bundle_id"] = _cloudsim_runtime_bundle("rds").get("id", "")
+    db["runtime_bundle_name"] = _cloudsim_runtime_bundle("rds").get("name", "")
+    db["runtime_bundle_kind"] = _cloudsim_runtime_bundle("rds").get("kind", "")
+    _record_usage("rds.create_database", {"db_instance_identifier": db.get("db_instance_identifier", ""), "engine": db.get("engine", "")})
     return _rds_db_view(db)
 
 
-@app.get("/api/rds/databases/{db_instance_identifier}")
 def api_rds_get_database(db_instance_identifier: str):
     db = _rds_find_db_instance(db_instance_identifier)
     if not db:
@@ -12304,7 +12325,6 @@ def api_rds_get_database(db_instance_identifier: str):
     return _rds_db_view(db)
 
 
-@app.post("/api/rds/databases/{db_instance_identifier}/start")
 def api_rds_start_database(db_instance_identifier: str):
     db = _rds_find_db_instance(db_instance_identifier)
     if not db:
@@ -12313,50 +12333,49 @@ def api_rds_start_database(db_instance_identifier: str):
         return _rds_db_view(db)
     db = _rds_runtime_start(db)
     _rds_emit_event("StartDBInstance", {"db_instance_identifier": db_instance_identifier})
+    _record_usage("rds.start_database", {"db_instance_identifier": db_instance_identifier})
     return _rds_db_view(db)
 
 
-@app.post("/api/rds/databases/{db_instance_identifier}/stop")
 def api_rds_stop_database(db_instance_identifier: str):
     db = _rds_find_db_instance(db_instance_identifier)
     if not db:
         raise HTTPException(404, detail="DBInstanceNotFound")
     db = _rds_runtime_stop(db)
     _rds_emit_event("StopDBInstance", {"db_instance_identifier": db_instance_identifier})
+    _record_usage("rds.stop_database", {"db_instance_identifier": db_instance_identifier})
     return _rds_db_view(db)
 
 
-@app.post("/api/rds/databases/{db_instance_identifier}/reboot")
 def api_rds_reboot_database(db_instance_identifier: str):
     db = _rds_find_db_instance(db_instance_identifier)
     if not db:
         raise HTTPException(404, detail="DBInstanceNotFound")
     db = _rds_runtime_reboot(db)
     _rds_emit_event("RebootDBInstance", {"db_instance_identifier": db_instance_identifier})
+    _record_usage("rds.reboot_database", {"db_instance_identifier": db_instance_identifier})
     return _rds_db_view(db)
 
 
-@app.put("/api/rds/databases/{db_instance_identifier}")
 def api_rds_modify_database(db_instance_identifier: str, req: RDSModifyRequest):
     db = _rds_find_db_instance(db_instance_identifier)
     if not db:
         raise HTTPException(404, detail="DBInstanceNotFound")
     modified = _rds_update_db_instance(db, req)
+    _record_usage("rds.modify_database", {"db_instance_identifier": db_instance_identifier})
     return _rds_db_view(modified)
 
 
-@app.delete("/api/rds/databases/{db_instance_identifier}")
 def api_rds_delete_database(db_instance_identifier: str, skip_final_snapshot: bool = True, final_snapshot_identifier: str = ""):
     _rds_delete_db_instance(db_instance_identifier, skip_final_snapshot=skip_final_snapshot, final_snapshot_identifier=final_snapshot_identifier)
+    _record_usage("rds.delete_database", {"db_instance_identifier": db_instance_identifier, "skip_final_snapshot": skip_final_snapshot})
     return {"deleted": True, "db_instance_identifier": db_instance_identifier}
 
 
-@app.get("/api/rds/subnet-groups")
 def api_rds_list_subnet_groups():
     return {"db_subnet_groups": list(sorted(rds_state["db_subnet_groups"].values(), key=lambda item: item.get("db_subnet_group_name", ""))), "count": len(rds_state["db_subnet_groups"])}
 
 
-@app.post("/api/rds/subnet-groups")
 def api_rds_create_subnet_group(req: RDSSubnetGroupRequest):
     name = req.db_subnet_group_name.strip().lower()
     if not name:
@@ -12370,10 +12389,10 @@ def api_rds_create_subnet_group(req: RDSSubnetGroupRequest):
     if not subnet_ids:
         subnet_ids = _rds_default_subnet_ids(vpc_id)
     group = _rds_make_db_subnet_group(name, req.db_subnet_group_description or name, vpc_id, subnet_ids, req.tags or [])
+    _record_usage("rds.create_subnet_group", {"db_subnet_group_name": name, "vpc_id": vpc_id})
     return group
 
 
-@app.delete("/api/rds/subnet-groups/{db_subnet_group_name}")
 def api_rds_delete_subnet_group(db_subnet_group_name: str):
     name = db_subnet_group_name.lower()
     for db in rds_state["db_instances"].values():
@@ -12382,15 +12401,14 @@ def api_rds_delete_subnet_group(db_subnet_group_name: str):
     if name not in rds_state["db_subnet_groups"]:
         raise HTTPException(404, detail="DBSubnetGroupNotFound")
     del rds_state["db_subnet_groups"][name]
+    _record_usage("rds.delete_subnet_group", {"db_subnet_group_name": name})
     return {"deleted": True, "db_subnet_group_name": name}
 
 
-@app.get("/api/rds/parameter-groups")
 def api_rds_list_parameter_groups():
     return {"db_parameter_groups": list(sorted(rds_state["db_parameter_groups"].values(), key=lambda item: item.get("db_parameter_group_name", ""))), "count": len(rds_state["db_parameter_groups"])}
 
 
-@app.post("/api/rds/parameter-groups")
 def api_rds_create_parameter_group(req: RDSParameterGroupRequest):
     name = req.db_parameter_group_name.strip().lower()
     if not name:
@@ -12398,10 +12416,10 @@ def api_rds_create_parameter_group(req: RDSParameterGroupRequest):
     if name in rds_state["db_parameter_groups"]:
         raise HTTPException(400, detail="DBParameterGroupAlreadyExists")
     group = _rds_make_db_parameter_group(name, req.family, req.description or name, req.tags or [])
+    _record_usage("rds.create_parameter_group", {"db_parameter_group_name": name, "family": req.family})
     return group
 
 
-@app.delete("/api/rds/parameter-groups/{db_parameter_group_name}")
 def api_rds_delete_parameter_group(db_parameter_group_name: str):
     name = db_parameter_group_name.lower()
     for db in rds_state["db_instances"].values():
@@ -12410,24 +12428,23 @@ def api_rds_delete_parameter_group(db_parameter_group_name: str):
     if name not in rds_state["db_parameter_groups"]:
         raise HTTPException(404, detail="DBParameterGroupNotFound")
     del rds_state["db_parameter_groups"][name]
+    _record_usage("rds.delete_parameter_group", {"db_parameter_group_name": name})
     return {"deleted": True, "db_parameter_group_name": name}
 
 
-@app.get("/api/rds/snapshots")
 def api_rds_list_snapshots():
     return {"db_snapshots": [_rds_db_snapshot_view(snapshot) for snapshot in sorted(rds_state["db_snapshots"].values(), key=lambda item: item.get("created", ""))], "count": len(rds_state["db_snapshots"])}
 
 
-@app.post("/api/rds/databases/{db_instance_identifier}/snapshots")
 def api_rds_create_snapshot(db_instance_identifier: str, req: RDSSnapshotRequest):
     db = _rds_find_db_instance(db_instance_identifier)
     if not db:
         raise HTTPException(404, detail="DBInstanceNotFound")
     snapshot = _rds_create_snapshot_from_db(db, req.db_snapshot_identifier, req.tags or [])
+    _record_usage("rds.create_snapshot", {"db_instance_identifier": db_instance_identifier, "db_snapshot_identifier": req.db_snapshot_identifier})
     return _rds_db_snapshot_view(snapshot)
 
 
-@app.post("/api/rds/snapshots/{db_snapshot_identifier}/restore")
 def api_rds_restore_snapshot(db_snapshot_identifier: str, req: RDSRestoreSnapshotRequest):
     snapshot = _rds_find_db_snapshot(db_snapshot_identifier)
     if not snapshot:
@@ -12436,7 +12453,6 @@ def api_rds_restore_snapshot(db_snapshot_identifier: str, req: RDSRestoreSnapsho
     return _rds_db_view(db)
 
 
-@app.post("/api/rds/databases/{db_instance_identifier}/tags")
 def api_rds_add_tags(db_instance_identifier: str, payload: dict[str, Any]):
     db = _rds_find_db_instance(db_instance_identifier)
     if not db:
@@ -12449,7 +12465,6 @@ def api_rds_add_tags(db_instance_identifier: str, payload: dict[str, Any]):
     return _rds_db_view(db)
 
 
-@app.get("/api/rds/databases/{db_instance_identifier}/tags")
 def api_rds_list_tags(db_instance_identifier: str):
     db = _rds_find_db_instance(db_instance_identifier)
     if not db:
@@ -13205,8 +13220,6 @@ def _sqs_query_tag_untag_list_tags(action: str, params: dict[str, Any]) -> Respo
     return _sqs_xml_result("UntagQueue", "")
 
 
-@app.api_route("/sqs", methods=["GET", "POST"], include_in_schema=False)
-@app.api_route("/api/sqs/aws", methods=["GET", "POST"], include_in_schema=False)
 async def api_sqs_query(request: Request):
     params = await _ec2_query_params(request)
     action = str(params.get("Action", "")).strip()
@@ -13240,19 +13253,17 @@ async def api_sqs_query(request: Request):
     return _error_xml("InvalidAction", f"The action '{action}' is not implemented by the simulator.", "/sqs", 400)
 
 
-@app.get("/api/sqs/queues")
 def api_sqs_list_queues():
     queues = [_sqs_queue_list_view(queue) for queue in _sqs_list_queues()]
     return {"queues": queues, "count": len(queues)}
 
 
-@app.post("/api/sqs/queues")
 def api_sqs_create_queue(req: SQSQueueCreateRequest):
     queue = _sqs_create_queue_record(req)
+    _record_usage("sqs.create_queue", {"queue_name": queue.get("queue_name", "")})
     return _sqs_queue_view(queue)
 
 
-@app.get("/api/sqs/queues/{queue_name}")
 def api_sqs_get_queue(queue_name: str):
     queue = _sqs_find_queue(queue_name)
     if not queue:
@@ -13260,7 +13271,6 @@ def api_sqs_get_queue(queue_name: str):
     return _sqs_queue_view(queue)
 
 
-@app.put("/api/sqs/queues/{queue_name}")
 def api_sqs_update_queue(queue_name: str, req: SQSQueueUpdateRequest):
     queue = _sqs_find_queue(queue_name)
     if not queue:
@@ -13277,16 +13287,16 @@ def api_sqs_update_queue(queue_name: str, req: SQSQueueUpdateRequest):
     if req.tags is not None:
         queue["tags"] = copy.deepcopy(req.tags)
     _sqs_update_queue_attributes(queue, {k: v for k, v in payload.items() if v is not None})
+    _record_usage("sqs.update_queue", {"queue_name": queue_name})
     return _sqs_queue_view(queue)
 
 
-@app.delete("/api/sqs/queues/{queue_name}")
 def api_sqs_delete_queue(queue_name: str):
     _sqs_delete_queue(queue_name)
+    _record_usage("sqs.delete_queue", {"queue_name": queue_name})
     return {"deleted": True, "queue_name": queue_name}
 
 
-@app.get("/api/sqs/queues/{queue_name}/messages")
 def api_sqs_list_messages(queue_name: str):
     queue = _sqs_find_queue(queue_name)
     if not queue:
@@ -13294,7 +13304,6 @@ def api_sqs_list_messages(queue_name: str):
     return {"queue_name": queue["queue_name"], "messages": [_sqs_view_message(queue, msg) for msg in queue.get("messages", []) if not msg.get("deleted")], "count": len(queue.get("messages", []))}
 
 
-@app.post("/api/sqs/queues/{queue_name}/messages")
 def api_sqs_send_message(queue_name: str, req: SQSMessageSendRequest):
     queue = _sqs_find_queue(queue_name)
     if not queue:
@@ -13303,7 +13312,6 @@ def api_sqs_send_message(queue_name: str, req: SQSMessageSendRequest):
     return {"message": _sqs_view_message(queue, message), "queue_name": queue["queue_name"], "queue_url": queue.get("queue_url")}
 
 
-@app.post("/api/sqs/queues/{queue_name}/receive")
 def api_sqs_receive_message(queue_name: str, req: SQSReceiveRequest):
     queue = _sqs_find_queue(queue_name)
     if not queue:
@@ -13315,7 +13323,6 @@ def api_sqs_receive_message(queue_name: str, req: SQSReceiveRequest):
     return {"queue_name": queue["queue_name"], "messages": [_sqs_view_message(queue, msg) for msg in deliveries], "count": len(deliveries)}
 
 
-@app.delete("/api/sqs/queues/{queue_name}/messages/{receipt_handle}")
 def api_sqs_delete_message(queue_name: str, receipt_handle: str):
     queue = _sqs_find_queue(queue_name)
     if not queue:
@@ -13325,7 +13332,6 @@ def api_sqs_delete_message(queue_name: str, receipt_handle: str):
     return {"deleted": True, "queue_name": queue["queue_name"], "receipt_handle": receipt_handle}
 
 
-@app.post("/api/sqs/queues/{queue_name}/messages/{receipt_handle}/visibility")
 def api_sqs_change_visibility(queue_name: str, receipt_handle: str, req: SQSVisibilityRequest):
     queue = _sqs_find_queue(queue_name)
     if not queue:
@@ -13335,7 +13341,6 @@ def api_sqs_change_visibility(queue_name: str, receipt_handle: str, req: SQSVisi
     return {"updated": True, "queue_name": queue["queue_name"], "receipt_handle": receipt_handle, "visibility_timeout": req.visibility_timeout}
 
 
-@app.post("/api/sqs/queues/{queue_name}/purge")
 def api_sqs_purge(queue_name: str):
     queue = _sqs_find_queue(queue_name)
     if not queue:
@@ -13344,7 +13349,6 @@ def api_sqs_purge(queue_name: str):
     return {"purged": True, "queue_name": queue["queue_name"]}
 
 
-@app.get("/api/sqs/queues/{queue_name}/tags")
 def api_sqs_list_tags(queue_name: str):
     queue = _sqs_find_queue(queue_name)
     if not queue:
@@ -13352,7 +13356,6 @@ def api_sqs_list_tags(queue_name: str):
     return {"queue_name": queue["queue_name"], "tags": _sqs_tags_view(queue)}
 
 
-@app.post("/api/sqs/queues/{queue_name}/tags")
 def api_sqs_tag_queue(queue_name: str, payload: dict[str, str]):
     queue = _sqs_find_queue(queue_name)
     if not queue:
@@ -13363,7 +13366,6 @@ def api_sqs_tag_queue(queue_name: str, payload: dict[str, str]):
     return {"tagged": True, "queue_name": queue["queue_name"], "tags": _sqs_tags_view(queue)}
 
 
-@app.delete("/api/sqs/queues/{queue_name}/tags")
 def api_sqs_untag_queue(queue_name: str, payload: dict[str, Any]):
     queue = _sqs_find_queue(queue_name)
     if not queue:
@@ -13806,8 +13808,6 @@ def _ddb_error_response(code: str, message: str, status: int = 400) -> Response:
     return _ddb_json_response({"__type": code, "message": message}, status=status)
 
 
-@app.api_route("/api/dynamodb/aws", methods=["POST"], include_in_schema=False)
-@app.api_route("/dynamodb", methods=["POST"], include_in_schema=False)
 async def api_dynamodb_aws(request: Request):
     target = request.headers.get("x-amz-target", "")
     action = target.rsplit(".", 1)[-1] if target else ""
@@ -13926,12 +13926,10 @@ async def api_dynamodb_aws(request: Request):
     return _ddb_error_response("UnknownOperationException", f"The action {action} is not implemented.", 400)
 
 
-@app.get("/api/dynamodb/tables")
 def api_dynamodb_list_tables():
     return _ddb_list_tables_response()
 
 
-@app.post("/api/dynamodb/tables")
 def api_dynamodb_create_table(req: DynamoDBTableRequest):
     table = _ddb_create_table_record({
         "table_name": req.table_name,
@@ -13944,10 +13942,10 @@ def api_dynamodb_create_table(req: DynamoDBTableRequest):
         "write_capacity_units": req.write_capacity_units,
         "tags": req.tags or {},
     })
+    _record_usage("dynamodb.create_table", {"table_name": req.table_name})
     return _ddb_table_response(table, include_items=False)
 
 
-@app.get("/api/dynamodb/tables/{table_name}")
 def api_dynamodb_get_table(table_name: str):
     table = _ddb_find_table(table_name)
     if not table:
@@ -13955,13 +13953,12 @@ def api_dynamodb_get_table(table_name: str):
     return _ddb_table_response(table, include_items=True)
 
 
-@app.delete("/api/dynamodb/tables/{table_name}")
 def api_dynamodb_delete_table(table_name: str):
     _ddb_delete_table_record(table_name)
+    _record_usage("dynamodb.delete_table", {"table_name": table_name})
     return {"deleted": True, "table_name": table_name}
 
 
-@app.get("/api/dynamodb/tables/{table_name}/items")
 def api_dynamodb_list_items(table_name: str):
     table = _ddb_find_table(table_name)
     if not table:
@@ -13970,7 +13967,6 @@ def api_dynamodb_list_items(table_name: str):
     return {"table_name": table_name, "items": rows, "count": len(rows)}
 
 
-@app.post("/api/dynamodb/tables/{table_name}/items")
 def api_dynamodb_put_item(table_name: str, req: DynamoDBItemRequest):
     table = _ddb_find_table(table_name)
     if not table:
@@ -13979,10 +13975,10 @@ def api_dynamodb_put_item(table_name: str, req: DynamoDBItemRequest):
     native_item = _ddb_item_to_native_item(req.item)
     key = _ddb_item_key_string(table, native_item)
     record = table.get("items", {}).get(key, {})
+    _record_usage("dynamodb.put_item", {"table_name": table_name})
     return {"table_name": table_name, "item": _ddb_item_record_view(table, key, record), "previous": old.get("item", {}) if old else {}}
 
 
-@app.put("/api/dynamodb/tables/{table_name}/items")
 def api_dynamodb_update_item(table_name: str, req: DynamoDBItemRequest):
     table = _ddb_find_table(table_name)
     if not table:
@@ -13993,19 +13989,19 @@ def api_dynamodb_update_item(table_name: str, req: DynamoDBItemRequest):
         "update_expression": req.update_expression,
         "expression_attribute_values": req.expression_attribute_values or {},
     })
+    _record_usage("dynamodb.update_item", {"table_name": table_name})
     return {"table_name": table_name, "item": updated.get("item", {})}
 
 
-@app.delete("/api/dynamodb/tables/{table_name}/items")
 def api_dynamodb_delete_item(table_name: str, req: DynamoDBItemRequest):
     table = _ddb_find_table(table_name)
     if not table:
         raise HTTPException(404, detail="TableNotFound")
     removed = _ddb_delete_item_record(table, {"key": req.key})
+    _record_usage("dynamodb.delete_item", {"table_name": table_name})
     return {"table_name": table_name, "deleted": True, "item": removed.get("item", {})}
 
 
-@app.post("/api/dynamodb/tables/{table_name}/query")
 def api_dynamodb_query_items(table_name: str, req: DynamoDBQueryRequest):
     table = _ddb_find_table(table_name)
     if not table:
@@ -14024,7 +14020,6 @@ def api_dynamodb_query_items(table_name: str, req: DynamoDBQueryRequest):
     return {"table_name": table_name, "items": [_ddb_item_record_view(table, row.get("key", ""), row) for row in rows], "count": len(rows), "scanned_count": count}
 
 
-@app.post("/api/dynamodb/tables/{table_name}/scan")
 def api_dynamodb_scan_items(table_name: str, req: DynamoDBScanRequest):
     table = _ddb_find_table(table_name)
     if not table:
@@ -14033,7 +14028,6 @@ def api_dynamodb_scan_items(table_name: str, req: DynamoDBScanRequest):
     return {"table_name": table_name, "items": [_ddb_item_record_view(table, row.get("key", ""), row) for row in rows], "count": len(rows), "scanned_count": count}
 
 
-@app.get("/api/dynamodb/tables/{table_name}/tags")
 def api_dynamodb_list_tags(table_name: str):
     table = _ddb_find_table(table_name)
     if not table:
@@ -14041,7 +14035,6 @@ def api_dynamodb_list_tags(table_name: str):
     return {"table_name": table_name, "tags": _ddb_tags_view(table)}
 
 
-@app.post("/api/dynamodb/tables/{table_name}/tags")
 def api_dynamodb_tag_table(table_name: str, req: DynamoDBTagRequest):
     table = _ddb_find_table(table_name)
     if not table:
@@ -14052,7 +14045,6 @@ def api_dynamodb_tag_table(table_name: str, req: DynamoDBTagRequest):
     return {"table_name": table_name, "tags": _ddb_tags_view(table)}
 
 
-@app.delete("/api/dynamodb/tables/{table_name}/tags")
 def api_dynamodb_untag_table(table_name: str, payload: dict[str, Any]):
     table = _ddb_find_table(table_name)
     if not table:
@@ -14064,8 +14056,6 @@ def api_dynamodb_untag_table(table_name: str, payload: dict[str, Any]):
     return {"table_name": table_name, "tags": _ddb_tags_view(table)}
 
 
-@app.api_route("/rds", methods=["GET", "POST"], include_in_schema=False)
-@app.api_route("/api/rds/aws", methods=["GET", "POST"], include_in_schema=False)
 async def api_rds_query(request: Request):
     params = await _ec2_query_params(request)
     action = str(params.get("Action", "")).strip()
@@ -14114,8 +14104,6 @@ async def api_rds_query(request: Request):
     return _rds_error_response("InvalidAction", f"The action '{action}' is not implemented by the simulator.", 400)
 
 
-@app.api_route("/vpc", methods=["GET", "POST"], include_in_schema=False)
-@app.api_route("/api/vpc/aws", methods=["GET", "POST"], include_in_schema=False)
 async def api_vpc_query(request: Request):
     params = await _ec2_query_params(request)
     action = str(params.get("Action", "")).strip()
@@ -14180,22 +14168,20 @@ async def api_vpc_query(request: Request):
     return _ec2_error_response("InvalidAction", f"The action '{action}' is not implemented by the simulator.", 400)
 
 
-@app.get("/api/apigateway/apis")
 def api_apigateway_list_apis():
     apis = [_apigw_api_view(api) for api in _apigw_state().setdefault("apis", {}).values()]
     apis.sort(key=lambda item: (item.get("created", ""), item.get("name", "")))
     return {"apis": apis, "count": len(apis)}
 
 
-@app.post("/api/apigateway/apis")
 def api_apigateway_create_api(req: APIGatewayRequest):
     if not req.name.strip():
         raise HTTPException(400, detail="MissingParameter: name is required.")
     api = _apigw_create_api_record(req)
+    _record_usage("apigateway.create_api", {"rest_api_id": api.get("id", ""), "name": api.get("name", "")})
     return _apigw_summary(api)
 
 
-@app.get("/api/apigateway/apis/{api_id}")
 def api_apigateway_get_api(api_id: str):
     api = _apigw_api(api_id)
     if not api:
@@ -14203,13 +14189,12 @@ def api_apigateway_get_api(api_id: str):
     return _apigw_summary(api)
 
 
-@app.delete("/api/apigateway/apis/{api_id}")
 def api_apigateway_delete_api(api_id: str):
     _apigw_delete_api_record(api_id)
+    _record_usage("apigateway.delete_api", {"rest_api_id": api_id})
     return {"message": "API Gateway API deleted", "rest_api_id": api_id}
 
 
-@app.get("/api/apigateway/apis/{api_id}/resources")
 def api_apigateway_list_resources(api_id: str):
     api = _apigw_api(api_id)
     if not api:
@@ -14217,32 +14202,29 @@ def api_apigateway_list_resources(api_id: str):
     return {"resources": _apigw_route_views(api), "count": max(len(api.get("resources", {})) - 1, 0)}
 
 
-@app.post("/api/apigateway/apis/{api_id}/resources")
 def api_apigateway_create_resource(api_id: str, req: APIGatewayResourceRequest):
     resource = _apigw_create_resource_record(api_id, req)
     api = _apigw_api(api_id)
+    _record_usage("apigateway.create_resource", {"rest_api_id": api_id, "resource_id": resource.get("id", "")})
     return {"resource": resource, "api": _apigw_api_view(api)}
 
 
-@app.post("/api/apigateway/apis/{api_id}/methods")
 def api_apigateway_put_method(api_id: str, req: APIGatewayMethodRequest):
     method = _apigw_put_method_record(api_id, req)
     return {"method": method}
 
 
-@app.post("/api/apigateway/apis/{api_id}/integrations")
 def api_apigateway_put_integration(api_id: str, req: APIGatewayIntegrationRequest):
     integration = _apigw_put_integration_record(api_id, req)
     return {"integration": integration}
 
 
-@app.post("/api/apigateway/apis/{api_id}/deployments")
 def api_apigateway_create_deployment(api_id: str, req: APIGatewayDeploymentRequest):
     deployment = _apigw_create_deployment_record(api_id, req)
+    _record_usage("apigateway.create_deployment", {"rest_api_id": api_id, "deployment_id": deployment.get("id", "")})
     return {"deployment": deployment}
 
 
-@app.get("/api/apigateway/apis/{api_id}/deployments")
 def api_apigateway_list_deployments(api_id: str):
     api = _apigw_api(api_id)
     if not api:
@@ -14252,13 +14234,12 @@ def api_apigateway_list_deployments(api_id: str):
     return {"deployments": deployments, "count": len(deployments)}
 
 
-@app.post("/api/apigateway/apis/{api_id}/stages")
 def api_apigateway_create_stage(api_id: str, req: APIGatewayStageRequest):
     stage = _apigw_create_stage_record(api_id, req)
+    _record_usage("apigateway.create_stage", {"rest_api_id": api_id, "stage_name": stage.get("stage_name", "")})
     return {"stage": stage}
 
 
-@app.get("/api/apigateway/apis/{api_id}/stages")
 def api_apigateway_list_stages(api_id: str):
     api = _apigw_api(api_id)
     if not api:
@@ -14268,7 +14249,6 @@ def api_apigateway_list_stages(api_id: str):
     return {"stages": stages, "count": len(stages)}
 
 
-@app.get("/api/apigateway/apis/{api_id}/logs")
 def api_apigateway_list_logs(api_id: str):
     api = _apigw_api(api_id)
     if not api:
@@ -14278,29 +14258,28 @@ def api_apigateway_list_logs(api_id: str):
     return {"logs": logs[:100], "count": len(logs)}
 
 
-@app.api_route("/api/apigateway/invoke/{api_id}/{stage_name}/{proxy_path:path}", methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"])
 async def api_apigateway_invoke_path(api_id: str, stage_name: str, proxy_path: str, request: Request):
     return await _apigw_invoke(api_id, stage_name, proxy_path, request)
 
-
-@app.api_route("/api/apigateway/invoke/{api_id}/{stage_name}", methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"])
 async def api_apigateway_invoke_root(api_id: str, stage_name: str, request: Request):
     return await _apigw_invoke(api_id, stage_name, "", request)
 
 
-@app.get("/api/lambda/functions")
 def api_lambda_list_functions():
     functions = [_lambda_function_view(function) for function in _lambda_list_functions()]
     return {"functions": functions, "count": len(functions)}
 
 
-@app.post("/api/lambda/functions")
 def api_lambda_create_function(req: LambdaFunctionRequest):
     function = _lambda_create_function_record(req)
+    bundle = _cloudsim_runtime_bundle("lambda")
+    function["runtime_bundle_id"] = bundle.get("id", "")
+    function["runtime_bundle_name"] = bundle.get("name", "")
+    function["runtime_bundle_kind"] = bundle.get("kind", "")
+    _record_usage("lambda.create_function", {"function_name": function.get("function_name", "")})
     return _lambda_function_view(function)
 
 
-@app.get("/api/lambda/functions/{function_name}")
 def api_lambda_get_function(function_name: str):
     function = _lambda_find_function(function_name)
     if not function:
@@ -14308,31 +14287,30 @@ def api_lambda_get_function(function_name: str):
     return _lambda_function_view(function)
 
 
-@app.put("/api/lambda/functions/{function_name}/code")
 def api_lambda_update_function_code(function_name: str, payload: dict[str, Any]):
     function = _lambda_find_function(function_name)
     if not function:
         raise HTTPException(404, detail="ResourceNotFoundException")
     updated = _lambda_update_function_code(function, str(payload.get("code", "")))
+    _record_usage("lambda.update_function_code", {"function_name": function_name})
     return _lambda_function_view(updated)
 
 
-@app.put("/api/lambda/functions/{function_name}/configuration")
 def api_lambda_update_function_configuration(function_name: str, req: LambdaFunctionUpdateRequest):
     function = _lambda_find_function(function_name)
     if not function:
         raise HTTPException(404, detail="ResourceNotFoundException")
     updated = _lambda_update_function_configuration(function, req)
+    _record_usage("lambda.update_function_configuration", {"function_name": function_name})
     return _lambda_function_view(updated)
 
 
-@app.delete("/api/lambda/functions/{function_name}")
 def api_lambda_delete_function(function_name: str):
     _lambda_delete_function(function_name)
+    _record_usage("lambda.delete_function", {"function_name": function_name})
     return {"deleted": True, "function_name": function_name}
 
 
-@app.get("/api/lambda/functions/{function_name}/policy")
 def api_lambda_get_policy(function_name: str):
     function = _lambda_find_function(function_name)
     if not function:
@@ -14341,7 +14319,6 @@ def api_lambda_get_policy(function_name: str):
     return {"function_name": function["function_name"], "function_arn": function["function_arn"], **policy}
 
 
-@app.post("/api/lambda/functions/{function_name}/policy")
 def api_lambda_add_permission(function_name: str, req: LambdaPermissionRequest):
     function = _lambda_find_function(function_name)
     if not function:
@@ -14351,7 +14328,6 @@ def api_lambda_add_permission(function_name: str, req: LambdaPermissionRequest):
     return {"function_name": function["function_name"], "function_arn": function["function_arn"], "statement": permission, **policy}
 
 
-@app.delete("/api/lambda/functions/{function_name}/policy/{statement_id}")
 def api_lambda_remove_permission(function_name: str, statement_id: str):
     function = _lambda_find_function(function_name)
     if not function:
@@ -14360,7 +14336,6 @@ def api_lambda_remove_permission(function_name: str, statement_id: str):
     return {"deleted": True, "function_name": function["function_name"], "statement_id": statement_id}
 
 
-@app.get("/api/lambda/functions/{function_name}/invocations")
 def api_lambda_list_invocations(function_name: str):
     function = _lambda_find_function(function_name)
     if not function:
@@ -14369,7 +14344,6 @@ def api_lambda_list_invocations(function_name: str):
     return {"function_name": function["function_name"], "function_arn": function["function_arn"], "invocations": invocations, "count": len(invocations)}
 
 
-@app.get("/api/lambda/functions/{function_name}/versions")
 def api_lambda_list_versions(function_name: str):
     function = _lambda_find_function(function_name)
     if not function:
@@ -14378,7 +14352,6 @@ def api_lambda_list_versions(function_name: str):
     return {"function_name": function["function_name"], "function_arn": function["function_arn"], "versions": versions, "count": len(versions)}
 
 
-@app.post("/api/lambda/functions/{function_name}/versions")
 def api_lambda_publish_version(function_name: str, payload: LambdaVersionRequest):
     function = _lambda_find_function(function_name)
     if not function:
@@ -14387,67 +14360,54 @@ def api_lambda_publish_version(function_name: str, payload: LambdaVersionRequest
     return {"function_name": function["function_name"], "function_arn": function["function_arn"], "version": version}
 
 
-@app.post("/api/lambda/functions/{function_name}/invoke")
 def api_lambda_invoke_function(function_name: str, payload: LambdaInvokeRequest):
     return _lambda_invoke_response(function_name, payload.payload, invocation_type=payload.invocation_type)
 
 
-@app.get("/2015-03-31/functions")
 def api_lambda_list_functions_aws():
     return api_lambda_list_functions()
 
 
-@app.post("/2015-03-31/functions")
 def api_lambda_create_function_aws(req: LambdaFunctionRequest):
     return api_lambda_create_function(req)
 
 
-@app.get("/2015-03-31/functions/{function_name}")
 def api_lambda_get_function_aws(function_name: str):
     return api_lambda_get_function(function_name)
 
 
-@app.delete("/2015-03-31/functions/{function_name}")
 def api_lambda_delete_function_aws(function_name: str):
     return api_lambda_delete_function(function_name)
 
 
-@app.get("/2015-03-31/functions/{function_name}/policy")
 def api_lambda_get_policy_aws(function_name: str):
     return api_lambda_get_policy(function_name)
 
 
-@app.post("/2015-03-31/functions/{function_name}/policy")
 def api_lambda_add_permission_aws(function_name: str, req: LambdaPermissionRequest):
     return api_lambda_add_permission(function_name, req)
 
 
-@app.delete("/2015-03-31/functions/{function_name}/policy/{statement_id}")
 def api_lambda_remove_permission_aws(function_name: str, statement_id: str):
     return api_lambda_remove_permission(function_name, statement_id)
 
 
-@app.put("/2015-03-31/functions/{function_name}/code")
 def api_lambda_update_function_code_aws(function_name: str, payload: dict[str, Any]):
     return api_lambda_update_function_code(function_name, payload)
 
 
-@app.put("/2015-03-31/functions/{function_name}/configuration")
 def api_lambda_update_function_configuration_aws(function_name: str, req: LambdaFunctionUpdateRequest):
     return api_lambda_update_function_configuration(function_name, req)
 
 
-@app.post("/2015-03-31/functions/{function_name}/versions")
 def api_lambda_publish_version_aws(function_name: str, payload: LambdaVersionRequest):
     return api_lambda_publish_version(function_name, payload)
 
 
-@app.get("/2015-03-31/functions/{function_name}/versions")
 def api_lambda_list_versions_aws(function_name: str):
     return api_lambda_list_versions(function_name)
 
 
-@app.post("/2015-03-31/functions/{function_name}/invocations")
 async def api_lambda_invoke_function_aws(function_name: str, request: Request):
     function = _lambda_find_function(function_name)
     if not function:
@@ -14527,7 +14487,7 @@ def api_action_router(payload: ServiceActionRequest):
     if service == "s3":
         return {"message": "Use S3 REST or /api/s3 endpoints for S3 actions."}
     if service == "iam" and action == "createuser":
-        return api_iam_create_user(IAMUserRequest(**payload.payload))
+        return provider_aws_iam.api_iam_create_user(IAMUserRequest(**payload.payload))
     raise HTTPException(400, detail="UnsupportedAction")
 
 # ── Serve React UI — explicit routes registered BEFORE /{bucket} ─────────────
