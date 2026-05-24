@@ -1,0 +1,194 @@
+%PDF-1.4
+%‚„œ”
+1 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>
+endobj
+2 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold >>
+endobj
+3 0 obj
+<< /Length 2607 >>
+stream
+BT /F2 20 Tf 32 570 Td (CloudLearn Service Spawn Diagram) Tj ET
+BT /F1 10 Tf 32 550 Td (How the simulator starts, where host state lives, and how EC2 sandboxes are launched) Tj ET
+q 0.70 0.74 0.80 rg 32 540 728 1.2 re f Q
+q 0.97 0.97 0.92 rg 0.27 0.34 0.42 RG 32 420 148 82 re B Q
+BT /F2 10 Tf 40 486 Td (Host Launcher) Tj ET
+BT /F1 8 Tf 40 472 Td (bash or PowerShell) Tj ET
+BT /F1 8 Tf 40 462 Td (Detect host OS) Tj ET
+BT /F1 8 Tf 40 452 Td (Write .cloudlearn-host.json) Tj ET
+q 0.95 0.98 0.95 rg 0.27 0.34 0.42 RG 208 420 148 82 re B Q
+BT /F2 10 Tf 216 486 Td (Host Runtime Bridge) Tj ET
+BT /F1 8 Tf 216 472 Td (core/runtime_bridge.py) Tj ET
+BT /F1 8 Tf 216 462 Td (Runs on host OS) Tj ET
+BT /F1 8 Tf 216 452 Td (Executes Multipass or LXD) Tj ET
+q 0.95 0.97 0.99 rg 0.27 0.34 0.42 RG 384 420 170 82 re B Q
+BT /F2 10 Tf 392 486 Td (Docker Compose) Tj ET
+BT /F1 8 Tf 392 472 Td (Starts simulator container) Tj ET
+BT /F1 8 Tf 392 462 Td (Starts cloudsim container) Tj ET
+BT /F1 8 Tf 392 452 Td (Mounts host config JSON) Tj ET
+q 0.99 0.96 0.94 rg 0.27 0.34 0.42 RG 582 420 178 82 re B Q
+BT /F2 10 Tf 590 486 Td (simulator container) Tj ET
+BT /F1 8 Tf 590 472 Td (FastAPI app) Tj ET
+BT /F1 8 Tf 590 462 Td (UI) Tj ET
+BT /F1 8 Tf 590 452 Td (Provider routes) Tj ET
+BT /F1 8 Tf 590 442 Td (CloudSim bridge) Tj ET
+q 0.96 0.95 0.99 rg 0.27 0.34 0.42 RG 208 250 148 82 re B Q
+BT /F2 10 Tf 216 316 Td (cloudsim container) Tj ET
+BT /F1 8 Tf 216 302 Td (Space state) Tj ET
+BT /F1 8 Tf 216 292 Td (Resource graph) Tj ET
+BT /F1 8 Tf 216 282 Td (Events) Tj ET
+BT /F1 8 Tf 216 272 Td (Summary) Tj ET
+q 0.94 0.98 0.96 rg 0.27 0.34 0.42 RG 384 250 170 82 re B Q
+BT /F2 10 Tf 392 316 Td (Host OS sandboxes) Tj ET
+BT /F1 8 Tf 392 302 Td (Multipass on macOS/Windows) Tj ET
+BT /F1 8 Tf 392 292 Td (LXD on Linux) Tj ET
+q 0.3 w 180 461 m 208 461 l S Q
+q 0.3 w 208 461 m 200 457 l S 208 461 m 200 465 l S Q
+q 0.3 w 356 461 m 384 461 l S Q
+q 0.3 w 384 461 m 376 457 l S 384 461 m 376 465 l S Q
+q 0.3 w 554 461 m 582 461 l S Q
+q 0.3 w 582 461 m 574 457 l S 582 461 m 574 465 l S Q
+q 0.3 w 666 420 m 666 332 l S Q
+q 0.3 w 666 332 m 662 340 l S 666 332 m 670 340 l S Q
+q 0.3 w 282 420 m 282 332 l S Q
+q 0.3 w 282 332 m 278 340 l S 282 332 m 286 340 l S Q
+q 0.3 w 469 420 m 469 332 l S Q
+q 0.3 w 469 332 m 465 340 l S 469 332 m 473 340 l S Q
+BT /F1 11 Tf 36 196 Td (Key rule: the simulator container never launches Multipass or LXD directly. It asks the host bridge to do it on the host OS.) Tj ET
+q 0.82 0.82 0.82 rg 32 20 728 0.8 re f Q
+BT /F1 9 Tf 32 8 Td (CloudLearn Service Spawn Diagram) Tj ET
+BT /F1 9 Tf 714 8 Td (Page 1) Tj ET
+endstream
+endobj
+4 0 obj
+<< /Type /Page /Parent 9 0 R /MediaBox [0 0 792 612] /Resources << /Font << /F1 1 0 R /F2 2 0 R >> >> /Contents 3 0 R >>
+endobj
+5 0 obj
+<< /Length 2856 >>
+stream
+BT /F2 20 Tf 32 570 Td (EC2 Launch Sequence) Tj ET
+BT /F1 10 Tf 32 550 Td (The instance is created in the simulator first, then the host bridge attempts to start the real sandbox) Tj ET
+q 0.70 0.74 0.80 rg 32 540 728 1.2 re f Q
+q 0.96 0.96 0.92 rg 0.27 0.34 0.42 RG 30 420 110 70 re B Q
+BT /F2 10 Tf 38 474 Td (Browser) Tj ET
+BT /F1 8 Tf 38 460 Td (Launch modal) Tj ET
+BT /F1 8 Tf 38 450 Td (Host OS hint fallback) Tj ET
+q 0.95 0.97 0.99 rg 0.27 0.34 0.42 RG 156 420 126 70 re B Q
+BT /F2 10 Tf 164 474 Td (simulator UI) Tj ET
+BT /F1 8 Tf 164 460 Td (/api/ec2/instances) Tj ET
+BT /F1 8 Tf 164 450 Td (WebSocket console) Tj ET
+q 0.94 0.98 0.95 rg 0.27 0.34 0.42 RG 300 420 126 70 re B Q
+BT /F2 10 Tf 308 474 Td (server.py) Tj ET
+BT /F1 8 Tf 308 460 Td (Create instance) Tj ET
+BT /F1 8 Tf 308 450 Td (Queue runtime start) Tj ET
+q 0.98 0.95 0.95 rg 0.27 0.34 0.42 RG 444 420 126 70 re B Q
+BT /F2 10 Tf 452 474 Td (CloudSim) Tj ET
+BT /F1 8 Tf 452 460 Td (Upsert resource) Tj ET
+BT /F1 8 Tf 452 450 Td (Track launch status) Tj ET
+q 0.95 0.95 0.99 rg 0.27 0.34 0.42 RG 588 420 166 70 re B Q
+BT /F2 10 Tf 596 474 Td (Host runtime bridge) Tj ET
+BT /F1 8 Tf 596 460 Td (Call Multipass or LXD on host) Tj ET
+BT /F1 8 Tf 596 450 Td (Return success or error) Tj ET
+q 0.95 0.98 0.96 rg 0.27 0.34 0.42 RG 300 236 126 72 re B Q
+BT /F2 10 Tf 308 292 Td (Multipass) Tj ET
+BT /F1 8 Tf 308 278 Td (macOS / Windows host) Tj ET
+BT /F1 8 Tf 308 268 Td (Host VM sandbox) Tj ET
+q 0.98 0.98 0.92 rg 0.27 0.34 0.42 RG 444 236 126 72 re B Q
+BT /F2 10 Tf 452 292 Td (LXD) Tj ET
+BT /F1 8 Tf 452 278 Td (Linux host) Tj ET
+BT /F1 8 Tf 452 268 Td (Container sandbox) Tj ET
+q 0.94 0.96 0.99 rg 0.27 0.34 0.42 RG 588 236 166 72 re B Q
+BT /F2 10 Tf 596 292 Td (EC2 console session) Tj ET
+BT /F1 8 Tf 596 278 Td (SSH or shell stream) Tj ET
+BT /F1 8 Tf 596 268 Td (Only after state is running) Tj ET
+q 0.3 w 140 455 m 156 455 l S Q
+q 0.3 w 156 455 m 148 451 l S 156 455 m 148 459 l S Q
+q 0.3 w 282 455 m 300 455 l S Q
+q 0.3 w 300 455 m 292 451 l S 300 455 m 292 459 l S Q
+q 0.3 w 426 455 m 444 455 l S Q
+q 0.3 w 444 455 m 436 451 l S 444 455 m 436 459 l S Q
+q 0.3 w 570 455 m 588 455 l S Q
+q 0.3 w 588 455 m 580 451 l S 588 455 m 580 459 l S Q
+q 0.3 w 671 420 m 671 308 l S Q
+q 0.3 w 671 308 m 667 316 l S 671 308 m 675 316 l S Q
+q 0.3 w 363 420 m 363 308 l S Q
+q 0.3 w 363 308 m 359 316 l S 363 308 m 367 316 l S Q
+q 0.3 w 507 420 m 507 308 l S Q
+q 0.3 w 507 308 m 503 316 l S 507 308 m 511 316 l S Q
+q 0.3 w 671 236 m 671 308 l S Q
+q 0.3 w 671 308 m 675 300 l S 671 308 m 667 300 l S Q
+BT /F1 11 Tf 36 190 Td (Failure mode: if the host bridge is unreachable, the instance stays pending and launch_status becomes error. The UI shows launch failed.) Tj ET
+q 0.82 0.82 0.82 rg 32 20 728 0.8 re f Q
+BT /F1 9 Tf 32 8 Td (CloudLearn Service Spawn Diagram) Tj ET
+BT /F1 9 Tf 714 8 Td (Page 2) Tj ET
+endstream
+endobj
+6 0 obj
+<< /Type /Page /Parent 9 0 R /MediaBox [0 0 792 612] /Resources << /Font << /F1 1 0 R /F2 2 0 R >> >> /Contents 5 0 R >>
+endobj
+7 0 obj
+<< /Length 2107 >>
+stream
+BT /F2 20 Tf 32 570 Td (Responsibilities by Layer) Tj ET
+BT /F1 10 Tf 32 550 Td (This is the clean split that keeps the architecture understandable) Tj ET
+q 0.70 0.74 0.80 rg 32 540 728 1.2 re f Q
+q 0.97 0.98 0.92 rg 0.27 0.34 0.42 RG 28 408 208 110 re B Q
+BT /F2 10 Tf 36 502 Td (Host OS) Tj ET
+BT /F1 8 Tf 36 488 Td (Detects actual OS) Tj ET
+BT /F1 8 Tf 36 478 Td (Writes .cloudlearn-host.json) Tj ET
+BT /F1 8 Tf 36 468 Td (Starts runtime bridge) Tj ET
+BT /F1 8 Tf 36 458 Td (Owns Multipass/LXD) Tj ET
+q 0.95 0.97 0.99 rg 0.27 0.34 0.42 RG 256 408 208 110 re B Q
+BT /F2 10 Tf 264 502 Td (simulator container) Tj ET
+BT /F1 8 Tf 264 488 Td (Serves UI) Tj ET
+BT /F1 8 Tf 264 478 Td (Exposes AWS/GCP APIs) Tj ET
+BT /F1 8 Tf 264 468 Td (Reads host config JSON) Tj ET
+BT /F1 8 Tf 264 458 Td (Calls runtime bridge) Tj ET
+q 0.95 0.98 0.95 rg 0.27 0.34 0.42 RG 484 408 280 110 re B Q
+BT /F2 10 Tf 492 502 Td (cloudsim container) Tj ET
+BT /F1 8 Tf 492 488 Td (Tracks spaces and resource graphs) Tj ET
+BT /F1 8 Tf 492 478 Td (Stores events and summaries) Tj ET
+BT /F1 8 Tf 492 468 Td (Reflects EC2/GCP resources in the active space) Tj ET
+BT /F2 14 Tf 28 320 Td (Launch states) Tj ET
+BT /F1 11 Tf 28 300 Td (- pending: the instance record exists but the runtime is not yet confirmed.) Tj ET
+BT /F1 11 Tf 28 284 Td (- running: the host runtime started successfully and the console can connect.) Tj ET
+BT /F1 11 Tf 28 268 Td (- launch_status=error: the host bridge could not start the sandbox.) Tj ET
+BT /F1 11 Tf 28 252 Td (- terminated: the sandbox was removed and the instance is no longer active.) Tj ET
+BT /F2 14 Tf 396 320 Td (Host bridge checks) Tj ET
+BT /F1 11 Tf 396 300 Td (- Bridge health must be reachable from the container.) Tj ET
+BT /F1 11 Tf 396 284 Td (- Multipass is used on macOS and Windows.) Tj ET
+BT /F1 11 Tf 396 268 Td (- LXD is used on Linux.) Tj ET
+BT /F1 11 Tf 396 252 Td (- The browser OS hint is only a fallback; host config JSON is preferred.) Tj ET
+q 0.82 0.82 0.82 rg 32 20 728 0.8 re f Q
+BT /F1 9 Tf 32 8 Td (CloudLearn Service Spawn Diagram) Tj ET
+BT /F1 9 Tf 714 8 Td (Page 3) Tj ET
+endstream
+endobj
+8 0 obj
+<< /Type /Page /Parent 9 0 R /MediaBox [0 0 792 612] /Resources << /Font << /F1 1 0 R /F2 2 0 R >> >> /Contents 7 0 R >>
+endobj
+9 0 obj
+<< /Type /Pages /Kids [4 0 R 6 0 R 8 0 R] /Count 3 >>
+endobj
+10 0 obj
+<< /Type /Catalog /Pages 9 0 R >>
+endobj
+xref
+0 11
+0000000000 65535 f 
+0000000015 00000 n 
+0000000085 00000 n 
+0000000160 00000 n 
+0000002818 00000 n 
+0000002954 00000 n 
+0000005861 00000 n 
+0000005997 00000 n 
+0000008155 00000 n 
+0000008291 00000 n 
+0000008360 00000 n 
+trailer
+<< /Size 11 /Root 10 0 R >>
+startxref
+8410
+%%EOF

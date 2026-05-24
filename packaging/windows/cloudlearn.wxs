@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package Name="CloudLearn"
+           Manufacturer="CloudLearn"
+           Version="0.1.0"
+           UpgradeCode="7b95b0f4-1e4d-4e0e-9c8d-29d2f1d93a11"
+           Language="1033"
+           InstallerVersion="500"
+           Compressed="yes"
+           Scope="perMachine">
+    <MajorUpgrade DowngradeErrorMessage="A newer version of CloudLearn is already installed." />
+    <MediaTemplate />
+
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="CloudLearn">
+        <Directory Id="BINFOLDER" Name="bin" />
+        <Directory Id="SCRIPTSDIR" Name="scripts" />
+        <Directory Id="DOCSDIR" Name="docs" />
+        <Directory Id="PACKAGINGDIR" Name="packaging" />
+      </Directory>
+    </StandardDirectory>
+
+    <StandardDirectory Id="ProgramMenuFolder">
+      <Directory Id="AppProgramsFolder" Name="CloudLearn" />
+    </StandardDirectory>
+
+    <Feature Id="MainFeature" Title="CloudLearn" Level="1">
+      <ComponentGroupRef Id="CloudLearnFiles" />
+      <ComponentRef Id="AppShortcutComponent" />
+    </Feature>
+
+    <ComponentGroup Id="CloudLearnFiles" Directory="INSTALLFOLDER">
+      <Component Id="LauncherComponent" Guid="4d49b6f6-4d36-4a84-871e-2f3c2ef3c6f2">
+        <File Source="$(var.SourceDir)\scripts\cloud-learn.ps1" KeyPath="yes" />
+      </Component>
+      <Component Id="LauncherScriptComponent" Guid="0cc4f7c1-5f47-47e8-9d65-2c9b4f2b6f8d">
+        <File Source="$(var.SourceDir)\scripts\cloud-learn" KeyPath="yes" />
+      </Component>
+      <Component Id="DocsComponent" Guid="dbf4f1f9-45e4-4fd8-8f41-2b8d6d9d1e5e">
+        <File Source="$(var.SourceDir)\docs\architecture\distribution_strategy.md" KeyPath="yes" />
+      </Component>
+    </ComponentGroup>
+
+    <Component Id="AppShortcutComponent" Guid="6fa34b4d-7e0f-4f8e-a9d6-6434f62a2f54" Directory="AppProgramsFolder">
+      <Shortcut Id="CloudLearnShortcut"
+                Name="CloudLearn Appliance"
+                Description="Start CloudLearn appliance mode"
+                Target="[SystemFolder]WindowsPowerShell\v1.0\powershell.exe"
+                Arguments="-ExecutionPolicy Bypass -File &quot;[INSTALLFOLDER]scripts\cloud-learn.ps1&quot; appliance up"
+                WorkingDirectory="INSTALLFOLDER" />
+      <RegistryValue Root="HKCU"
+                     Key="Software\CloudLearn"
+                     Name="installed"
+                     Type="integer"
+                     Value="1"
+                     KeyPath="yes" />
+    </Component>
+  </Package>
+</Wix>

@@ -13,6 +13,7 @@ import java.net.InetSocketAddress;
 import java.net.URI;
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Path;
 import java.time.Instant;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -25,7 +26,8 @@ public final class CloudSimBackboneServer {
     public static void main(String[] args) throws Exception {
         final String host = System.getenv().getOrDefault("CLOUDLEARN_CLOUDSIM_HOST", "127.0.0.1");
         final int port = Integer.parseInt(System.getenv().getOrDefault("CLOUDLEARN_CLOUDSIM_PORT", "9010"));
-        final CloudSimRegistry registry = new CloudSimRegistry();
+        final String stateFile = System.getenv().getOrDefault("CLOUDLEARN_CLOUDSIM_STATE_FILE", "").trim();
+        final CloudSimRegistry registry = stateFile.isBlank() ? new CloudSimRegistry() : new CloudSimRegistry(Path.of(stateFile));
 
         HttpServer server = HttpServer.create(new InetSocketAddress(host, port), 0);
         server.createContext("/health", exchange -> sendJson(exchange, 200, Map.of(

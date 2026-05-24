@@ -18,7 +18,7 @@ brew install cloud-learn
 ## What the formula installs
 
 - `cloud-learn` launcher in `bin`
-- the Compose bundle
+- the appliance Compose bundle
 - the CloudSim sidecar source
 - the simulator backend
 - docs and scripts
@@ -27,18 +27,12 @@ brew install cloud-learn
 
 The installed launcher expects:
 
-- Docker
-- Docker Compose
+- Multipass
 
-For local testing, the compose stack builds the images on the local machine.
-EC2 launch requires a working LXD runtime and will remain disabled until LXD is available.
-
-## Local development
-
-For source checkout usage, run:
+The Homebrew package defaults to appliance mode. The launcher brings up the
+local Multipass VM and then starts the full CloudLearn stack inside that VM.
+The source checkout also uses the same appliance launcher:
 
 ```bash
-bash ./scripts/cloud-learn dev up
+bash ./scripts/cloud-learn up
 ```
-
-That uses the same launcher logic as the package install path.

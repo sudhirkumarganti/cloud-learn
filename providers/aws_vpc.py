@@ -19,7 +19,7 @@ def api_vpc_list_vpcs():
         subnets = [item for item in s.vpc_state["subnets"].values() if item.get("vpc_id") == vpc_id]
         route_tables = [item for item in s.vpc_state["route_tables"].values() if item.get("vpc_id") == vpc_id]
         security_groups = [item for item in s.vpc_state["security_groups"].values() if item.get("vpc_id") == vpc_id]
-        internet_gateways = [item for item in s.vpc_state["internet_gateways"].values() if item.get("attached_vpc_id") == vpc_id]
+        internet_gateways = [item for item in s.vpc_state.get("internet_gateways", {}).values() if item.get("attached_vpc_id") == vpc_id]
         vpcs.append(
             {
                 **vpc,
@@ -112,9 +112,9 @@ def api_vpc_delete(vpc_id: str, force: bool = False):
         if sg.get("vpc_id") == vpc_id:
             del s.vpc_state["security_groups"][sg_id]
 
-    for igw_id, igw in list(s.vpc_state["internet_gateways"].items()):
+    for igw_id, igw in list(s.vpc_state.get("internet_gateways", {}).items()):
         if igw.get("attached_vpc_id") == vpc_id:
-            del s.vpc_state["internet_gateways"][igw_id]
+            del s.vpc_state.get("internet_gateways", {})[igw_id]
 
     del s.vpc_state["vpcs"][vpc_id]
     s._record_usage("vpc.delete_vpc", {"vpc_id": vpc_id, "force": force})
@@ -221,14 +221,15 @@ def api_vpc_create_route_table(req):
 
 def api_vpc_list_internet_gateways():
     s = _server()
-    return {"internet_gateways": list(s.vpc_state["internet_gateways"].values()), "count": len(s.vpc_state["internet_gateways"])}
+    internet_gateways = s.vpc_state.get("internet_gateways", {})
+    return {"internet_gateways": list(internet_gateways.values()), "count": len(internet_gateways)}
 
 
 def api_vpc_create_internet_gateway(req):
     s = _server()
     igw_id = s._id("igw")
     igw = {"internet_gateway_id": igw_id, "name": req.name or igw_id, "attached_vpc_id": "", "created": s._now(), "tags": req.tags or []}
-    s.vpc_state["internet_gateways"][igw_id] = igw
+    s.vpc_state.setdefault("internet_gateways", {})[igw_id] = igw
     s._record_usage("vpc.create_internet_gateway", igw)
     return igw
 
@@ -272,7 +273,7 @@ def api_vpc_resources(vpc_id: str):
     subnets = [item for item in s.vpc_state["subnets"].values() if item.get("vpc_id") == vpc_id]
     route_tables = [item for item in s.vpc_state["route_tables"].values() if item.get("vpc_id") == vpc_id]
     security_groups = [item for item in s.vpc_state["security_groups"].values() if item.get("vpc_id") == vpc_id]
-    internet_gateways = [item for item in s.vpc_state["internet_gateways"].values() if item.get("attached_vpc_id") == vpc_id]
+    internet_gateways = [item for item in s.vpc_state.get("internet_gateways", {}).values() if item.get("attached_vpc_id") == vpc_id]
     instances = [item for item in s.ec2_state["instances"].values() if item.get("vpc_id") == vpc_id]
     return {
         "vpc": s.vpc_state["vpcs"][vpc_id],

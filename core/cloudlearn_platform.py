@@ -27,6 +27,24 @@ def _now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
 
 
+def _appliance_mode_enabled() -> bool:
+    return str(os.environ.get("CLOUDLEARN_DISTRIBUTION_MODE") or "developer").strip().lower() == "appliance"
+
+
+def _default_runtime_backends() -> list[str]:
+    return ["lxd"] if _appliance_mode_enabled() else ["multipass", "lxd"]
+
+
+def _default_space_cloudsim_policy() -> dict:
+    return {
+        "ec2": {
+            "launch": True,
+            "allowed_runtime_backends": _default_runtime_backends(),
+            "allowed_amis": [],
+        }
+    }
+
+
 def _json_default(value: Any) -> Any:
     if isinstance(value, Path):
         return str(value)
@@ -741,11 +759,22 @@ class FirestoreEngine:
             "rds_count": int(spec.get("rds_count") or 0),
             "sqs_count": int(spec.get("sqs_count") or 0),
             "dynamodb_count": int(spec.get("dynamodb_count") or 0),
-            "cloudsim": {"summary": {}, "events": [], "last_tick": ""},
             "runtime": {"mode": "sandboxed", "instances": {}, "sandbox_count": 0},
             "resources": {},
             "events": [],
             "snapshots": [],
+            "cloudsim": {
+                "summary": {},
+                "events": [],
+                "last_tick": "",
+                "policy": {
+                        "ec2": {
+                            "launch": True,
+                            "allowed_runtime_backends": _default_runtime_backends(),
+                            "allowed_amis": [],
+                        }
+                    },
+            },
             "service_states": {
                 "s3": {"buckets": {}, "objects": {}, "multiparts": {}},
                 "ec2": {"instances": {}},
@@ -810,6 +839,39 @@ class FirestoreEngine:
         if spaces_state.get("active_space_id") == space_id:
             spaces_state["active_space_id"] = next(iter(spaces.keys()), "")
         self.persist()
+
+    def get_space_policy(self, space_id: str) -> dict:
+        spaces_state = self._spaces_state()
+        space = spaces_state.get("spaces", {}).get(space_id)
+        if not isinstance(space, dict):
+            raise KeyError(space_id)
+        cloudsim = space.setdefault("cloudsim", {"summary": {}, "events": [], "last_tick": ""})
+        policy = cloudsim.setdefault(
+            "policy",
+            _default_space_cloudsim_policy(),
+        )
+        self.persist()
+        return copy.deepcopy(policy)
+
+    def set_space_policy(self, space_id: str, policy: dict | None) -> dict:
+        spaces_state = self._spaces_state()
+        space = spaces_state.get("spaces", {}).get(space_id)
+        if not isinstance(space, dict):
+            raise KeyError(space_id)
+        cloudsim = space.setdefault("cloudsim", {"summary": {}, "events": [], "last_tick": ""})
+        policy_value = copy.deepcopy(policy or {})
+        if not isinstance(policy_value, dict):
+            policy_value = {}
+        ec2_policy = policy_value.setdefault("ec2", {})
+        if not isinstance(ec2_policy, dict):
+            ec2_policy = {}
+            policy_value["ec2"] = ec2_policy
+        ec2_policy.setdefault("launch", True)
+        ec2_policy.setdefault("allowed_runtime_backends", _default_runtime_backends())
+        ec2_policy.setdefault("allowed_amis", [])
+        cloudsim["policy"] = policy_value
+        self.persist()
+        return copy.deepcopy(policy_value)
 
 
 for _kernel_method_name in (
@@ -1069,9 +1131,53 @@ class RuntimeManager:
         self._bootstrap_thread: threading.Thread | None = None
 
     def host_os(self) -> str:
+        bridge_os = str(self._runtime_bridge_status().get("host_os") or "").strip().lower()
+        if bridge_os:
+            return bridge_os
+        config_os = self._host_config().get("host_os")
+        if config_os:
+            return str(config_os).strip().lower()
         return str(os.environ.get("CLOUDLEARN_PARENT_OS") or platform.system()).strip().lower()
 
+    def distribution_mode(self) -> str:
+        config_mode = self._host_config().get("distribution_mode")
+        if config_mode:
+            return str(config_mode).strip().lower()
+        return str(os.environ.get("CLOUDLEARN_DISTRIBUTION_MODE") or "developer").strip().lower()
+
+    def _host_config(self) -> dict:
+        path = Path(str(os.environ.get("CLOUDLEARN_HOST_CONFIG_FILE") or "").strip() or "/config/cloudlearn-host.json")
+        try:
+            if not path.exists():
+                return {}
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            return payload if isinstance(payload, dict) else {}
+        except Exception:
+            return {}
+
+    def _runtime_bridge_url(self) -> str:
+        config = self._host_config()
+        return str(
+            os.environ.get("CLOUDLEARN_RUNTIME_BRIDGE_URL")
+            or config.get("runtime_bridge_url")
+            or "http://host.docker.internal:9171"
+        ).strip().rstrip("/")
+
+    def _runtime_bridge_status(self) -> dict:
+        url = self._runtime_bridge_url()
+        if not url:
+            return {}
+        try:
+            req = urllib.request.Request(f"{url}/health", headers={"Accept": "application/json"})
+            with urllib.request.urlopen(req, timeout=2) as response:
+                payload = json.loads(response.read().decode("utf-8") or "{}")
+                return payload if isinstance(payload, dict) else {}
+        except Exception:
+            return {}
+
     def supported_backends(self) -> list[str]:
+        if self.distribution_mode() == "appliance":
+            return ["lxd"]
         host_os = self.host_os()
         if host_os in {"windows", "darwin"}:
             return ["multipass"]
@@ -1086,7 +1192,8 @@ class RuntimeManager:
         return None
 
     def inside_container(self) -> bool:
-        return Path("/.dockerenv").exists() or "docker" in (Path("/proc/1/cgroup").read_text(errors="ignore").lower() if Path("/proc/1/cgroup").exists() else "")
+        cgroup = Path("/proc/1/cgroup").read_text(errors="ignore").lower() if Path("/proc/1/cgroup").exists() else ""
+        return bool(os.environ.get("container")) or "kubepods" in cgroup or "lxc" in cgroup or "containerd" in cgroup
 
     def lxd_cli(self) -> str | None:
         return self.cli_for("lxd")
@@ -1094,11 +1201,13 @@ class RuntimeManager:
     def multipass_cli(self) -> str | None:
         return self.cli_for("multipass")
 
-    def docker_cli(self) -> str | None:
-        return self.lxd_cli()
-
     def bridge_base_url(self) -> str:
-        return str(os.environ.get("CLOUDLEARN_RUNTIME_BRIDGE_URL") or "").strip().rstrip("/")
+        config = self._host_config()
+        return str(
+            os.environ.get("CLOUDLEARN_RUNTIME_BRIDGE_URL")
+            or config.get("runtime_bridge_url")
+            or "http://host.docker.internal:9171"
+        ).strip().rstrip("/")
 
     def bridge_token(self) -> str:
         return str(os.environ.get("CLOUDLEARN_RUNTIME_BRIDGE_TOKEN") or "").strip()
@@ -1310,6 +1419,7 @@ class RuntimeManager:
         return {
             "available": any(item.get("available") for item in backends.values()),
             "host_os": self.host_os(),
+            "distribution_mode": self.distribution_mode(),
             "preferred_backend": preferred,
             "backends": backends,
         }
@@ -1364,6 +1474,8 @@ class RuntimeManager:
             return self.bootstrap_status()
 
     def preferred_backend(self) -> str:
+        if self.distribution_mode() == "appliance":
+            return "lxd"
         for backend in ("multipass", "lxd"):
             if self.available(backend):
                 return backend
@@ -1426,6 +1538,45 @@ class CloudLearnPlatform:
     def get_active_space(self) -> dict | None:
         return self.kernel.get_active_space()
 
+    def get_space_policy(self, space_id: str) -> dict:
+        spaces_state = self.kernel.state.setdefault("spaces", {"spaces": {}, "active_space_id": "", "settings": {}})
+        space = spaces_state.get("spaces", {}).get(space_id)
+        if not isinstance(space, dict):
+            raise KeyError(space_id)
+        cloudsim = space.setdefault("cloudsim", {"summary": {}, "events": [], "last_tick": ""})
+        policy = cloudsim.setdefault(
+            "policy",
+                {
+                    "ec2": {
+                        "launch": True,
+                        "allowed_runtime_backends": _default_runtime_backends(),
+                        "allowed_amis": [],
+                    }
+                },
+        )
+        self.persist()
+        return copy.deepcopy(policy)
+
+    def set_space_policy(self, space_id: str, policy: dict | None) -> dict:
+        spaces_state = self.kernel.state.setdefault("spaces", {"spaces": {}, "active_space_id": "", "settings": {}})
+        space = spaces_state.get("spaces", {}).get(space_id)
+        if not isinstance(space, dict):
+            raise KeyError(space_id)
+        cloudsim = space.setdefault("cloudsim", {"summary": {}, "events": [], "last_tick": ""})
+        policy_value = copy.deepcopy(policy or {})
+        if not isinstance(policy_value, dict):
+            policy_value = {}
+        ec2_policy = policy_value.setdefault("ec2", {})
+        if not isinstance(ec2_policy, dict):
+            ec2_policy = {}
+            policy_value["ec2"] = ec2_policy
+        ec2_policy.setdefault("launch", True)
+        ec2_policy.setdefault("allowed_runtime_backends", _default_runtime_backends())
+        ec2_policy.setdefault("allowed_amis", [])
+        cloudsim["policy"] = policy_value
+        self.persist()
+        return copy.deepcopy(policy_value)
+
     def estimate_space_cost(self, spec: dict | None = None) -> dict:
         return self.kernel.estimate_space_cost(spec)
 
@@ -1473,6 +1624,52 @@ class CloudLearnPlatform:
         except Exception:
             pass
         return space
+
+    def rehydrate_cloudsim(self) -> dict:
+        spaces_state = self.kernel.state.setdefault("spaces", {"spaces": {}, "active_space_id": "", "settings": {}})
+        local_spaces = list(spaces_state.get("spaces", {}).values())
+        if not local_spaces:
+            return {"message": "No spaces to rehydrate", "spaces": 0, "restored": 0}
+        try:
+            remote_summary = self.cloudsim.summary()
+            remote_count = int(remote_summary.get("spaces", 0) or 0) if isinstance(remote_summary, dict) else 0
+        except Exception:
+            remote_summary = {}
+            remote_count = 0
+        if remote_count >= len(local_spaces):
+            return {
+                "message": "CloudSim already synchronized",
+                "spaces": len(local_spaces),
+                "restored": 0,
+                "active_space_id": spaces_state.get("active_space_id", ""),
+            }
+
+        restored = 0
+        for space in local_spaces:
+            if not isinstance(space, dict):
+                continue
+            try:
+                self.cloudsim.create_space(copy.deepcopy(space))
+                restored += 1
+            except Exception:
+                continue
+        active_space_id = spaces_state.get("active_space_id", "")
+        if active_space_id:
+            try:
+                self.cloudsim.switch_space(active_space_id)
+            except Exception:
+                pass
+        try:
+            self.cloudsim.reconcile()
+        except Exception:
+            pass
+        self.persist()
+        return {
+            "message": "CloudSim rehydrated",
+            "spaces": len(local_spaces),
+            "restored": restored,
+            "active_space_id": active_space_id,
+        }
 
     def switch_space(self, space_id: str) -> dict:
         space = self.kernel.switch_space(space_id)
@@ -1523,21 +1720,55 @@ class CloudLearnPlatform:
             summary = payload.get("summary") if isinstance(payload, dict) else {}
             if not isinstance(summary, dict):
                 summary = {}
+            try:
+                runtime_status = self.runtime.bootstrap_status()
+            except Exception:
+                runtime_status = {}
             cloudsim_state = self.kernel.state.setdefault("cloudsim", {"summary": {}, "events": [], "last_reconcile_at": ""})
             local_summary = copy.deepcopy(cloudsim_state.get("summary", {}))
             for key, value in local_summary.items():
                 if key not in summary or summary.get(key) in {"", None, 0, {}}:
                     summary[key] = copy.deepcopy(value)
+            summary.setdefault("host_os", runtime_status.get("host_os", self.runtime.host_os()))
+            summary.setdefault("distribution_mode", runtime_status.get("distribution_mode", self.runtime.distribution_mode()))
+            summary.setdefault("preferred_backend", runtime_status.get("preferred_backend", self.runtime.preferred_backend()))
+            summary.setdefault("sandbox_backend", summary.get("preferred_backend", self.runtime.preferred_backend()))
             summary.setdefault("last_reconcile_at", cloudsim_state.get("last_reconcile_at", ""))
             if not summary.get("last_reconcile_at"):
                 summary["last_reconcile_at"] = cloudsim_state.get("last_reconcile_at", "")
             payload["summary"] = summary
             return payload
         except Exception:
+            try:
+                self.rehydrate_cloudsim()
+                payload = self.cloudsim.current()
+                summary = payload.get("summary") if isinstance(payload, dict) else {}
+                if not isinstance(summary, dict):
+                    summary = {}
+                cloudsim_state = self.kernel.state.setdefault("cloudsim", {"summary": {}, "events": [], "last_reconcile_at": ""})
+                local_summary = copy.deepcopy(cloudsim_state.get("summary", {}))
+                for key, value in local_summary.items():
+                    if key not in summary or summary.get(key) in {"", None, 0, {}}:
+                        summary[key] = copy.deepcopy(value)
+                summary.setdefault("host_os", self.runtime.host_os())
+                summary.setdefault("distribution_mode", self.runtime.distribution_mode())
+                summary.setdefault("preferred_backend", self.runtime.preferred_backend())
+                summary.setdefault("sandbox_backend", summary.get("preferred_backend", self.runtime.preferred_backend()))
+                summary.setdefault("last_reconcile_at", cloudsim_state.get("last_reconcile_at", ""))
+                if not summary.get("last_reconcile_at"):
+                    summary["last_reconcile_at"] = cloudsim_state.get("last_reconcile_at", "")
+                payload["summary"] = summary
+                return payload
+            except Exception:
+                pass
             spaces_state = self.kernel.state.setdefault("spaces", {"spaces": {}, "active_space_id": "", "settings": {}})
             active_id = spaces_state.get("active_space_id", "")
             active = spaces_state.get("spaces", {}).get(active_id, {}) if active_id else {}
             summary = copy.deepcopy(self.kernel.state.setdefault("cloudsim", {"summary": {}, "events": [], "last_reconcile_at": ""}).get("summary", {}))
+            summary.setdefault("host_os", self.runtime.host_os())
+            summary.setdefault("distribution_mode", self.runtime.distribution_mode())
+            summary.setdefault("preferred_backend", self.runtime.preferred_backend())
+            summary.setdefault("sandbox_backend", summary.get("preferred_backend", self.runtime.preferred_backend()))
             summary["active_space_id"] = active_id
             summary["active_space_name"] = active.get("name", "")
             summary["spaces"] = len(spaces_state.get("spaces", {}))
@@ -1549,17 +1780,46 @@ class CloudLearnPlatform:
             summary = self.cloudsim.summary()
             if not isinstance(summary, dict):
                 summary = {}
+            try:
+                runtime_status = self.runtime.bootstrap_status()
+            except Exception:
+                runtime_status = {}
             cloudsim_state = self.kernel.state.setdefault("cloudsim", {"summary": {}, "events": [], "last_reconcile_at": ""})
             local_summary = copy.deepcopy(cloudsim_state.get("summary", {}))
             for key, value in local_summary.items():
                 if key not in summary or summary.get(key) in {"", None, 0, {}}:
                     summary[key] = copy.deepcopy(value)
+            summary.setdefault("host_os", runtime_status.get("host_os", self.runtime.host_os()))
+            summary.setdefault("distribution_mode", runtime_status.get("distribution_mode", self.runtime.distribution_mode()))
+            summary.setdefault("preferred_backend", runtime_status.get("preferred_backend", self.runtime.preferred_backend()))
+            summary.setdefault("sandbox_backend", summary.get("preferred_backend", self.runtime.preferred_backend()))
             if not summary.get("last_reconcile_at"):
                 summary["last_reconcile_at"] = cloudsim_state.get("last_reconcile_at", "")
             return {"summary": summary}
         except Exception:
+            try:
+                self.rehydrate_cloudsim()
+                summary = self.cloudsim.summary()
+                if not isinstance(summary, dict):
+                    summary = {}
+                cloudsim_state = self.kernel.state.setdefault("cloudsim", {"summary": {}, "events": [], "last_reconcile_at": ""})
+                local_summary = copy.deepcopy(cloudsim_state.get("summary", {}))
+                for key, value in local_summary.items():
+                    if key not in summary or summary.get(key) in {"", None, 0, {}}:
+                        summary[key] = copy.deepcopy(value)
+                summary.setdefault("host_os", self.runtime.host_os())
+                summary.setdefault("preferred_backend", self.runtime.preferred_backend())
+                summary.setdefault("sandbox_backend", summary.get("preferred_backend", self.runtime.preferred_backend()))
+                if not summary.get("last_reconcile_at"):
+                    summary["last_reconcile_at"] = cloudsim_state.get("last_reconcile_at", "")
+                return {"summary": summary}
+            except Exception:
+                pass
             spaces_state = self.kernel.state.setdefault("spaces", {"spaces": {}, "active_space_id": "", "settings": {}})
             cloudsim = self.kernel.state.setdefault("cloudsim", {"summary": {}, "events": [], "last_reconcile_at": ""})
+            cloudsim["summary"]["host_os"] = self.runtime.host_os()
+            cloudsim["summary"]["preferred_backend"] = self.runtime.preferred_backend()
+            cloudsim["summary"]["sandbox_backend"] = cloudsim["summary"].get("preferred_backend", self.runtime.preferred_backend())
             cloudsim["summary"]["spaces"] = len(spaces_state.get("spaces", {}))
             cloudsim["summary"]["active_space_id"] = spaces_state.get("active_space_id", "")
             cloudsim["summary"]["max_spaces"] = int(spaces_state.get("settings", {}).get("max_spaces", 6))

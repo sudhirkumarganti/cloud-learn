@@ -11,6 +11,14 @@ def _server():
     return server_module
 
 
+def _strip_action_suffix(value: str, *suffixes: str) -> str:
+    text = str(value or "")
+    for suffix in suffixes:
+        if suffix and text.endswith(suffix):
+            return text[: -len(suffix)]
+    return text
+
+
 TARGETS = [
     "api_gcp_storage_list_buckets",
     "api_gcp_storage_create_bucket",
@@ -42,6 +50,9 @@ TARGETS = [
     "api_gcp_pubsub_ack",
     "api_gcp_pubsub_modify_ack_deadline",
     "api_gcp_pubsub_list_topic_subscriptions",
+    "api_gcp_pubsub_list_schemas",
+    "api_gcp_pubsub_create_schema",
+    "api_gcp_pubsub_delete_schema",
     "api_gcp_firestore_list_root_documents",
     "api_gcp_firestore_list_documents",
     "api_gcp_firestore_create_document",
@@ -49,6 +60,9 @@ TARGETS = [
     "api_gcp_firestore_delete_document",
     "api_gcp_firestore_update_document",
     "api_gcp_firestore_run_query",
+    "api_gcp_firestore_list_indexes",
+    "api_gcp_firestore_create_index",
+    "api_gcp_firestore_delete_index",
     "api_gcp_functions_list",
     "api_gcp_functions_create",
     "api_gcp_functions_update",
@@ -143,9 +157,14 @@ async def api_gcp_storage_create_object(bucket: str, request: Request):
     bucket_rec = s.gcp_storage_state.get("buckets", {}).get(bucket)
     if not bucket_rec:
         raise HTTPException(404, detail="Bucket not found")
-    payload = await request.json() if request is not None else {}
+    try:
+        payload = await request.json() if request is not None else {}
+    except Exception:
+        payload = {}
     payload = payload if isinstance(payload, dict) else {}
-    name = str(payload.get("name") or payload.get("object") or "").strip()
+    # Real GCS uploads pass the object name as the `?name=` query param (uploadType=media);
+    # accept that in addition to a name in the JSON body.
+    name = str(payload.get("name") or payload.get("object") or request.query_params.get("name") or "").strip()
     if not name:
         raise HTTPException(400, detail="Object name is required")
     obj = s._gcp_storage_object_record(bucket, name, payload)
@@ -252,6 +271,7 @@ async def api_gcp_pubsub_create_topic(project: str, request: Request):
 def api_gcp_pubsub_get_topic(project: str, topic: str):
     s = _server()
     project = s._gcp_project_name(project)
+    topic = _strip_action_suffix(topic, ":publish")
     rec = s.gcp_pubsub_state.get("topics", {}).get(topic)
     if not rec or str(rec.get("project") or project) != project:
         raise HTTPException(404, detail="Topic not found")
@@ -261,6 +281,7 @@ def api_gcp_pubsub_get_topic(project: str, topic: str):
 async def api_gcp_pubsub_update_topic(project: str, topic: str, request: Request):
     s = _server()
     project = s._gcp_project_name(project)
+    topic = _strip_action_suffix(topic, ":publish")
     rec = s.gcp_pubsub_state.get("topics", {}).get(topic)
     if not rec or str(rec.get("project") or project) != project:
         raise HTTPException(404, detail="Topic not found")
@@ -280,6 +301,7 @@ async def api_gcp_pubsub_update_topic(project: str, topic: str, request: Request
 def api_gcp_pubsub_list_topic_messages(project: str, topic: str):
     s = _server()
     project = s._gcp_project_name(project)
+    topic = _strip_action_suffix(topic, ":publish")
     rec = s.gcp_pubsub_state.get("topics", {}).get(topic)
     if not rec or str(rec.get("project") or project) != project:
         raise HTTPException(404, detail="Topic not found")
@@ -290,6 +312,7 @@ def api_gcp_pubsub_list_topic_messages(project: str, topic: str):
 def api_gcp_pubsub_delete_topic(project: str, topic: str):
     s = _server()
     project = s._gcp_project_name(project)
+    topic = _strip_action_suffix(topic, ":publish")
     rec = s.gcp_pubsub_state.get("topics", {}).get(topic)
     if not rec or str(rec.get("project") or project) != project:
         raise HTTPException(404, detail="Topic not found")
@@ -305,6 +328,7 @@ def api_gcp_pubsub_delete_topic(project: str, topic: str):
 async def api_gcp_pubsub_publish(project: str, topic: str, request: Request):
     s = _server()
     project = s._gcp_project_name(project)
+    topic = _strip_action_suffix(topic, ":publish")
     rec = s.gcp_pubsub_state.get("topics", {}).get(topic)
     if not rec or str(rec.get("project") or project) != project:
         raise HTTPException(404, detail="Topic not found")
@@ -354,6 +378,7 @@ async def api_gcp_pubsub_create_subscription(project: str, request: Request, que
 def api_gcp_pubsub_get_subscription(project: str, subscription: str):
     s = _server()
     project = s._gcp_project_name(project)
+    subscription = _strip_action_suffix(subscription, ":purge", ":pull", ":acknowledge", ":modifyAckDeadline")
     rec = s.gcp_pubsub_state.get("subscriptions", {}).get(subscription)
     if not rec or str(rec.get("project") or project) != project:
         raise HTTPException(404, detail="Subscription not found")
@@ -363,6 +388,7 @@ def api_gcp_pubsub_get_subscription(project: str, subscription: str):
 def api_gcp_pubsub_list_subscription_messages(project: str, subscription: str):
     s = _server()
     project = s._gcp_project_name(project)
+    subscription = _strip_action_suffix(subscription, ":purge", ":pull", ":acknowledge", ":modifyAckDeadline")
     rec = s.gcp_pubsub_state.get("subscriptions", {}).get(subscription)
     if not rec or str(rec.get("project") or project) != project:
         raise HTTPException(404, detail="Subscription not found")
@@ -373,6 +399,7 @@ def api_gcp_pubsub_list_subscription_messages(project: str, subscription: str):
 def api_gcp_pubsub_purge_subscription(project: str, subscription: str):
     s = _server()
     project = s._gcp_project_name(project)
+    subscription = _strip_action_suffix(subscription, ":purge", ":pull", ":acknowledge", ":modifyAckDeadline")
     rec = s.gcp_pubsub_state.get("subscriptions", {}).get(subscription)
     if not rec or str(rec.get("project") or project) != project:
         raise HTTPException(404, detail="Subscription not found")
@@ -383,6 +410,7 @@ def api_gcp_pubsub_purge_subscription(project: str, subscription: str):
 def api_gcp_pubsub_delete_subscription(project: str, subscription: str):
     s = _server()
     project = s._gcp_project_name(project)
+    subscription = _strip_action_suffix(subscription, ":purge", ":pull", ":acknowledge", ":modifyAckDeadline")
     rec = s.gcp_pubsub_state.get("subscriptions", {}).get(subscription)
     if not rec or str(rec.get("project") or project) != project:
         raise HTTPException(404, detail="Subscription not found")
@@ -394,6 +422,7 @@ def api_gcp_pubsub_delete_subscription(project: str, subscription: str):
 async def api_gcp_pubsub_pull(project: str, subscription: str, request: Request):
     s = _server()
     project = s._gcp_project_name(project)
+    subscription = _strip_action_suffix(subscription, ":purge", ":pull", ":acknowledge", ":modifyAckDeadline")
     rec = s.gcp_pubsub_state.get("subscriptions", {}).get(subscription)
     if not rec or str(rec.get("project") or project) != project:
         raise HTTPException(404, detail="Subscription not found")
@@ -410,6 +439,7 @@ async def api_gcp_pubsub_pull(project: str, subscription: str, request: Request)
 async def api_gcp_pubsub_ack(project: str, subscription: str, request: Request, receipt_handle: str = ""):
     s = _server()
     project = s._gcp_project_name(project)
+    subscription = _strip_action_suffix(subscription, ":purge", ":pull", ":acknowledge", ":modifyAckDeadline")
     if subscription not in s.gcp_pubsub_state.get("subscriptions", {}):
         raise HTTPException(404, detail="Subscription not found")
     body = await request.json() if request is not None else {}
@@ -425,6 +455,7 @@ async def api_gcp_pubsub_ack(project: str, subscription: str, request: Request, 
 async def api_gcp_pubsub_modify_ack_deadline(project: str, subscription: str, request: Request):
     s = _server()
     project = s._gcp_project_name(project)
+    subscription = _strip_action_suffix(subscription, ":purge", ":pull", ":acknowledge", ":modifyAckDeadline")
     if subscription not in s.gcp_pubsub_state.get("subscriptions", {}):
         raise HTTPException(404, detail="Subscription not found")
     payload = await request.json() if request is not None else {}
@@ -456,6 +487,18 @@ def api_gcp_pubsub_list_topic_subscriptions(project: str, topic: str):
         subscriptions.append(f"projects/{project}/subscriptions/{sub.get('subscriptionId') or sub.get('name')}")
     subscriptions.sort()
     return {"subscriptions": subscriptions, "nextPageToken": ""}
+
+
+def api_gcp_pubsub_list_schemas(project: str):
+    return _server().api_gcp_pubsub_list_schemas(project)
+
+
+async def api_gcp_pubsub_create_schema(project: str, request: Request):
+    return await _server().api_gcp_pubsub_create_schema(project, request)
+
+
+def api_gcp_pubsub_delete_schema(project: str, schema: str):
+    return _server().api_gcp_pubsub_delete_schema(project, schema)
 
 
 def api_gcp_firestore_list_root_documents(project: str, database: str):
@@ -547,7 +590,53 @@ async def api_gcp_firestore_run_query(project: str, database: str, request: Requ
             field = field_filter.get("field") if isinstance(field_filter.get("field"), dict) else {}
             field_name = str(field.get("fieldPath") or "")
             field_value = s._gcp_firestore_plain_value(field_filter.get("value")) if field_name else None
-    return s._gcp_firestore_engine().run_query(project, database, collection_id, field_name=field_name, field_value=field_value, limit=limit)
+    result = s._gcp_firestore_engine().run_query(project, database, collection_id, field_name=field_name, field_value=field_value, limit=limit)
+    if collection_id and field_name:
+        index_key = f"{project}:{database}:{collection_id}:{field_name}:{query.get('orderBy', 'ASCENDING')}"
+        s.gcp_firestore_state.setdefault("indexes", {}).setdefault(index_key, s._gcp_firestore_index_record(project, database, collection_id, {
+            "name": index_key.split(":")[-1],
+            "fields": [{"fieldPath": field_name, "order": str(query.get("orderBy") or "ASCENDING")}],
+            "queryScope": "COLLECTION",
+            "description": f"Auto-generated from query on {collection_id}.{field_name}",
+        }))
+    return result
+
+
+def api_gcp_firestore_list_indexes(project: str, database: str, collection: str = ""):
+    s = _server()
+    project = s._gcp_project_name(project)
+    database = str(database or "(default)")
+    indexes = []
+    for index in s.gcp_firestore_state.get("indexes", {}).values():
+        if str(index.get("project") or project) != project or str(index.get("database") or database) != database:
+            continue
+        if collection and str(index.get("collection") or "") != collection:
+            continue
+        indexes.append(s._gcp_firestore_index_view(index))
+    indexes.sort(key=lambda item: item.get("name", ""))
+    return {"indexes": indexes, "kind": "firestore#indexList"}
+
+
+async def api_gcp_firestore_create_index(project: str, database: str, collection: str, request: Request):
+    s = _server()
+    project = s._gcp_project_name(project)
+    database = str(database or "(default)")
+    payload = await request.json() if request is not None else {}
+    payload = payload if isinstance(payload, dict) else {}
+    index = s._gcp_firestore_index_record(project, database, collection, payload)
+    s.gcp_firestore_state.setdefault("indexes", {})[f"{project}:{database}:{collection}:{index['name']}"] = index
+    return s._gcp_firestore_index_view(index)
+
+
+def api_gcp_firestore_delete_index(project: str, database: str, collection: str, index_name: str):
+    s = _server()
+    project = s._gcp_project_name(project)
+    database = str(database or "(default)")
+    key = f"{project}:{database}:{collection}:{index_name}"
+    if key not in s.gcp_firestore_state.get("indexes", {}):
+        raise HTTPException(404, detail="Index not found")
+    del s.gcp_firestore_state["indexes"][key]
+    return {"kind": "firestore#index", "deleted": True, "name": index_name}
 
 
 def api_gcp_functions_list(project: str, location: str = "us-central1"):
@@ -657,6 +746,7 @@ def api_gcp_functions_get_policy(project: str, location: str, function: str):
     s = _server()
     project = s._gcp_project_name(project)
     location = s._gcp_location_name(location)
+    function = _strip_action_suffix(function, ":getIamPolicy", ":setIamPolicy", ":call")
     fn = s.gcp_functions_state.get("functions", {}).get(function)
     if not fn or str(fn.get("project") or project) != project or str(fn.get("location") or location) != location:
         raise HTTPException(404, detail="Function not found")
@@ -667,6 +757,7 @@ async def api_gcp_functions_set_policy(project: str, location: str, function: st
     s = _server()
     project = s._gcp_project_name(project)
     location = s._gcp_location_name(location)
+    function = _strip_action_suffix(function, ":getIamPolicy", ":setIamPolicy", ":call")
     fn = s.gcp_functions_state.get("functions", {}).get(function)
     if not fn or str(fn.get("project") or project) != project or str(fn.get("location") or location) != location:
         raise HTTPException(404, detail="Function not found")
@@ -682,6 +773,7 @@ def api_gcp_functions_get(project: str, location: str, function: str):
     s = _server()
     project = s._gcp_project_name(project)
     location = s._gcp_location_name(location)
+    function = _strip_action_suffix(function, ":getIamPolicy", ":setIamPolicy", ":call")
     fn = s.gcp_functions_state.get("functions", {}).get(function)
     if not fn or str(fn.get("project") or project) != project or str(fn.get("location") or location) != location:
         raise HTTPException(404, detail="Function not found")
@@ -692,6 +784,7 @@ def api_gcp_functions_delete(project: str, location: str, function: str):
     s = _server()
     project = s._gcp_project_name(project)
     location = s._gcp_location_name(location)
+    function = _strip_action_suffix(function, ":getIamPolicy", ":setIamPolicy", ":call")
     fn = s.gcp_functions_state.get("functions", {}).get(function)
     if not fn or str(fn.get("project") or project) != project or str(fn.get("location") or location) != location:
         raise HTTPException(404, detail="Function not found")
@@ -703,6 +796,7 @@ async def api_gcp_functions_call(project: str, location: str, function: str, req
     s = _server()
     project = s._gcp_project_name(project)
     location = s._gcp_location_name(location)
+    function = _strip_action_suffix(function, ":getIamPolicy", ":setIamPolicy", ":call")
     fn = s.gcp_functions_state.get("functions", {}).get(function)
     if not fn or str(fn.get("project") or project) != project or str(fn.get("location") or location) != location:
         raise HTTPException(404, detail="Function not found")
@@ -888,4 +982,3 @@ async def api_gcp_vpc_create_firewall(project: str, request: Request):
     rec = {"id": s._gcp_compute_numeric_id(f"{project}:{name}"), "name": name, "description": str(payload.get("description") or ""), "project": project, "network": str(payload.get("network") or "default").split("/")[-1], "priority": int(payload.get("priority") or 1000), "direction": str(payload.get("direction") or "INGRESS"), "allowed": payload.get("allowed") if isinstance(payload.get("allowed"), list) else [{"IPProtocol": "tcp", "ports": ["22"]}], "denied": payload.get("denied") if isinstance(payload.get("denied"), list) else [], "sourceRanges": payload.get("sourceRanges") if isinstance(payload.get("sourceRanges"), list) else ["0.0.0.0/0"], "destinationRanges": payload.get("destinationRanges") if isinstance(payload.get("destinationRanges"), list) else [], "sourceTags": payload.get("sourceTags") if isinstance(payload.get("sourceTags"), list) else [], "targetTags": payload.get("targetTags") if isinstance(payload.get("targetTags"), list) else [], "sourceServiceAccounts": payload.get("sourceServiceAccounts") if isinstance(payload.get("sourceServiceAccounts"), list) else [], "targetServiceAccounts": payload.get("targetServiceAccounts") if isinstance(payload.get("targetServiceAccounts"), list) else [], "disabled": bool(payload.get("disabled", False)), "logConfig": payload.get("logConfig") if isinstance(payload.get("logConfig"), dict) else {}, "createTime": s._now()}
     s.gcp_vpc_state.setdefault("firewalls", {})[name] = rec
     return {"kind": "compute#firewall", "id": rec["id"], "creationTimestamp": rec["createTime"], "name": name, "description": rec["description"], "network": f"{s._gcp_compute_network_root()}/projects/{project}/global/networks/{rec['network']}", "priority": rec["priority"], "direction": rec["direction"], "allowed": rec["allowed"], "denied": rec["denied"], "sourceRanges": rec["sourceRanges"], "destinationRanges": rec["destinationRanges"], "sourceTags": rec["sourceTags"], "targetTags": rec["targetTags"], "sourceServiceAccounts": rec["sourceServiceAccounts"], "targetServiceAccounts": rec["targetServiceAccounts"], "disabled": rec["disabled"], "logConfig": rec["logConfig"], "selfLink": f"{s._gcp_compute_network_root()}/projects/{project}/global/firewalls/{name}"}
-

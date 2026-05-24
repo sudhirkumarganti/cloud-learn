@@ -44,7 +44,7 @@ PROVIDER_REGISTRY: dict[str, dict] = {
         "native_services": ["S3", "IAM", "EC2", "Lambda", "RDS", "SQS", "DynamoDB", "API Gateway", "VPC"],
         "tooling": {
             "cli": [
-                {"name": "AWS CLI", "status": "integrated", "notes": "Path-style S3 and query-style AWS APIs are already simulated locally."},
+                {"name": "AWS CLI", "status": "integrated", "notes": "Path-style S3, query-style AWS APIs, and major service command translations are simulated locally."},
             ],
             "sdk": [
                 {"name": "Java SDK", "status": "partial", "notes": "Service routes exist, but provider-specific SDK request shaping remains to be wired."},
@@ -152,7 +152,7 @@ PROVIDER_REGISTRY: dict[str, dict] = {
         "native_services": ["Compute Engine", "Cloud Storage", "Cloud SQL", "Pub/Sub", "Firestore", "Cloud Functions", "API Gateway", "VPC Network", "IAM"],
         "tooling": {
             "cli": [
-                {"name": "gcloud / gcutil", "status": "partial", "notes": "Native Google-style REST routes exist; CLI compatibility adapters are still pending."},
+                {"name": "gcloud / gsutil", "status": "partial", "notes": "Native Google-style REST routes exist, and core command translations cover compute, storage, SQL, Pub/Sub, Firestore, Functions, API Gateway, VPC, and IAM. `gsutil` is treated as legacy storage compatibility while `gcloud storage` is the preferred modern path."},
             ],
             "sdk": [
                 {"name": "Java SDK", "status": "partial", "notes": "Compute, Storage, SQL, Pub/Sub, Firestore, Functions and IAM are present, but client wrappers are still missing."},

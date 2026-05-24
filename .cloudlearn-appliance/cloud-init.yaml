@@ -1,0 +1,21 @@
+#cloud-config
+package_update: true
+package_upgrade: true
+ssh_authorized_keys:
+  - ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKBPqlVMDH7uuy1e2xF5i0Uy46oJkOQ+qjqOQddbTL1F cloudlearn
+packages:
+  - python3
+  - python3-pip
+  - curl
+  - ca-certificates
+  - docker.io
+  - docker-compose-v2
+runcmd:
+  - [ bash, -lc, "systemctl enable --now docker" ]
+  - [ bash, -lc, "usermod -aG docker ubuntu || true" ]
+  - [ bash, -lc, "update-alternatives --set docker-compose /usr/libexec/docker/cli-plugins/docker-compose || true" ]
+  - [ bash, -lc, "snap install lxd || true" ]
+  - [ bash, -lc, "usermod -aG lxd ubuntu || true" ]
+  - [ bash, -lc, "cat >/tmp/cloudlearn-lxd-preseed.yaml <<'EOF'\nconfig: {}\nnetworks:\n- name: lxdbr0\n  type: bridge\n  config:\n    ipv4.address: auto\n    ipv4.nat: \"true\"\n    ipv6.address: auto\n    ipv6.nat: \"true\"\nstorage_pools:\n- name: default\n  driver: dir\nprofiles:\n- name: default\n  description: Default LXD profile\n  config: {}\n  devices:\n    root:\n      type: disk\n      pool: default\n      path: /\n    eth0:\n      type: nic\n      network: lxdbr0\n      name: eth0\nEOF\nlxd init --preseed < /tmp/cloudlearn-lxd-preseed.yaml || true" ]
+  - [ bash, -lc, "mkdir -p /workspace/cloud-learn" ]
+  - [ bash, -lc, "sudo mkdir -p /var/lib/cloudlearn/deployments" ]

@@ -9,6 +9,54 @@ def _server():
     return server_module
 
 
+def api_gcp_compute_list_instance_groups(project: str, zone: str):
+    return _server().api_gcp_compute_list_instance_groups(project, zone)
+
+
+async def api_gcp_compute_create_instance_group(project: str, zone: str, request: Request):
+    return await _server().api_gcp_compute_create_instance_group(project, zone, request)
+
+
+def api_gcp_compute_delete_instance_group(project: str, zone: str, group: str):
+    return _server().api_gcp_compute_delete_instance_group(project, zone, group)
+
+
+def api_gcp_compute_list_disks(project: str, zone: str):
+    return _server().api_gcp_compute_list_disks(project, zone)
+
+
+async def api_gcp_compute_create_disk(project: str, zone: str, request: Request):
+    return await _server().api_gcp_compute_create_disk(project, zone, request)
+
+
+def api_gcp_compute_delete_disk(project: str, zone: str, disk: str):
+    return _server().api_gcp_compute_delete_disk(project, zone, disk)
+
+
+def api_gcp_compute_list_snapshots(project: str):
+    return _server().api_gcp_compute_list_snapshots(project)
+
+
+async def api_gcp_compute_create_snapshot(project: str, request: Request):
+    return await _server().api_gcp_compute_create_snapshot(project, request)
+
+
+def api_gcp_compute_delete_snapshot(project: str, snapshot: str):
+    return _server().api_gcp_compute_delete_snapshot(project, snapshot)
+
+
+def api_gcp_compute_list_images(project: str):
+    return _server().api_gcp_compute_list_images(project)
+
+
+async def api_gcp_compute_create_image(project: str, request: Request):
+    return await _server().api_gcp_compute_create_image(project, request)
+
+
+def api_gcp_compute_delete_image(project: str, image_name: str):
+    return _server().api_gcp_compute_delete_image(project, image_name)
+
+
 def api_gcp_storage_list_buckets(request: Request):
     s = _server()
     project = s._gcp_project_name(request.query_params.get("project"))
@@ -85,7 +133,9 @@ async def api_gcp_storage_create_object(bucket: str, request: Request):
         payload = {}
     if not isinstance(payload, dict):
         payload = {}
-    name = str(payload.get("name") or payload.get("object") or "").strip()
+    # Real GCS uploads pass the object name as the `?name=` query param (uploadType=media);
+    # accept that in addition to a name in the JSON body.
+    name = str(payload.get("name") or payload.get("object") or request.query_params.get("name") or "").strip()
     if not name:
         raise HTTPException(400, detail="Object name is required")
     obj = s._gcp_storage_object_record(bucket, name, payload)
@@ -108,6 +158,38 @@ def api_gcp_storage_delete_object(bucket: str, object_name: str):
         raise HTTPException(404, detail="Object not found")
     del s.gcp_storage_state["objects"][bucket][object_name]
     return {"kind": "storage#empty", "deleted": True, "bucket": bucket, "object": object_name}
+
+
+def api_gcp_storage_list_folders(bucket: str):
+    return _server().api_gcp_storage_list_folders(bucket)
+
+
+async def api_gcp_storage_create_folder(bucket: str, request: Request):
+    return await _server().api_gcp_storage_create_folder(bucket, request)
+
+
+def api_gcp_storage_delete_folder(bucket: str, folder: str):
+    return _server().api_gcp_storage_delete_folder(bucket, folder)
+
+
+def api_gcp_storage_list_transfers(project: str):
+    return _server().api_gcp_storage_list_transfers(project)
+
+
+async def api_gcp_storage_create_transfer(project: str, request: Request):
+    return await _server().api_gcp_storage_create_transfer(project, request)
+
+
+def api_gcp_storage_delete_transfer(project: str, transfer_name: str):
+    return _server().api_gcp_storage_delete_transfer(project, transfer_name)
+
+
+def api_gcp_storage_get_policy(bucket: str):
+    return _server().api_gcp_storage_get_policy(bucket)
+
+
+async def api_gcp_storage_set_policy(bucket: str, request: Request):
+    return await _server().api_gcp_storage_set_policy(bucket, request)
 
 
 def api_gcp_sql_list_instances(project: str, request: Request):
@@ -167,6 +249,26 @@ def api_gcp_sql_restart_instance(project: str, instance: str):
     rec["state"] = "RUNNABLE"
     rec["updateTime"] = s._now()
     return {"kind": "sql#operation", "operationType": "RESTART", "status": "DONE", "targetLink": f"{s._gcp_sql_root()}/projects/{project}/instances/{instance}"}
+
+
+def api_gcp_sql_list_backups(project: str, instance: str = ""):
+    return _server().api_gcp_sql_list_backups(project, instance)
+
+
+async def api_gcp_sql_create_backup(project: str, instance: str, request: Request):
+    return await _server().api_gcp_sql_create_backup(project, instance, request)
+
+
+def api_gcp_sql_delete_backup(project: str, backup: str):
+    return _server().api_gcp_sql_delete_backup(project, backup)
+
+
+def api_gcp_sql_list_insights(project: str, instance: str = ""):
+    return _server().api_gcp_sql_list_insights(project, instance)
+
+
+async def api_gcp_sql_create_insight(project: str, instance: str, request: Request):
+    return await _server().api_gcp_sql_create_insight(project, instance, request)
 
 
 def api_gcp_vpc_list_networks(project: str):

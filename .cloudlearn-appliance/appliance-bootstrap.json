@@ -1,0 +1,11 @@
+{
+  "name": "cloudlearn-appliance",
+  "image": "24.04",
+  "cpus": 4,
+  "memory": "8G",
+  "disk": "32G",
+  "workspace": "/workspace/cloud-learn",
+  "host_os": "darwin",
+  "distribution_mode": "appliance",
+  "created_at": "2026-05-24T18:55:01.000Z"
+}

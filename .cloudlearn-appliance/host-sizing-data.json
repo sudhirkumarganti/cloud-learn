@@ -1,0 +1,52 @@
+{
+  "source": "launcher",
+  "host_os": "darwin",
+  "cpu_count": 8,
+  "memory_bytes": 17179869184,
+  "memory_gib": 16.0,
+  "disk_total_bytes": 245107195904,
+  "disk_used_bytes": 158069694464,
+  "disk_free_bytes": 87037501440,
+  "disk_total_gib": 228.3,
+  "disk_free_gib": 81.1,
+  "network_interfaces": [
+    "lo0",
+    "gif0",
+    "stf0",
+    "anpi0",
+    "anpi1",
+    "en3",
+    "en4",
+    "en1",
+    "en2",
+    "bridge0",
+    "ap1",
+    "en0",
+    "utun0",
+    "utun1",
+    "utun2",
+    "utun3",
+    "awdl0",
+    "llw0",
+    "utun4",
+    "utun5",
+    "vmenet0",
+    "bridge100"
+  ],
+  "network_interface_count": 22,
+  "recommended": {
+    "appliance": {
+      "vcpus": 4,
+      "memory_gib": 8,
+      "disk_gib": 24
+    },
+    "lxd_budget": {
+      "platform_reserve_gib": 2.0,
+      "small_instances": 12,
+      "medium_instances": 6,
+      "heavy_instances": 3
+    }
+  },
+  "warnings": [],
+  "checked_at": "2026-05-23T20:33:05.000Z"
+}

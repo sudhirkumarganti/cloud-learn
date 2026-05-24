@@ -1,68 +1,51 @@
-# CloudLearn installation
+# CloudLearn Installation
 
-## Source checkout
+## Single Launcher
 
-From the repository root:
+CloudLearn now ships as a single appliance launcher.
 
-```bash
-bash ./scripts/cloud-learn dev up
-```
-
-This starts the simulator stack locally with Docker Compose and builds the
-images on your machine. No Docker Hub images are required for development.
-If Docker Compose is missing, the launcher will try to install it on supported
-hosts before starting the stack.
-
-On macOS, you can use the preflight wrapper to fail fast if Multipass is
-missing or not yet ready:
+Start the platform with:
 
 ```bash
-bash ./scripts/cloud-learn-dev-up.sh
+bash ./scripts/cloud-learn up
 ```
 
-## Homebrew
+Or on Windows:
 
-The repository now includes a Homebrew formula scaffold under:
-
-`packaging/homebrew/Formula/cloud-learn.rb`
-
-The intended release flow is:
-
-1. Build a release tarball.
-2. Publish the tarball.
-3. Update the formula `url` and `sha256`.
-4. Add the formula to a tap.
-5. Install with:
-
-```bash
-brew install cloud-learn
+```powershell
+.\scripts\cloud-learn.ps1 up
 ```
 
-The installed `cloud-learn` command wraps the same Compose-based launcher.
+This launches one Multipass VM appliance and starts the full CloudLearn stack inside that VM.
 
-## Release tooling
+## Install Matrix
 
-To build a versioned tarball and print the sha256:
+| Distribution | Install command | Runtime boundary | Host dependency |
+|---|---|---|---|
+| Homebrew | `brew install cloud-learn` | Multipass VM appliance | Multipass |
+| Snap | Install the snap package | Multipass VM appliance | Multipass |
+| MSI / winget | Install the Windows package | Multipass VM appliance | Multipass |
+| Source checkout | `bash ./scripts/cloud-learn up` | Multipass VM appliance | Multipass |
 
-```bash
-bash ./scripts/build-release.sh
-```
+## What Runs Inside the VM
 
-To update the Homebrew formula with that sha256:
+- simulator UI/API
+- CloudSim backbone
+- provider emulators
+- runtime bridge
+- persistent state
+- EC2-like sandboxes
 
-```bash
-bash ./scripts/update-homebrew-formula.sh <sha256>
-```
+## Notes
 
-The release version is read from `VERSION`.
-
-## Runtime notes
-
-- Docker is required for local development.
-- Docker Compose is required, but the launcher will try to install it
-  automatically on supported hosts.
-- On macOS, EC2 instances require Multipass and launch is disabled until
-  Multipass reports ready.
-- On Linux, EC2 instances can use Multipass or LXD depending on the runtime.
-- Images are downloaded on demand and cached on first use by the runtime service.
-- The `cloud-learn dev ...` commands are the preferred local-development entrypoint.
+- There is no separate developer launcher path anymore.
+- The appliance stack is isolated in [`docker-compose.appliance.yml`](/Users/sudhirganti/Applications/simulator/cloud-learn/docker-compose.appliance.yml).
+- Use `stop` for a clean shutdown, `force-stop` for a hard stop, and `kill` as the shortcut alias for hard stop.
+- On `up`, the launcher will try to start Multipass automatically if the host daemon/socket is not reachable yet.
+- The recommended workflow is:
+  1. Install.
+  2. Run the single launcher.
+  3. Open the browser.
+  4. Build resources locally.
+  5. Export Terraform.
+  6. Deploy when ready.

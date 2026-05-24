@@ -1,5 +1,13 @@
 package cloudlearn.cloudsim;
 
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
+
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -10,9 +18,20 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicReference;
 
 public final class CloudSimRegistry {
+    private static final ObjectMapper MAPPER = new ObjectMapper().registerModule(new JavaTimeModule());
     private final Map<String, CloudSimSpace> spaces = new ConcurrentHashMap<>();
     private final AtomicReference<String> activeSpaceId = new AtomicReference<>("");
     private final List<Map<String, Object>> events = new ArrayList<>();
+    private final Path stateFile;
+
+    public CloudSimRegistry() {
+        this(null);
+    }
+
+    public CloudSimRegistry(Path stateFile) {
+        this.stateFile = stateFile == null ? null : stateFile.toAbsolutePath().normalize();
+        loadState();
+    }
 
     public synchronized int spaceCount() {
         return spaces.size();
@@ -30,6 +49,7 @@ public final class CloudSimRegistry {
         }
         Map<String, Object> summary = space.reconcile();
         events.add(event("space.upsert", spaceId, summary));
+        persistState();
         return response(space, summary);
     }
 
@@ -70,6 +90,7 @@ public final class CloudSimRegistry {
         activeSpaceId.set(spaceId);
         space.touch("selected_at");
         events.add(event("space.switch", spaceId, Map.of("space_id", spaceId)));
+        persistState();
         return response(space, space.snapshot());
     }
 
@@ -77,6 +98,7 @@ public final class CloudSimRegistry {
         CloudSimSpace space = requireSpace(spaceId);
         space.setStatus(status);
         events.add(event("space.status", spaceId, Map.of("space_id", spaceId, "status", status)));
+        persistState();
         return response(space, space.snapshot());
     }
 
@@ -89,6 +111,7 @@ public final class CloudSimRegistry {
             activeSpaceId.set(spaces.keySet().stream().findFirst().orElse(""));
         }
         events.add(event("space.delete", spaceId, Map.of("space_id", spaceId)));
+        persistState();
         return Map.of("message", "Simulation space deleted", "space_id", spaceId, "active_space_id", activeSpaceId.get());
     }
 
@@ -97,6 +120,7 @@ public final class CloudSimRegistry {
             CloudSimSpace space = requireSpace(spaceId);
             Map<String, Object> summary = space.reconcile();
             events.add(event("space.reconcile", spaceId, summary));
+            persistState();
             return response(space, summary);
         }
         return reconcileAll();
@@ -115,6 +139,7 @@ public final class CloudSimRegistry {
         payload.put("reconciled_spaces", summaries);
         payload.put("last_reconcile_at", Instant.now().toString());
         events.add(event("cloudsim.reconcile", null, Map.of("spaces", spaces.size())));
+        persistState();
         return Map.of(
                 "message", "CloudSim reconcile complete",
                 "summary", payload,
@@ -131,6 +156,7 @@ public final class CloudSimRegistry {
                 spaceId,
                 payload == null ? Map.of() : payload
         ));
+        persistState();
         return result;
     }
 
@@ -174,6 +200,85 @@ public final class CloudSimRegistry {
 
     public synchronized Map<String, Object> spaceEvents(String spaceId) {
         return requireSpace(spaceId).eventsPayload();
+    }
+
+    public synchronized boolean hydrateFrom(Map<String, Object> payload) {
+        if (payload == null || payload.isEmpty()) {
+            return false;
+        }
+        spaces.clear();
+        activeSpaceId.set(stringValue(payload.get("active_space_id")));
+        events.clear();
+        Object eventsPayload = payload.get("events");
+        if (eventsPayload instanceof List<?> list) {
+            for (Object item : list) {
+                if (item instanceof Map<?, ?> itemMap) {
+                    events.add(copyMap(itemMap));
+                }
+            }
+        }
+        Object spacesPayload = payload.get("spaces");
+        if (spacesPayload instanceof Map<?, ?> map) {
+            for (Map.Entry<?, ?> entry : map.entrySet()) {
+                String spaceId = stringValue(entry.getKey());
+                if (spaceId.isBlank() || !(entry.getValue() instanceof Map<?, ?> stateMap)) {
+                    continue;
+                }
+                CloudSimSpace space = new CloudSimSpace(spaceId);
+                space.restoreState(copyMap(stateMap));
+                spaces.put(spaceId, space);
+            }
+        }
+        return true;
+    }
+
+    public synchronized void persistState() {
+        if (stateFile == null) {
+            return;
+        }
+        try {
+            Path parent = stateFile.getParent();
+            if (parent != null) {
+                Files.createDirectories(parent);
+            }
+            Map<String, Object> payload = new LinkedHashMap<>();
+            payload.put("active_space_id", activeSpaceId.get());
+            payload.put("events", new ArrayList<>(events));
+            Map<String, Object> spacePayload = new LinkedHashMap<>();
+            for (Map.Entry<String, CloudSimSpace> entry : spaces.entrySet()) {
+                spacePayload.put(entry.getKey(), entry.getValue().persistedState());
+            }
+            payload.put("spaces", spacePayload);
+            Path tmp = stateFile.resolveSibling(stateFile.getFileName().toString() + ".tmp");
+            Files.writeString(tmp, MAPPER.writeValueAsString(payload));
+            try {
+                Files.move(tmp, stateFile, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
+            } catch (IOException atomicMoveUnsupported) {
+                Files.move(tmp, stateFile, StandardCopyOption.REPLACE_EXISTING);
+            }
+        } catch (Exception ignored) {
+        }
+    }
+
+    private void loadState() {
+        if (stateFile == null || !Files.exists(stateFile)) {
+            return;
+        }
+        try {
+            Map<String, Object> payload = MAPPER.readValue(stateFile.toFile(), new TypeReference<>() {});
+            hydrateFrom(payload);
+        } catch (Exception ignored) {
+        }
+    }
+
+    private static Map<String, Object> copyMap(Map<?, ?> input) {
+        Map<String, Object> output = new LinkedHashMap<>();
+        for (Map.Entry<?, ?> entry : input.entrySet()) {
+            if (entry.getKey() != null) {
+                output.put(String.valueOf(entry.getKey()), entry.getValue());
+            }
+        }
+        return output;
     }
 
     private Map<String, Object> activeSpaceSnapshot() {

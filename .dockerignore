@@ -1,0 +1,12 @@
+.git
+.gitignore
+.venv
+.venv-run
+.pytest_cache
+__pycache__
+*.pyc
+.cloudlearn-appliance
+node_modules
+dist
+build
+coverage

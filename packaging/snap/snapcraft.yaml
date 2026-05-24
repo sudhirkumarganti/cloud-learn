@@ -1,0 +1,41 @@
+name: cloud-learn
+base: core24
+version: "0.1.0"
+summary: Local multi-cloud simulator with a CloudSim backbone
+description: |
+  CloudLearn runs AWS, GCP, and Azure simulation locally. This snap metadata
+  packages the launcher in appliance mode so the full simulator stack can run
+  inside a Multipass VM boundary.
+license: MIT
+grade: devel
+confinement: strict
+
+apps:
+  cloud-learn:
+    command: bin/cloud-learn
+    plugs:
+      - network
+      - network-bind
+      - home
+      - removable-media
+
+parts:
+  cloud-learn:
+    plugin: dump
+    source: ../..
+    organize:
+      scripts/cloud-learn: bin/cloud-learn
+    stage:
+      - core
+      - Dockerfile
+      - VERSION
+      - cloudsim-backbone
+      - core
+      - docker-compose.appliance.yml
+      - docs
+      - packaging
+      - requirements.txt
+      - scripts
+      - server.py
+      - static
+      - tools

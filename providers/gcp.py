@@ -22,44 +22,46 @@ def tool_response(tool: str) -> dict:
         return {
             "provider": "gcp",
             "tool": "gcloud",
-            "status": "planned",
+            "status": "partial",
             "endpoint": endpoint,
             "help": [
                 "Simulated gcloud will point at local Google-style endpoints.",
-                "Commands will translate to local REST calls per service pack.",
+                "Commands currently translate to compute, storage, sql, pubsub, firestore, functions, api gateway, VPC, and IAM routes.",
             ],
+            "notes": "gcloud command-shape adapters are partially implemented and expanding toward full provider coverage.",
             "provider_surface": provider_info.get("surface", {}),
         }
     if tool == "gcutil":
         return {
             "provider": "gcp",
             "tool": "gcutil",
-            "status": "planned",
+            "status": "partial",
             "endpoint": endpoint,
             "help": [
                 "Legacy gcutil compatibility will be simulated locally.",
-                "This remains a tracked gap alongside gcloud parity.",
+                "Legacy commands currently resolve to Compute Engine, Cloud Storage, and Pub/Sub routes.",
             ],
+            "notes": "gcutil compatibility is partial but now has real command translation coverage.",
             "provider_surface": provider_info.get("surface", {}),
         }
     if tool == "sdk/java":
         return {
             "provider": "gcp",
             "tool": "google-cloud-java",
-            "status": "planned",
+            "status": "partial",
             "endpoint": endpoint,
             "dependency": "com.google.cloud:*",
-            "help": ["Future adapter will expose Google Cloud client defaults against the simulator endpoint."],
+            "help": ["Use the simulator endpoint with Google Cloud Java clients.", "Client wrappers are partial, so transport and request shape glue is still expanding."],
             "provider_surface": provider_info.get("surface", {}),
         }
     if tool == "sdk/go":
         return {
             "provider": "gcp",
             "tool": "google-cloud-go",
-            "status": "planned",
+            "status": "partial",
             "endpoint": endpoint,
             "dependency": "cloud.google.com/go",
-            "help": ["Future adapter will point the Go client at local GCP-style REST endpoints."],
+            "help": ["Use the simulator endpoint with Google Cloud Go clients.", "Client wrappers are partial, so transport and request shape glue is still expanding."],
             "provider_surface": provider_info.get("surface", {}),
         }
     raise KeyError(tool)

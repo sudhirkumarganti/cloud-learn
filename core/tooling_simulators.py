@@ -32,8 +32,34 @@ def aws_cli_resolve(command: str) -> dict[str, Any]:
         return _result("aws", "awscli", command, "ec2", "DescribeInstances", "GET /api/ec2/instances", args, "List simulator EC2 instances.")
     if len(args) >= 2 and args[0] == "ec2" and args[1] == "run-instances":
         return _result("aws", "awscli", command, "ec2", "RunInstances", "POST /api/ec2/instances", args, "Launch an EC2 instance locally.")
+    if len(args) >= 2 and args[0] == "iam" and args[1] == "list-users":
+        return _result("aws", "awscli", command, "iam", "ListUsers", "GET /api/iam/users", args, "List IAM users locally.")
+    if len(args) >= 2 and args[0] == "iam" and args[1] == "create-user":
+        return _result("aws", "awscli", command, "iam", "CreateUser", "POST /api/iam/users", args, "Create an IAM user locally.")
+    if len(args) >= 2 and args[0] == "iam" and args[1] == "list-roles":
+        return _result("aws", "awscli", command, "iam", "ListRoles", "GET /api/iam/roles", args, "List IAM roles locally.")
+    if len(args) >= 2 and args[0] == "vpc" and args[1] == "describe-vpcs":
+        return _result("aws", "awscli", command, "vpc", "DescribeVpcs", "GET /api/vpc/vpcs", args, "List VPCs locally.")
+    if len(args) >= 2 and args[0] == "rds" and args[1] == "describe-db-instances":
+        return _result("aws", "awscli", command, "rds", "DescribeDBInstances", "GET /api/rds/databases", args, "List RDS databases locally.")
+    if len(args) >= 2 and args[0] == "sqs" and args[1] == "list-queues":
+        return _result("aws", "awscli", command, "sqs", "ListQueues", "GET /api/sqs/queues", args, "List SQS queues locally.")
+    if len(args) >= 2 and args[0] == "sqs" and args[1] == "send-message":
+        return _result("aws", "awscli", command, "sqs", "SendMessage", "POST /api/sqs/queues/{queue_name}/messages", args, "Send an SQS message locally.")
+    if len(args) >= 2 and args[0] == "dynamodb" and args[1] == "list-tables":
+        return _result("aws", "awscli", command, "dynamodb", "ListTables", "GET /api/dynamodb/tables", args, "List DynamoDB tables locally.")
+    if len(args) >= 2 and args[0] == "dynamodb" and args[1] == "put-item":
+        return _result("aws", "awscli", command, "dynamodb", "PutItem", "POST /api/dynamodb/tables/{table_name}/items", args, "Create a DynamoDB item locally.")
+    if len(args) >= 2 and args[0] == "dynamodb" and args[1] == "query":
+        return _result("aws", "awscli", command, "dynamodb", "Query", "POST /api/dynamodb/tables/{table_name}/query", args, "Query a DynamoDB table locally.")
     if len(args) >= 2 and args[0] == "lambda" and args[1] == "list-functions":
         return _result("aws", "awscli", command, "lambda", "ListFunctions", "GET /api/lambda/functions", args, "List simulator Lambda functions.")
+    if len(args) >= 2 and args[0] == "lambda" and args[1] == "invoke":
+        return _result("aws", "awscli", command, "lambda", "Invoke", "POST /api/lambda/functions/{function_name}/invoke", args, "Invoke a Lambda function locally.")
+    if len(args) >= 2 and args[0] == "apigateway" and args[1] in {"get-rest-apis", "get-apis"}:
+        return _result("aws", "awscli", command, "apigateway", "GetRestApis", "GET /api/apigateway/apis", args, "List API Gateway APIs locally.")
+    if len(args) >= 2 and args[0] == "apigateway" and args[1] in {"create-rest-api", "create-api"}:
+        return _result("aws", "awscli", command, "apigateway", "CreateRestApi", "POST /api/apigateway/apis", args, "Create an API Gateway API locally.")
     return _result("aws", "awscli", command, "", "", "", args, "No translation rule exists yet.")
 
 
@@ -56,10 +82,28 @@ def gcp_gcloud_resolve(command: str) -> dict[str, Any]:
         return _result("gcp", "gcloud", command, "compute", "instances.delete", "DELETE /compute/v1/projects/{project}/zones/{zone}/instances/{instance}", args, "Delete a Compute Engine instance locally.")
     if len(args) >= 3 and args[0] == "storage" and args[1] == "buckets" and args[2] == "list":
         return _result("gcp", "gcloud", command, "storage", "buckets.list", "GET /storage/v1/b", args, "List Cloud Storage buckets locally.")
+    if len(args) >= 3 and args[0] == "storage" and args[1] == "buckets" and args[2] == "create":
+        return _result("gcp", "gcloud", command, "storage", "buckets.insert", "POST /storage/v1/b", args, "Create a Cloud Storage bucket locally.")
+    if len(args) >= 3 and args[0] == "storage" and args[1] == "buckets" and args[2] == "delete":
+        return _result("gcp", "gcloud", command, "storage", "buckets.delete", "DELETE /storage/v1/b/{bucket}", args, "Delete a Cloud Storage bucket locally.")
     if len(args) >= 3 and args[0] == "sql" and args[1] == "instances" and args[2] == "list":
         return _result("gcp", "gcloud", command, "sql", "instances.list", "GET /sql/v1beta4/projects/{project}/instances", args, "List Cloud SQL instances locally.")
+    if len(args) >= 3 and args[0] == "sql" and args[1] == "instances" and args[2] == "create":
+        return _result("gcp", "gcloud", command, "sql", "instances.insert", "POST /sql/v1beta4/projects/{project}/instances", args, "Create a Cloud SQL instance locally.")
+    if len(args) >= 3 and args[0] == "sql" and args[1] == "instances" and args[2] == "delete":
+        return _result("gcp", "gcloud", command, "sql", "instances.delete", "DELETE /sql/v1beta4/projects/{project}/instances/{instance}", args, "Delete a Cloud SQL instance locally.")
     if len(args) >= 3 and args[0] == "pubsub" and args[1] == "topics" and args[2] == "list":
         return _result("gcp", "gcloud", command, "pubsub", "topics.list", "GET /v1/projects/{project}/topics", args, "List Pub/Sub topics locally.")
+    if len(args) >= 3 and args[0] == "pubsub" and args[1] == "topics" and args[2] == "create":
+        return _result("gcp", "gcloud", command, "pubsub", "topics.create", "POST /v1/projects/{project}/topics", args, "Create a Pub/Sub topic locally.")
+    if len(args) >= 3 and args[0] == "pubsub" and args[1] == "topics" and args[2] == "delete":
+        return _result("gcp", "gcloud", command, "pubsub", "topics.delete", "DELETE /v1/projects/{project}/topics/{topic}", args, "Delete a Pub/Sub topic locally.")
+    if len(args) >= 3 and args[0] == "compute" and args[1] == "networks" and args[2] == "list":
+        return _result("gcp", "gcloud", command, "vpc", "networks.list", "GET /compute/v1/projects/{project}/global/networks", args, "List VPC networks locally.")
+    if len(args) >= 3 and args[0] == "compute" and args[1] == "firewall-rules" and args[2] == "list":
+        return _result("gcp", "gcloud", command, "vpc", "firewalls.list", "GET /compute/v1/projects/{project}/global/firewalls", args, "List firewall rules locally.")
+    if len(args) >= 3 and args[0] == "iam" and args[1] == "service-accounts" and args[2] == "list":
+        return _result("gcp", "gcloud", command, "iam", "serviceAccounts.list", "GET /v1/projects/{project}/serviceAccounts", args, "List service accounts locally.")
     return _result("gcp", "gcloud", command, "", "", "", args, "No translation rule exists yet.")
 
 
@@ -80,6 +124,18 @@ def gcp_gcutil_resolve(command: str) -> dict[str, Any]:
         return _result("gcp", "gcutil", command, "compute", "instances.stop", "POST /compute/v1/projects/{project}/zones/{zone}/instances/{instance}/stop", args, "Legacy gcutil instance stop.")
     if args and args[0] == "delinstance":
         return _result("gcp", "gcutil", command, "compute", "instances.delete", "DELETE /compute/v1/projects/{project}/zones/{zone}/instances/{instance}", args, "Legacy gcutil instance deletion.")
+    if args and args[0] == "ls" and "bucket" in args:
+        return _result("gcp", "gcutil", command, "storage", "buckets.list", "GET /storage/v1/b", args, "Legacy gcutil bucket listing.")
+    if args and args[0] == "addbucket":
+        return _result("gcp", "gcutil", command, "storage", "buckets.insert", "POST /storage/v1/b", args, "Legacy gcutil bucket creation.")
+    if args and args[0] == "delbucket":
+        return _result("gcp", "gcutil", command, "storage", "buckets.delete", "DELETE /storage/v1/b/{bucket}", args, "Legacy gcutil bucket deletion.")
+    if args and args[0] == "ls" and "topic" in args:
+        return _result("gcp", "gcutil", command, "pubsub", "topics.list", "GET /v1/projects/{project}/topics", args, "Legacy gcutil topic listing.")
+    if args and args[0] == "addtopic":
+        return _result("gcp", "gcutil", command, "pubsub", "topics.create", "POST /v1/projects/{project}/topics", args, "Legacy gcutil topic creation.")
+    if args and args[0] == "deltopic":
+        return _result("gcp", "gcutil", command, "pubsub", "topics.delete", "DELETE /v1/projects/{project}/topics/{topic}", args, "Legacy gcutil topic deletion.")
     return _result("gcp", "gcutil", command, "", "", "", args, "No translation rule exists yet.")
 
 

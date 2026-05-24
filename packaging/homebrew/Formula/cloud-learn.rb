@@ -9,7 +9,7 @@ class CloudLearn < Formula
     libexec.install "Dockerfile"
     libexec.install "core"
     libexec.install "cloudsim-backbone"
-    libexec.install "docker-compose.yml"
+    libexec.install "docker-compose.appliance.yml"
     libexec.install "requirements.txt"
     libexec.install "scripts"
     libexec.install "server.py"
@@ -20,6 +20,7 @@ class CloudLearn < Formula
     (bin/"cloud-learn").write <<~EOS
       #!/usr/bin/env bash
       export CLOUD_LEARN_HOME="#{libexec}"
+      export CLOUD_LEARN_DISTRIBUTION_MODE="appliance"
       exec bash "#{libexec}/scripts/cloud-learn" "$@"
     EOS
     chmod 0555, bin/"cloud-learn"
@@ -27,11 +28,11 @@ class CloudLearn < Formula
 
   def caveats
     <<~EOS
-      CloudLearn runs through Docker Compose.
-      You still need Docker and Docker Compose available on the host.
+      CloudLearn runs in appliance mode by default when installed through Homebrew.
+      You need Multipass installed and available on the host.
 
-      EC2 runtime instances use the bundled runtime service shipped with the
-      simulator stack.
+      The appliance VM runs the simulator, CloudSim, and provider services
+      inside the local VM boundary.
     EOS
   end
 

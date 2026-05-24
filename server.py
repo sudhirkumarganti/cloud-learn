@@ -61,9 +61,21 @@ from core.pack_catalog import default_packs as load_default_packs
 from core.pack_catalog import fragment_for_pack
 from core.pack_catalog import PROVIDER_PACK_GROUPS
 from core.pack_catalog import packs_for_provider
+from core.terraform_export import export_space_to_terraform_json
+from core.terraform_workflow import (
+    build_plan_summary as terraform_build_plan_summary,
+    terraform_import_bundle as terraform_import_bundle,
+    run_terraform_cli as terraform_run_cli,
+    stage_workflow_bundle as terraform_stage_workflow_bundle,
+    terraform_cli_available as terraform_cli_available,
+    terraform_cli_path as terraform_cli_path,
+    terraform_space_dir as terraform_space_dir,
+    terraform_workspace_root as terraform_workspace_root,
+)
 from core.provider_registry import get_provider, list_providers, normalize_provider as normalize_provider_key, provider_matrix
 from providers.aws import tool_response as aws_tool_response
 from providers import aws_iam as provider_aws_iam
+from providers import aws_services as provider_aws_services
 from providers.aws_routes import register as register_aws_routes
 from providers.aws_ec2_routes import register as register_aws_ec2_routes
 from providers.capabilities import provider_capabilities, provider_services
@@ -150,7 +162,218 @@ def _iam_root_principal() -> str:
 
 
 def _parent_os() -> str:
+    return _resolved_host_os()
+
+
+def _distribution_mode() -> str:
+    config_mode = _host_config().get("distribution_mode")
+    if config_mode:
+        return str(config_mode).strip().lower()
+    return str(os.environ.get("CLOUDLEARN_DISTRIBUTION_MODE") or "developer").strip().lower()
+
+
+def _appliance_mode_enabled() -> bool:
+    return _distribution_mode() == "appliance"
+
+
+def _host_config_path() -> Path:
+    return Path(str(os.environ.get("CLOUDLEARN_HOST_CONFIG_FILE") or "").strip() or "/config/cloudlearn-host.json")
+
+
+def _host_config() -> dict[str, Any]:
+    path = _host_config_path()
+    try:
+        if not path.exists():
+            return {}
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        return payload if isinstance(payload, dict) else {}
+    except Exception:
+        return {}
+
+
+def _host_sizing_path() -> Path:
+    return Path(str(os.environ.get("CLOUDLEARN_HOST_SIZING_FILE") or "").strip() or "/config/cloudlearn-host-sizing.json")
+
+
+def _bytes_to_gib(value: int | float | None) -> float:
+    try:
+        return round(float(value or 0) / (1024 ** 3), 1)
+    except Exception:
+        return 0.0
+
+
+def _host_memory_bytes() -> int:
+    try:
+        if platform.system().strip().lower() == "darwin":
+            out = subprocess.check_output(["sysctl", "-n", "hw.memsize"], text=True, timeout=5).strip()
+            return int(out)
+        if platform.system().strip().lower() == "linux":
+            try:
+                with open("/proc/meminfo", "r", encoding="utf-8") as fh:
+                    for line in fh:
+                        if line.startswith("MemTotal:"):
+                            parts = line.split()
+                            if len(parts) >= 2:
+                                return int(parts[1]) * 1024
+            except Exception:
+                pass
+            try:
+                return int(os.sysconf("SC_PAGE_SIZE")) * int(os.sysconf("SC_PHYS_PAGES"))
+            except Exception:
+                pass
+    except Exception:
+        pass
+    return 0
+
+
+def _host_network_interfaces() -> list[str]:
+    try:
+        import socket
+        return [name for _, name in socket.if_nameindex() if str(name).strip()]
+    except Exception:
+        return []
+
+
+def _recommend_host_sizing(host_cpu: int, host_memory_gib: float, host_disk_total_gib: float, host_disk_free_gib: float) -> dict[str, Any]:
+    if host_memory_gib <= 4:
+        appliance_memory = 2
+        appliance_disk = 24
+    elif host_memory_gib <= 8:
+        appliance_memory = 4
+        appliance_disk = 32
+    elif host_memory_gib <= 16:
+        appliance_memory = 8
+        appliance_disk = 32
+    elif host_memory_gib <= 32:
+        appliance_memory = 12
+        appliance_disk = 48
+    elif host_memory_gib <= 64:
+        appliance_memory = 16
+        appliance_disk = 64
+    else:
+        appliance_memory = min(24, max(16, int(round(host_memory_gib * 0.25))))
+        appliance_disk = min(96, max(64, int(round(host_disk_total_gib * 0.12)) if host_disk_total_gib else 64))
+
+    appliance_cpu = max(1, min(max(host_cpu - 1, 1), int(round(appliance_memory / 2)) or 1))
+    appliance_disk = int(min(max(appliance_disk, 24), max(24, int(round(host_disk_free_gib * 0.25)) or appliance_disk)))
+    if host_memory_gib <= 8:
+        reserve_for_platform = 1.5
+    elif host_memory_gib <= 16:
+        reserve_for_platform = 2.0
+    elif host_memory_gib <= 32:
+        reserve_for_platform = 2.5
+    else:
+        reserve_for_platform = 3.0
+    available_for_lxd = max(0.0, float(appliance_memory) - reserve_for_platform)
+    return {
+        "appliance": {
+            "vcpus": appliance_cpu,
+            "memory_gib": appliance_memory,
+            "disk_gib": appliance_disk,
+        },
+        "lxd_budget": {
+            "platform_reserve_gib": reserve_for_platform,
+            "small_instances": int(available_for_lxd // 0.5),
+            "medium_instances": int(available_for_lxd // 1.0),
+            "heavy_instances": int(available_for_lxd // 2.0),
+        },
+    }
+
+
+def _host_sizing() -> dict[str, Any]:
+    path = _host_sizing_path()
+    try:
+        if path.exists():
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(payload, dict):
+                return payload
+    except Exception:
+        pass
+    cpu_count = int(os.cpu_count() or 1)
+    host_memory_bytes = _host_memory_bytes()
+    disk_usage = shutil.disk_usage(Path.cwd())
+    host_disk_total_bytes = int(disk_usage.total)
+    host_disk_free_bytes = int(disk_usage.free)
+    host_disk_used_bytes = int(disk_usage.used)
+    host_memory_gib = _bytes_to_gib(host_memory_bytes)
+    host_disk_total_gib = _bytes_to_gib(host_disk_total_bytes)
+    host_disk_free_gib = _bytes_to_gib(host_disk_free_bytes)
+    rec = _recommend_host_sizing(cpu_count, host_memory_gib, host_disk_total_gib, host_disk_free_gib)
+    network_interfaces = _host_network_interfaces()
+    warnings: list[str] = []
+    if cpu_count < 4 or host_memory_gib < 8:
+        warnings.append("This host is small for a full appliance. Keep the VM at minimum size and avoid heavy sandboxes.")
+    if host_disk_free_gib < 20:
+        warnings.append("Low free disk space. Keep the appliance disk small and avoid large downloads.")
+    return {
+        "source": "fallback-runtime",
+        "host_os": _resolved_host_os(),
+        "cpu_count": cpu_count,
+        "memory_bytes": host_memory_bytes,
+        "memory_gib": host_memory_gib,
+        "disk_total_bytes": host_disk_total_bytes,
+        "disk_used_bytes": host_disk_used_bytes,
+        "disk_free_bytes": host_disk_free_bytes,
+        "disk_total_gib": host_disk_total_gib,
+        "disk_free_gib": host_disk_free_gib,
+        "network_interfaces": network_interfaces,
+        "network_interface_count": len(network_interfaces),
+        "recommended": rec,
+        "warnings": warnings,
+        "checked_at": _now(),
+    }
+
+
+def _runtime_bridge_url() -> str:
+    config = _host_config()
+    return str(
+        os.environ.get("CLOUDLEARN_RUNTIME_BRIDGE_URL")
+        or config.get("runtime_bridge_url")
+        or "http://host.docker.internal:9171"
+    ).strip().rstrip("/")
+
+
+def _runtime_bridge_status() -> dict[str, Any]:
+    try:
+        url = _runtime_bridge_url()
+        if not url:
+            return {}
+        request = URLRequest(f"{url}/health", headers={"Accept": "application/json"})
+        with urlopen(request, timeout=2) as response:
+            payload = json.loads(response.read().decode("utf-8") or "{}")
+            return payload if isinstance(payload, dict) else {}
+    except Exception:
+        return {}
+
+
+def _runtime_bridge_host_os() -> str:
+    return str(_runtime_bridge_status().get("host_os") or "").strip().lower()
+
+
+def _resolved_host_os(host_os_hint: str = "") -> str:
+    if _appliance_mode_enabled():
+        hint = str(host_os_hint or "").strip().lower()
+        if hint:
+            return hint
+        return str(platform.system()).strip().lower()
+    bridge_os = _runtime_bridge_host_os()
+    if bridge_os:
+        return bridge_os
+    config_os = _host_config().get("host_os")
+    if config_os:
+        return str(config_os).strip().lower()
+    hint = str(host_os_hint or "").strip().lower()
+    if hint:
+        return hint
     return str(os.environ.get("CLOUDLEARN_PARENT_OS") or platform.system()).strip().lower()
+
+
+def _request_host_os(request: Request | None = None) -> str:
+    if request is not None:
+        header = str(request.headers.get("x-cloudlearn-host-os") or "").strip().lower()
+        if header:
+            return _resolved_host_os(header)
+    return _resolved_host_os()
 
 
 def _iam_user_arn(user_name: str) -> str:
@@ -667,8 +890,6 @@ def _iam_route_action_resource(request: Request) -> tuple[str, str] | None:
                 return ("ec2:RebootInstances", resource)
             elif tail == ["terminate"] and method == "POST":
                 return ("ec2:TerminateInstances", resource)
-            elif tail[:1] == ["sample-apps"] and method == "POST":
-                return ("ec2:RunInstances", resource)
         return None
     if path.startswith("/api/gcp/compute/"):
         parts = [p for p in path.split("/") if p]
@@ -693,7 +914,6 @@ def _iam_route_action_resource(request: Request) -> tuple[str, str] | None:
     if path.startswith("/api/ec2/"):
         action_map = {
             ("GET", "/api/ec2/amis"): ("ec2:DescribeImages", "*"),
-            ("GET", "/api/ec2/sample-apps"): ("ec2:DescribeImages", "*"),
             ("GET", "/api/ec2/runtime"): ("ec2:DescribeInstances", "*"),
             ("GET", "/api/ec2/runtime/lxd"): ("ec2:DescribeInstances", "*"),
             ("GET", "/api/ec2/runtime/multipass"): ("ec2:DescribeInstances", "*"),
@@ -919,17 +1139,16 @@ def _iam_route_action_resource(request: Request) -> tuple[str, str] | None:
                         return ("s3:CompleteMultipartUpload", resource)
     return None
 
-STATE_VERSION = 8
+STATE_VERSION = 12
 STATE_FILE = Path(os.environ.get("CLOUDLEARN_STATE_FILE", Path(__file__).with_name(".cloudlearn_state.sqlite3")))
 LEGACY_STATE_FILE = Path(os.environ.get("CLOUDLEARN_LEGACY_STATE_FILE", STATE_FILE.with_suffix(".pkl")))
 STATE_LOCK = threading.RLock()
-LXD_RUNTIME_IMAGE = os.environ.get("CLOUDLEARN_LXD_RUNTIME_IMAGE", os.environ.get("CLOUDLEARN_DOCKER_RUNTIME_IMAGE", "ubuntu:24.04"))
-DOCKER_RUNTIME_IMAGE = LXD_RUNTIME_IMAGE
+LXD_RUNTIME_IMAGE = os.environ.get("CLOUDLEARN_LXD_RUNTIME_IMAGE", os.environ.get("CLOUDLEARN_LXD_RUNTIME_IMAGE", "ubuntu:24.04"))
+LXD_RUNTIME_IMAGE = LXD_RUNTIME_IMAGE
 MULTIPASS_RUNTIME_IMAGE = os.environ.get("CLOUDLEARN_MULTIPASS_RUNTIME_IMAGE", "ubuntu:24.04")
-DOCKER_CONSOLE_PORT = 8080
+LXD_CONSOLE_PORT = 8080
 EC2_TERMINATED_VISIBILITY_SECONDS = int(os.environ.get("CLOUDLEARN_EC2_TERMINATED_VISIBILITY_SECONDS", "60"))
-INSTANCE_WORK_ROOT = Path(os.environ.get("CLOUDLEARN_DEPLOY_DIR", Path(__file__).with_name("deployments")))
-SAMPLE_APP_ROOT = Path(__file__).with_name("sample_apps")
+INSTANCE_WORK_ROOT = Path(os.environ.get("CLOUDLEARN_DEPLOY_DIR", "/var/lib/cloudlearn/deployments"))
 EC2_XML_NS = "http://ec2.amazonaws.com/doc/2016-11-15/"
 RDS_XML_NS = "http://rds.amazonaws.com/doc/2014-10-31/"
 SQS_XML_NS = "http://queue.amazonaws.com/doc/2012-11-05/"
@@ -941,6 +1160,20 @@ ET.register_namespace("sqs", SQS_XML_NS)
 
 def _default_packs() -> Dict[str, dict]:
     return load_default_packs()
+
+
+def _default_ec2_runtime_backends() -> list[str]:
+    return ["lxd"] if _appliance_mode_enabled() else ["multipass", "lxd"]
+
+
+def _default_cloudsim_space_policy() -> dict:
+    return {
+        "ec2": {
+            "launch": True,
+            "allowed_runtime_backends": _default_ec2_runtime_backends(),
+            "allowed_amis": [],
+        }
+    }
 
 
 def _default_state() -> dict:
@@ -971,6 +1204,7 @@ def _default_state() -> dict:
         "sqs": {"queues": {}, "events": []},
         "dynamodb": {"tables": {}, "events": []},
         "cloudsim": {"summary": {}, "events": [], "last_reconcile_at": ""},
+        "terraform": {"plans": {}, "applies": {}, "imports": {}, "spaces": {}},
         "federations": {"federations": {}, "links": {}, "tests": []},
         "rds": {
             "db_instances": {},
@@ -1004,6 +1238,11 @@ def _migrate_state(state: dict) -> dict:
         if key not in state:
             state[key] = value
     state["schema_version"] = STATE_VERSION
+    terraform_state = state.setdefault("terraform", {"plans": {}, "applies": {}, "imports": {}, "spaces": {}})
+    terraform_state.setdefault("plans", {})
+    terraform_state.setdefault("applies", {})
+    terraform_state.setdefault("imports", {})
+    terraform_state.setdefault("spaces", {})
     spaces_state = state.setdefault(
         "spaces",
         {
@@ -1020,6 +1259,27 @@ def _migrate_state(state: dict) -> dict:
     spaces_state["settings"].setdefault("default_region", "us-east-1")
     spaces_state["settings"].setdefault("max_memory_mb", 8192)
     spaces_state["settings"].setdefault("max_disk_mb", 32768)
+    for space in spaces_state.get("spaces", {}).values():
+        if not isinstance(space, dict):
+            continue
+        cloudsim = space.setdefault("cloudsim", {"summary": {}, "events": [], "last_tick": ""})
+        if not isinstance(cloudsim, dict):
+            space["cloudsim"] = {"summary": {}, "events": [], "last_tick": ""}
+            cloudsim = space["cloudsim"]
+        cloudsim.setdefault("summary", {})
+        cloudsim.setdefault("events", [])
+        cloudsim.setdefault("last_tick", "")
+        policy = cloudsim.get("policy")
+        if not isinstance(policy, dict):
+            cloudsim["policy"] = copy.deepcopy(_default_cloudsim_space_policy())
+        else:
+            ec2_policy = policy.get("ec2")
+            if not isinstance(ec2_policy, dict):
+                policy["ec2"] = copy.deepcopy(_default_cloudsim_space_policy()["ec2"])
+            else:
+                ec2_policy.setdefault("launch", True)
+                ec2_policy.setdefault("allowed_runtime_backends", _default_ec2_runtime_backends())
+                ec2_policy.setdefault("allowed_amis", [])
     packs = state.setdefault("packs", {})
     for pack_id, pack in _default_packs().items():
         packs.setdefault(pack_id, copy.deepcopy(pack))
@@ -1040,13 +1300,8 @@ def _migrate_state(state: dict) -> dict:
         inst.setdefault("runtime_image", LXD_RUNTIME_IMAGE)
         inst.setdefault("container_id", "")
         inst.setdefault("container_name", f"cloudlearn-{instance_id}")
-        inst.setdefault("container_port", DOCKER_CONSOLE_PORT)
+        inst.setdefault("container_port", LXD_CONSOLE_PORT)
         inst.setdefault("host_port", None)
-        inst.setdefault("sample_app_id", "")
-        inst.setdefault("sample_app_name", "")
-        inst.setdefault("sample_app_status", "not deployed")
-        inst.setdefault("sample_app_command", "")
-        inst.setdefault("sample_app_port", DOCKER_CONSOLE_PORT)
         inst.setdefault("reservation_id", f"r-{instance_id.replace('i-', '')}")
         inst.setdefault("owner_id", AWS_ACCOUNT_ID)
         inst.setdefault("endpoint_url", "")
@@ -1055,6 +1310,9 @@ def _migrate_state(state: dict) -> dict:
         inst.setdefault("command", "")
         inst.setdefault("deployment_path", str((INSTANCE_WORK_ROOT / instance_id).resolve()))
         inst.setdefault("workspace", str((INSTANCE_WORK_ROOT / instance_id).resolve()))
+        legacy_prefix = "sample"
+        for key in tuple(f"{legacy_prefix}_app_{suffix}" for suffix in ("id", "name", "status", "command", "port", "kill_pattern", "error")):
+            inst.pop(key, None)
         console_state = inst.get("console_state")
         if not isinstance(console_state, dict):
             inst["console_state"] = {"cwd": str((INSTANCE_WORK_ROOT / instance_id).resolve())}
@@ -1185,7 +1443,7 @@ def _migrate_state(state: dict) -> dict:
             "rds_count": len((state.get("rds") or {}).get("db_instances", {})),
             "sqs_count": len((state.get("sqs") or {}).get("queues", {})),
             "dynamodb_count": len((state.get("dynamodb") or {}).get("tables", {})),
-            "cloudsim": {"summary": {}, "events": [], "last_tick": ""},
+            "cloudsim": {"summary": {}, "events": [], "last_tick": "", "policy": copy.deepcopy(_default_cloudsim_space_policy())},
             "runtime": {"mode": "lxd", "instances": {}, "sandbox_count": 0},
             "resources": {},
             "events": [],
@@ -1227,6 +1485,25 @@ def _persist_state() -> None:
     PLATFORM.persist()
 
 
+def _terraform_state() -> dict:
+    terraform_state = STATE.setdefault("terraform", {"plans": {}, "applies": {}, "imports": {}, "spaces": {}})
+    terraform_state.setdefault("plans", {})
+    terraform_state.setdefault("applies", {})
+    terraform_state.setdefault("imports", {})
+    terraform_state.setdefault("spaces", {})
+    return terraform_state
+
+
+def _terraform_space_state(space_id: str) -> dict:
+    terraform_state = _terraform_state()
+    spaces = terraform_state.setdefault("spaces", {})
+    space_state = spaces.setdefault(space_id, {})
+    space_state.setdefault("plans", {})
+    space_state.setdefault("applies", {})
+    space_state.setdefault("imports", {})
+    return space_state
+
+
 def _record_usage(event: str, detail: dict | None = None) -> None:
     payload = copy.deepcopy(detail or {})
     PLATFORM.record_event(event, payload)
@@ -1266,6 +1543,126 @@ def _cloudsim_runtime_bundle(bundle_key: str | None) -> dict:
     return copy.deepcopy(bundle)
 
 
+def _cloudsim_sync_ec2_resource(instance: dict, action: str = "upsert") -> None:
+    if not isinstance(instance, dict):
+        return
+    resource_id = str(instance.get("instance_id") or instance.get("id") or "").strip()
+    if not resource_id:
+        return
+    region = str(instance.get("az") or instance.get("region") or instance.get("active_region") or "us-east-1").strip() or "us-east-1"
+    bundle = _cloudsim_runtime_bundle("ec2")
+    payload = {
+        "name": instance.get("name") or resource_id,
+        "instance_type": instance.get("instance_type", ""),
+        "ami": instance.get("ami", ""),
+        "ami_name": instance.get("ami_name", ""),
+        "state": instance.get("state", ""),
+        "launch_status": instance.get("launch_status", ""),
+        "runtime_backend": instance.get("runtime_backend", ""),
+        "runtime_bundle_id": bundle.get("id", ""),
+        "runtime_bundle_name": bundle.get("name", ""),
+        "runtime_bundle_kind": bundle.get("kind", ""),
+        "runtime_bundle_provider": bundle.get("provider", ""),
+        "runtime_bundle_service": bundle.get("service", ""),
+        "console_backend": instance.get("console_backend", ""),
+        "endpoint_url": instance.get("endpoint_url", ""),
+        "private_ip": instance.get("private_ip", ""),
+        "public_ip": instance.get("public_ip", ""),
+        "workspace": instance.get("workspace", ""),
+        "updated_at": instance.get("updated_at") or instance.get("created") or _now(),
+    }
+    try:
+        if action == "delete":
+            PLATFORM.delete_resource("ec2", resource_id, region=region)
+        else:
+            PLATFORM.create_resource("ec2", "instance", resource_id, payload, region=region)
+    except Exception:
+        pass
+
+
+def _cloudsim_space_policy(space: dict | None) -> dict:
+    policy = copy.deepcopy(_default_cloudsim_space_policy())
+    if not isinstance(space, dict):
+        return policy
+    cloudsim = space.get("cloudsim")
+    if isinstance(cloudsim, dict):
+        raw_policy = cloudsim.get("policy")
+        if isinstance(raw_policy, dict):
+            policy = copy.deepcopy(raw_policy)
+    if not isinstance(policy, dict):
+        policy = copy.deepcopy(_default_cloudsim_space_policy())
+    ec2_policy = policy.setdefault("ec2", {})
+    if not isinstance(ec2_policy, dict):
+        ec2_policy = {}
+        policy["ec2"] = ec2_policy
+    ec2_policy.setdefault("launch", True)
+    allowed_backends = ec2_policy.get("allowed_runtime_backends")
+    if isinstance(allowed_backends, str):
+        allowed_backends = [allowed_backends]
+    if not isinstance(allowed_backends, list):
+        allowed_backends = ["multipass", "lxd"]
+    normalized_backends = []
+    for backend in allowed_backends:
+        backend_value = str(backend).strip().lower()
+        if backend_value:
+            normalized_backends.append(backend_value)
+    ec2_policy["allowed_runtime_backends"] = list(dict.fromkeys(normalized_backends or ["multipass", "lxd"]))
+    allowed_amis = ec2_policy.get("allowed_amis")
+    if isinstance(allowed_amis, str):
+        allowed_amis = [allowed_amis]
+    if not isinstance(allowed_amis, list):
+        allowed_amis = []
+    ec2_policy["allowed_amis"] = [str(ami).strip() for ami in allowed_amis if str(ami).strip()]
+    return policy
+
+
+def _cloudsim_validate_ec2_launch_policy(space: dict | None, req: "EC2InstanceRequest", profile: dict, runtime_backend: str) -> None:
+    policy = _cloudsim_space_policy(space)
+    ec2_policy = policy.get("ec2", {}) if isinstance(policy, dict) else {}
+    if not isinstance(ec2_policy, dict):
+        ec2_policy = {}
+    if not bool(ec2_policy.get("launch", True)):
+        _record_usage(
+            "ec2.launch_denied",
+            {
+                "ami": req.ami,
+                "ami_name": profile.get("name", req.ami),
+                "instance_type": req.instance_type,
+                "runtime_backend": runtime_backend,
+                "reason": "CloudSim policy blocks EC2 launches in the active space.",
+            },
+        )
+        raise HTTPException(status_code=403, detail="CloudSim policy blocks EC2 launches in the active space.")
+    allowed_backends = [str(item).strip().lower() for item in ec2_policy.get("allowed_runtime_backends", []) if str(item).strip()]
+    if allowed_backends and runtime_backend not in allowed_backends:
+        allowed_label = ", ".join(item.upper() if item != "lxd" else "LXD" for item in allowed_backends)
+        _record_usage(
+            "ec2.launch_denied",
+            {
+                "ami": req.ami,
+                "ami_name": profile.get("name", req.ami),
+                "instance_type": req.instance_type,
+                "runtime_backend": runtime_backend,
+                "reason": f"CloudSim policy only allows these EC2 runtime backends: {allowed_label}.",
+            },
+        )
+        raise HTTPException(status_code=403, detail=f"CloudSim policy only allows these EC2 runtime backends: {allowed_label}.")
+    allowed_amis = [str(item).strip() for item in ec2_policy.get("allowed_amis", []) if str(item).strip()]
+    if allowed_amis and req.ami not in allowed_amis:
+        ami_name = profile.get("name", req.ami)
+        _record_usage(
+            "ec2.launch_denied",
+            {
+                "ami": req.ami,
+                "ami_name": ami_name,
+                "instance_type": req.instance_type,
+                "runtime_backend": runtime_backend,
+                "reason": f"CloudSim policy does not allow AMI '{ami_name}'.",
+            },
+        )
+        raise HTTPException(status_code=403, detail=f"CloudSim policy does not allow AMI '{ami_name}'.")
+
+
 def _cloudsim_service_state(space: dict | None, *keys: str) -> dict:
     if not isinstance(space, dict):
         return {}
@@ -1273,6 +1670,23 @@ def _cloudsim_service_state(space: dict | None, *keys: str) -> dict:
     if not isinstance(service_states, dict):
         space["service_states"] = {}
         service_states = space["service_states"]
+    candidates: list[tuple[int, int, dict]] = []
+    for index, key in enumerate(keys):
+        for candidate_key in (key, f"gcp_{key}"):
+            value = service_states.get(candidate_key)
+            if isinstance(value, dict):
+                score = 0
+                for nested in value.values():
+                    if isinstance(nested, dict):
+                        score += len(nested)
+                    elif isinstance(nested, (list, tuple, set)):
+                        score += len(nested)
+                    elif nested not in (None, "", False):
+                        score += 1
+                candidates.append((score, -index, value))
+    if candidates:
+        candidates.sort(key=lambda item: (item[0], item[1]), reverse=True)
+        return candidates[0][2]
     for key in keys:
         if key in service_states and isinstance(service_states[key], dict):
             return service_states[key]
@@ -1281,6 +1695,49 @@ def _cloudsim_service_state(space: dict | None, *keys: str) -> dict:
         if prefixed in service_states and isinstance(service_states[prefixed], dict):
             return service_states[prefixed]
     return service_states.setdefault(keys[0], {})
+
+
+def _cloudsim_gcp_summary_counts(space: dict | None = None) -> dict[str, int]:
+    target = space if isinstance(space, dict) else _spaces_state().get("spaces", {}).get(_spaces_state().get("active_space_id", ""), {})
+    if not isinstance(target, dict):
+        target = {}
+    service_state_space = {"service_states": target.get("service_states", {}) if isinstance(target.get("service_states", {}), dict) else {}}
+
+    def bucket(*keys: str) -> dict:
+        return _cloudsim_service_state(service_state_space, *keys)
+
+    return {
+        "gcp_compute_count": len(bucket("gcp_compute", "gcp_gcp_compute").get("instances", {})),
+        "gcp_storage_bucket_count": len(bucket("gcp_storage", "gcp_gcp_storage").get("buckets", {})),
+        "gcp_sql_count": len(bucket("gcp_sql", "gcp_gcp_sql").get("instances", {})),
+        "gcp_pubsub_topic_count": len(bucket("gcp_pubsub", "gcp_gcp_pubsub").get("topics", {})),
+        "gcp_pubsub_subscription_count": len(bucket("gcp_pubsub", "gcp_gcp_pubsub").get("subscriptions", {})),
+        "gcp_functions_count": len(bucket("gcp_functions", "gcp_gcp_functions").get("functions", {})),
+        "gcp_apigateway_count": len(bucket("gcp_apigateway", "gcp_gcp_apigateway").get("apis", {})),
+        "gcp_vpc_count": len(bucket("gcp_vpc", "gcp_gcp_vpc").get("networks", {})),
+        "gcp_iam_count": len(bucket("gcp_iam", "gcp_gcp_iam").get("service_accounts", {})),
+    }
+
+
+def _refresh_cloudsim_gcp_summary() -> None:
+    spaces_state = _spaces_state()
+    active_id = spaces_state.get("active_space_id", "")
+    active_space = spaces_state.get("spaces", {}).get(active_id, {}) if active_id else {}
+    counts = _cloudsim_gcp_summary_counts(active_space if isinstance(active_space, dict) else None)
+    cloudsim = STATE.setdefault("cloudsim", {"summary": {}, "events": [], "last_reconcile_at": ""})
+    cloudsim.setdefault("summary", {}).update(counts)
+    if isinstance(active_space, dict):
+        active_cloudsim = active_space.setdefault("cloudsim", {"summary": {}, "events": [], "last_tick": ""})
+        active_cloudsim.setdefault("summary", {}).update(counts)
+    try:
+        platform_cloudsim = PLATFORM.kernel.state.setdefault("cloudsim", {"summary": {}, "events": [], "last_reconcile_at": ""})
+        platform_cloudsim.setdefault("summary", {}).update(counts)
+        if isinstance(active_space, dict):
+            platform_active = PLATFORM.kernel.state.setdefault("spaces", {"spaces": {}, "active_space_id": "", "settings": {}}).get("spaces", {}).get(active_id, {})
+            if isinstance(platform_active, dict):
+                platform_active.setdefault("cloudsim", {"summary": {}, "events": [], "last_tick": ""}).setdefault("summary", {}).update(counts)
+    except Exception:
+        pass
 
 
 def _cloudsim_resource_id(resource: dict, *candidates: str) -> str:
@@ -1506,6 +1963,12 @@ def _cloudsim_refresh_bridge(reason: str, detail: dict | None = None) -> None:
         active_id = spaces_state.get("active_space_id", "")
         active_space = spaces_state.get("spaces", {}).get(active_id) if active_id else None
         source_space = active_space if isinstance(active_space, dict) else {"service_states": STATE, "runtime": STATE.get("runtime", {})}
+        try:
+            runtime_status = PLATFORM.runtime.bootstrap_status()
+        except Exception:
+            runtime_status = {}
+        runtime_host_os = str(runtime_status.get("host_os") or PLATFORM.runtime.host_os()).strip().lower()
+        runtime_preferred_backend = str(runtime_status.get("preferred_backend") or PLATFORM.runtime.preferred_backend()).strip().lower()
         nodes: list[dict] = []
         counts: dict[str, int] = {}
         runtime_instances: dict[str, dict] = {}
@@ -1522,6 +1985,8 @@ def _cloudsim_refresh_bridge(reason: str, detail: dict | None = None) -> None:
                 "provider": active_space.get("provider", "aws"),
                 "status": active_space.get("status", "running"),
                 "active_region": active_space.get("active_region", "us-east-1"),
+                "host_os": runtime_host_os,
+                "preferred_backend": runtime_preferred_backend,
                 "spaces": len(spaces_state.get("spaces", {})),
                 "active_space_id": active_id,
                 "active_space_name": active_space.get("name", ""),
@@ -1550,9 +2015,13 @@ def _cloudsim_refresh_bridge(reason: str, detail: dict | None = None) -> None:
                 "last_action_detail": copy.deepcopy(detail or {}),
                 "bundle_count": len(runtime_state.setdefault("bundles", {})),
                 "sandbox_count": len(runtime_instances),
+                "sandbox_backend": runtime_preferred_backend,
                 "event_count": len(active_cloudsim.get("events", [])),
             }
             active_space["resources"] = {"nodes": copy.deepcopy(nodes), "count": len(nodes), "updated_at": now, "reason": reason}
+            active_space.setdefault("runtime", {}).setdefault("mode", "sandboxed")
+            active_space["runtime"]["preferred_backend"] = runtime_preferred_backend
+            active_space["runtime"]["host_os"] = runtime_host_os
         cloudsim = STATE.setdefault("cloudsim", {"summary": {}, "events": [], "last_reconcile_at": ""})
         summary = cloudsim.setdefault("summary", {})
         summary.update(
@@ -1562,6 +2031,8 @@ def _cloudsim_refresh_bridge(reason: str, detail: dict | None = None) -> None:
                 "active_space_name": active_space.get("name", "") if isinstance(active_space, dict) else "",
                 "resource_count": len(nodes),
                 "runtime_count": int(source_space.get("runtime_count", 0)) if isinstance(source_space, dict) else 0,
+                "host_os": runtime_host_os,
+                "preferred_backend": runtime_preferred_backend,
                 "ec2_count": len(_cloudsim_service_state(source_space, "ec2").get("instances", {})) if isinstance(source_space, dict) else 0,
                 "lambda_count": len(_cloudsim_service_state(source_space, "lambda").get("functions", {})) if isinstance(source_space, dict) else 0,
                 "rds_count": len(_cloudsim_service_state(source_space, "rds").get("db_instances", {})) if isinstance(source_space, dict) else 0,
@@ -1584,6 +2055,7 @@ def _cloudsim_refresh_bridge(reason: str, detail: dict | None = None) -> None:
                 "last_action": reason,
                 "last_action_detail": copy.deepcopy(detail or {}),
                 "bundle_count": len(runtime_state.setdefault("bundles", {})),
+                "sandbox_backend": runtime_preferred_backend,
                 "event_count": len(cloudsim.get("events", [])),
                 "last_reconcile_at": cloudsim.get("last_reconcile_at", ""),
             }
@@ -1709,7 +2181,6 @@ class EC2InstanceRequest(BaseModel):
     storage_gb: int = 8
     command: str = ""
     user_data: str = ""
-    sample_app_id: str = ""
 
 
 class GCPComputeInstanceRequest(BaseModel):
@@ -1741,6 +2212,10 @@ class EC2ConsoleInputRequest(BaseModel):
 
 
 class EC2ConsoleCommandRequest(BaseModel):
+    command: str = ""
+
+
+class GCPComputeConsoleCommandRequest(BaseModel):
     command: str = ""
 
 
@@ -2036,6 +2511,11 @@ class DeploymentRequest(BaseModel):
     command: str = ""
     branch: str = "main"
     repo: str = ""
+
+
+class TerraformWorkflowRequest(BaseModel):
+    plan_id: str = ""
+    confirm: bool = False
 
 
 def _apigw_state() -> dict:
@@ -3462,7 +3942,7 @@ AMI_CATALOG = [
         "category": "Amazon",
         "default_runtime": "python",
         "container_image": "amazonlinux:2023",
-        "runtime_image": DOCKER_RUNTIME_IMAGE,
+        "runtime_image": LXD_RUNTIME_IMAGE,
         "description": "Amazon Linux 2023 base image for lightweight apps.",
     },
     {
@@ -3472,7 +3952,7 @@ AMI_CATALOG = [
         "category": "Amazon",
         "default_runtime": "python",
         "container_image": "amazonlinux:2",
-        "runtime_image": DOCKER_RUNTIME_IMAGE,
+        "runtime_image": LXD_RUNTIME_IMAGE,
         "description": "Amazon Linux 2 compatibility profile for legacy workloads.",
     },
     {
@@ -3482,7 +3962,7 @@ AMI_CATALOG = [
         "category": "Amazon",
         "default_runtime": "python",
         "container_image": "amazonlinux:2023",
-        "runtime_image": DOCKER_RUNTIME_IMAGE,
+        "runtime_image": LXD_RUNTIME_IMAGE,
         "description": "Amazon Linux 2023 minimal profile for smaller footprints.",
     },
     {
@@ -3492,7 +3972,7 @@ AMI_CATALOG = [
         "category": "Ubuntu",
         "default_runtime": "python",
         "container_image": "ubuntu:22.04",
-        "runtime_image": DOCKER_RUNTIME_IMAGE,
+        "runtime_image": LXD_RUNTIME_IMAGE,
         "description": "Ubuntu 22.04 base image for common app runtimes.",
     },
     {
@@ -3502,7 +3982,7 @@ AMI_CATALOG = [
         "category": "Ubuntu",
         "default_runtime": "python",
         "container_image": "ubuntu:24.04",
-        "runtime_image": DOCKER_RUNTIME_IMAGE,
+        "runtime_image": LXD_RUNTIME_IMAGE,
         "description": "Ubuntu 24.04 LTS profile for current-generation workloads.",
     },
     {
@@ -3512,7 +3992,7 @@ AMI_CATALOG = [
         "category": "Ubuntu",
         "default_runtime": "python",
         "container_image": "ubuntu:20.04",
-        "runtime_image": DOCKER_RUNTIME_IMAGE,
+        "runtime_image": LXD_RUNTIME_IMAGE,
         "description": "Ubuntu 20.04 LTS profile for older workloads and labs.",
     },
     {
@@ -3522,7 +4002,7 @@ AMI_CATALOG = [
         "category": "Debian",
         "default_runtime": "python",
         "container_image": "debian:12",
-        "runtime_image": DOCKER_RUNTIME_IMAGE,
+        "runtime_image": LXD_RUNTIME_IMAGE,
         "description": "Debian 12 profile for lean Linux instances.",
     },
     {
@@ -3532,7 +4012,7 @@ AMI_CATALOG = [
         "category": "Debian",
         "default_runtime": "python",
         "container_image": "debian:11",
-        "runtime_image": DOCKER_RUNTIME_IMAGE,
+        "runtime_image": LXD_RUNTIME_IMAGE,
         "description": "Debian 11 profile for compatibility-focused labs.",
     },
     {
@@ -3542,7 +4022,7 @@ AMI_CATALOG = [
         "category": "Red Hat",
         "default_runtime": "python",
         "container_image": "rockylinux:9",
-        "runtime_image": DOCKER_RUNTIME_IMAGE,
+        "runtime_image": LXD_RUNTIME_IMAGE,
         "description": "RHEL 9 container profile for enterprise-style setups.",
     },
     {
@@ -3552,7 +4032,7 @@ AMI_CATALOG = [
         "category": "Red Hat",
         "default_runtime": "python",
         "container_image": "rockylinux:9",
-        "runtime_image": DOCKER_RUNTIME_IMAGE,
+        "runtime_image": LXD_RUNTIME_IMAGE,
         "description": "Rocky Linux 9 profile for RHEL-compatible workloads.",
     },
     {
@@ -3562,7 +4042,7 @@ AMI_CATALOG = [
         "category": "Red Hat",
         "default_runtime": "python",
         "container_image": "almalinux:9",
-        "runtime_image": DOCKER_RUNTIME_IMAGE,
+        "runtime_image": LXD_RUNTIME_IMAGE,
         "description": "AlmaLinux 9 profile for RHEL-compatible labs.",
     },
     {
@@ -3572,7 +4052,7 @@ AMI_CATALOG = [
         "category": "SUSE",
         "default_runtime": "python",
         "container_image": "opensuse/leap:15",
-        "runtime_image": DOCKER_RUNTIME_IMAGE,
+        "runtime_image": LXD_RUNTIME_IMAGE,
         "description": "SUSE Linux Enterprise 15 profile for enterprise Linux practice.",
     },
     {
@@ -3582,7 +4062,7 @@ AMI_CATALOG = [
         "category": "Fedora",
         "default_runtime": "python",
         "container_image": "fedora:42",
-        "runtime_image": DOCKER_RUNTIME_IMAGE,
+        "runtime_image": LXD_RUNTIME_IMAGE,
         "description": "Fedora 42 profile for modern Linux and container labs.",
     },
     {
@@ -3592,7 +4072,7 @@ AMI_CATALOG = [
         "category": "Microsoft Windows",
         "default_runtime": "python",
         "container_image": "mcr.microsoft.com/windows/servercore:ltsc2022",
-        "runtime_image": DOCKER_RUNTIME_IMAGE,
+        "runtime_image": LXD_RUNTIME_IMAGE,
         "description": "Windows Server 2022 base profile for Windows-focused labs.",
     },
     {
@@ -3602,7 +4082,7 @@ AMI_CATALOG = [
         "category": "Microsoft Windows",
         "default_runtime": "python",
         "container_image": "mcr.microsoft.com/windows/nanoserver:ltsc2022",
-        "runtime_image": DOCKER_RUNTIME_IMAGE,
+        "runtime_image": LXD_RUNTIME_IMAGE,
         "description": "Windows Server 2022 Core profile for lightweight Windows workloads.",
     },
     {
@@ -3612,7 +4092,7 @@ AMI_CATALOG = [
         "category": "Microsoft Windows",
         "default_runtime": "python",
         "container_image": "mcr.microsoft.com/windows/servercore:ltsc2025",
-        "runtime_image": DOCKER_RUNTIME_IMAGE,
+        "runtime_image": LXD_RUNTIME_IMAGE,
         "description": "Windows Server 2025 base profile for newer Windows labs.",
     },
 ]
@@ -3757,6 +4237,9 @@ def _reconcile_runtime_instances(instances: dict[str, dict]) -> None:
         instance = instances.get(instance_id)
         if not isinstance(instance, dict):
             continue
+        legacy_prefix = "sample"
+        for key in tuple(f"{legacy_prefix}_app_{suffix}" for suffix in ("id", "name", "status", "command", "port", "kill_pattern", "error")):
+            instance.pop(key, None)
         backend = str(instance.get("runtime_backend") or "").strip().lower()
         if backend == "multipass":
             _ensure_instance_workspace(instance)
@@ -3766,18 +4249,10 @@ def _reconcile_runtime_instances(instances: dict[str, dict]) -> None:
                 instance.setdefault("container_status", "multipass-unavailable")
         elif backend == "lxd":
             _ensure_instance_workspace(instance)
-            if _docker_available():
-                _sync_docker_instance(instance)
+            if _lxd_available():
+                _sync_lxd_instance(instance)
             else:
                 instance.setdefault("container_status", "lxd-unavailable")
-        if instance.get("sample_app_id"):
-            try:
-                if instance.get("state") == "running":
-                    _ensure_sample_app_server(instance)
-                else:
-                    _stop_sample_app_server(instance_id)
-            except Exception:
-                instance["sample_app_status"] = "error"
         if instance.get("state") == "pending" and backend in {"multipass", "lxd"}:
             _queue_runtime_start_for_store(instances, instance_id)
 
@@ -3801,6 +4276,10 @@ def _prune_expired_terminated_instances_from(instances: dict[str, dict]) -> None
 def _startup_reconcile_ec2_state():
     try:
         PLATFORM.runtime.start_bootstrap()
+    except Exception:
+        pass
+    try:
+        PLATFORM.rehydrate_cloudsim()
     except Exception:
         pass
     _reconcile_runtime_instances(ec2_state.get("instances", {}))
@@ -3894,11 +4373,11 @@ iam_state.setdefault("attachments", [])
 iam_state.setdefault("identity_providers", {})
 iam_state.setdefault("account_settings", {"password_policy": {"minimum_length": 8, "require_symbols": True, "require_numbers": True, "require_uppercase": True, "require_lowercase": True}})
 ec2_state = _SpaceScopedDictProxy("ec2", lambda: {"instances": {}})
-gcp_compute_state = _SpaceScopedDictProxy("gcp_compute", lambda: {"instances": {}})
-gcp_storage_state = _SpaceScopedDictProxy("gcp_storage", lambda: {"buckets": {}, "objects": {}, "operations": []})
-gcp_sql_state = _SpaceScopedDictProxy("gcp_sql", lambda: {"instances": {}, "operations": []})
-gcp_pubsub_state = _SpaceScopedDictProxy("gcp_pubsub", lambda: {"topics": {}, "subscriptions": {}, "messages": {}, "operations": []})
-gcp_firestore_state = _SpaceScopedDictProxy("gcp_firestore", lambda: {"databases": {}, "documents": {}, "operations": []})
+gcp_compute_state = _SpaceScopedDictProxy("gcp_compute", lambda: {"instances": {}, "instance_groups": {}, "disks": {}, "snapshots": {}, "images": {}, "operations": []})
+gcp_storage_state = _SpaceScopedDictProxy("gcp_storage", lambda: {"buckets": {}, "objects": {}, "folders": {}, "transfers": {}, "policies": {}, "operations": []})
+gcp_sql_state = _SpaceScopedDictProxy("gcp_sql", lambda: {"instances": {}, "backups": {}, "query_insights": {}, "operations": []})
+gcp_pubsub_state = _SpaceScopedDictProxy("gcp_pubsub", lambda: {"topics": {}, "subscriptions": {}, "messages": {}, "schemas": {}, "operations": []})
+gcp_firestore_state = _SpaceScopedDictProxy("gcp_firestore", lambda: {"databases": {}, "documents": {}, "indexes": {}, "operations": []})
 gcp_functions_state = _SpaceScopedDictProxy("gcp_functions", lambda: {"functions": {}, "versions": {}, "invocations": [], "operations": []})
 gcp_apigw_state = _SpaceScopedDictProxy("gcp_apigateway", lambda: {"apis": {}, "api_configs": {}, "gateways": {}, "operations": [], "logs": []})
 gcp_vpc_state = _SpaceScopedDictProxy("gcp_vpc", lambda: {"networks": {}, "subnetworks": {}, "firewalls": {}, "routes": {}, "operations": []})
@@ -5307,10 +5786,8 @@ app.include_router(api)
 RUNTIME_HANDLES: Dict[str, Any] = {}
 CONSOLE_SESSIONS: Dict[str, dict] = {}
 CONSOLE_LOCK = threading.RLock()
-APP_SERVERS: Dict[str, dict] = {}
-APP_SERVER_LOCK = threading.RLock()
-DOCKER_BOOTSTRAP_LOCK = threading.RLock()
-DOCKER_BOOTSTRAP_THREAD: threading.Thread | None = None
+LXD_BOOTSTRAP_LOCK = threading.RLock()
+LXD_BOOTSTRAP_THREAD: threading.Thread | None = None
 
 
 def _id(prefix: str) -> str:
@@ -5325,49 +5802,23 @@ def _private_ip() -> str:
     return f"10.{int(uuid.uuid4().hex[:2], 16) % 250}.{int(uuid.uuid4().hex[2:4], 16) % 250}.{int(uuid.uuid4().hex[4:6], 16) % 250}"
 
 
-SAMPLE_APP_MANIFESTS = {
-    "hello-web": {
-        "id": "hello-web",
-        "name": "Hello Web",
-        "description": "Static web app served from the instance workspace on port 8080.",
-        "runtime": "python",
-        "container_port": 8080,
-        "start_command": "python -m http.server 8080",
-        "kill_pattern": "http.server 8080",
-        "template_dir": "hello-web",
-        "badge": "Static site",
-    },
-    "hello-api": {
-        "id": "hello-api",
-        "name": "Hello API",
-        "description": "Tiny JSON API built with the Python standard library on port 8080.",
-        "runtime": "python",
-        "container_port": 8080,
-        "start_command": "python app.py",
-        "kill_pattern": "app.py",
-        "template_dir": "hello-api",
-        "badge": "JSON API",
-    },
-}
+def _lxd_cli() -> str | None:
+    return PLATFORM.runtime.lxd_cli()
 
 
-def _docker_cli() -> str | None:
-    return PLATFORM.runtime.docker_cli()
-
-
-def _docker_available() -> bool:
+def _lxd_available() -> bool:
     return PLATFORM.runtime.available()
 
 
-def _docker_cli_available() -> bool:
-    return bool(_docker_cli())
+def _lxd_cli_available() -> bool:
+    return bool(_lxd_cli())
 
 
-def _docker_bootstrap_status() -> dict:
+def _lxd_bootstrap_status() -> dict:
     return PLATFORM.runtime.bootstrap_status()
 
 
-def _docker_bootstrap_target() -> dict:
+def _lxd_bootstrap_target() -> dict:
     return PLATFORM.runtime.bootstrap_target()
 
 
@@ -5385,9 +5836,9 @@ def _apply_bootstrap_result(result: subprocess.CompletedProcess) -> None:
         runtime_state["lxd"]["status"] = "error"
 
 
-def _docker_bootstrap_worker() -> None:
-    target = _docker_bootstrap_target()
-    with DOCKER_BOOTSTRAP_LOCK:
+def _lxd_bootstrap_worker() -> None:
+    target = _lxd_bootstrap_target()
+    with LXD_BOOTSTRAP_LOCK:
         runtime_state["lxd"]["status"] = "installing"
         runtime_state["lxd"]["helper"] = target["helper"]
         runtime_state["lxd"]["label"] = target["label"]
@@ -5422,7 +5873,7 @@ def _docker_bootstrap_worker() -> None:
         return
 
     runtime_state["lxd"]["finished_at"] = _now()
-    if _docker_available():
+    if _lxd_available():
         runtime_state["lxd"]["status"] = "ready"
         runtime_state["lxd"]["message"] = "LXD is ready."
     elif runtime_state["lxd"].get("status") not in {"manual", "error"}:
@@ -5432,7 +5883,7 @@ def _docker_bootstrap_worker() -> None:
     _persist_state()
 
 
-def _start_docker_bootstrap() -> dict:
+def _start_lxd_bootstrap() -> dict:
     return PLATFORM.runtime.start_bootstrap()
 
 
@@ -5567,24 +6018,24 @@ def _gcp_firestore_engine():
 
 
 def _require_lxd_runtime() -> None:
-    if not _docker_available():
+    if not _lxd_available():
         raise HTTPException(status_code=503, detail="LXDUnavailable")
 
 
-def _docker_run(args: list[str], timeout: int = 60) -> subprocess.CompletedProcess:
+def _lxd_run(args: list[str], timeout: int = 60) -> subprocess.CompletedProcess:
     return PLATFORM.runtime.run_backend("lxd", args, timeout=timeout)
 
 
-def _docker_run_checked(args: list[str], timeout: int = 60) -> subprocess.CompletedProcess:
-    completed = _docker_run(args, timeout=timeout)
+def _lxd_run_checked(args: list[str], timeout: int = 60) -> subprocess.CompletedProcess:
+    completed = _lxd_run(args, timeout=timeout)
     if completed.returncode != 0:
         detail = (completed.stderr or completed.stdout or "LXDCommandFailed").strip()
         raise HTTPException(503, detail=detail)
     return completed
 
 
-def _docker_inspect(ref: str) -> dict[str, Any] | None:
-    completed = _docker_run(["info", ref], timeout=30)
+def _lxd_inspect(ref: str) -> dict[str, Any] | None:
+    completed = _lxd_run(["info", ref], timeout=30)
     if completed.returncode != 0:
         return None
     try:
@@ -5596,23 +6047,28 @@ def _docker_inspect(ref: str) -> dict[str, Any] | None:
     return None
 
 
-def _docker_status(ref: str) -> str | None:
-    completed = _docker_run(["info", ref], timeout=30)
+def _lxd_status(ref: str) -> str | None:
+    completed = _lxd_run(["list", ref, "--format", "csv", "-c", "s"], timeout=30)
+    if completed.returncode == 0:
+        text = (completed.stdout or "").strip().splitlines()
+        if text:
+            status = text[-1].strip().lower()
+            if status:
+                return status
+    completed = _lxd_run(["info", ref], timeout=30)
     if completed.returncode != 0:
         return None
-    try:
-        payload = json.loads(completed.stdout or "{}")
-    except Exception:
-        return None
-    if isinstance(payload, dict):
-        status = payload.get("status") or payload.get("Status") or payload.get("state", {}).get("status")
-        if status:
-            return str(status).strip().lower()
+    text = completed.stdout or ""
+    for line in text.splitlines():
+        if line.lower().startswith("status:"):
+            status = line.split(":", 1)[1].strip().lower()
+            if status:
+                return status
     return None
 
 
-def _docker_container_exists(ref: str) -> bool:
-    return _docker_status(ref) is not None
+def _lxd_container_exists(ref: str) -> bool:
+    return _lxd_status(ref) is not None
 
 
 def _allocate_host_port() -> int:
@@ -5623,26 +6079,6 @@ def _allocate_host_port() -> int:
 
 def _instance_workspace(instance_id: str) -> Path:
     return (INSTANCE_WORK_ROOT / instance_id).resolve()
-
-
-def _sample_app_source(app_id: str) -> Path:
-    source = (SAMPLE_APP_ROOT / app_id).resolve()
-    if not source.exists() or not source.is_dir():
-        raise HTTPException(404, detail="SampleAppNotFound")
-    return source
-
-
-def _sample_app_manifest(app_id: str) -> dict:
-    manifest = SAMPLE_APP_MANIFESTS.get(app_id)
-    if not manifest:
-        raise HTTPException(404, detail="SampleAppNotFound")
-    data = copy.deepcopy(manifest)
-    data["template_dir"] = str((_sample_app_source(app_id)).resolve())
-    return data
-
-
-def _sample_app_catalog() -> list[dict]:
-    return [_sample_app_manifest(app_id) for app_id in sorted(SAMPLE_APP_MANIFESTS)]
 
 
 def _ensure_instance_workspace(instance: dict) -> Path:
@@ -5687,178 +6123,155 @@ def _container_exec(instance: dict, command: str, cwd: str | None = None, detach
             command = f"cd {shlex.quote(cwd)} && {command}"
         args.append(command)
         return _multipass_run_checked(args, timeout=120)
+    if backend == "simulated":
+        workspace = _instance_workspace(instance["instance_id"]).resolve()
+        run_cwd = str(workspace)
+        if cwd:
+            try:
+                cwd_path = Path(cwd).resolve()
+                mount_root = Path(_container_mount_path()).resolve()
+                rel = cwd_path.relative_to(mount_root)
+                run_cwd = str((workspace / rel).resolve())
+            except Exception:
+                if Path(cwd).exists():
+                    run_cwd = cwd
+        if detach:
+            subprocess.Popen(
+                command,
+                shell=True,
+                cwd=run_cwd,
+                env=os.environ.copy(),
+                start_new_session=True,
+            )
+            return subprocess.CompletedProcess(args=command, returncode=0, stdout="", stderr="")
+        return subprocess.run(
+            command,
+            shell=True,
+            cwd=run_cwd,
+            env=os.environ.copy(),
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
     args = ["exec"]
     if detach:
         args.append("-d")
     if cwd:
         command = f"cd {shlex.quote(cwd)} && {command}"
     args += [ref, "--", "/bin/sh", "-lc", command]
-    return _docker_run_checked(args, timeout=120)
+    _ensure_lxd_workspace_directory(instance)
+    return _lxd_run_checked(args, timeout=120)
 
 
-def _copy_sample_app_files(app_id: str, workspace: Path) -> dict:
-    source = _sample_app_source(app_id)
-    workspace.mkdir(parents=True, exist_ok=True)
-    for child in workspace.iterdir():
-        if child.name in {".cloudlearn", ".cloudlearn_sample.json", ".cloudlearn_app.log"}:
-            continue
-        if child.is_dir():
-            shutil.rmtree(child)
-        else:
-            child.unlink()
-    shutil.copytree(source, workspace, dirs_exist_ok=True)
-    manifest = _sample_app_manifest(app_id)
-    (workspace / ".cloudlearn_sample.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
-    return manifest
-
-
-class _QuietSimpleHTTPRequestHandler(SimpleHTTPRequestHandler):
-    def log_message(self, format: str, *args: Any) -> None:
-        return
-
-
-class _HelloApiRequestHandler(BaseHTTPRequestHandler):
-    def do_GET(self) -> None:
-        payload = {"ok": True, "service": "hello-api", "path": self.path}
-        if self.path not in {"/", "/health", "/healthz"}:
-            payload = {"message": "Hello from CloudLearn", "path": self.path}
-        body = json.dumps(payload, indent=2).encode("utf-8")
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
-
-    def log_message(self, format: str, *args: Any) -> None:
-        return
-
-
-def _sample_app_handler_factory(instance: dict):
-    app_id = instance.get("sample_app_id") or ""
-    workspace = _instance_workspace(instance["instance_id"])
-    if app_id == "hello-api":
-        return _HelloApiRequestHandler
-    return partial(_QuietSimpleHTTPRequestHandler, directory=str(workspace))
-
-
-def _stop_sample_app_server(instance_id: str, handle: dict | None = None) -> None:
-    with APP_SERVER_LOCK:
-        if handle is None:
-            handle = APP_SERVERS.pop(instance_id, None)
-        else:
-            APP_SERVERS.pop(instance_id, None)
-    if not handle:
-        return
-    server = handle.get("server")
-    if server:
-        try:
-            server.shutdown()
-        except Exception:
-            pass
-        try:
-            server.server_close()
-        except Exception:
-            pass
-    thread = handle.get("thread")
-    if thread and thread.is_alive():
-        try:
-            thread.join(timeout=1)
-        except Exception:
-            pass
-
-
-def _ensure_sample_app_server(instance: dict) -> None:
-    if instance.get("runtime_backend") != "lxd" or instance.get("state") != "running" or not instance.get("sample_app_id"):
-        _stop_sample_app_server(instance["instance_id"])
-        return
-
-    workspace = _ensure_instance_workspace(instance)
-    host_port = instance.get("host_port") or _allocate_host_port()
-    instance["host_port"] = host_port
-    instance["endpoint_url"] = f"http://127.0.0.1:{host_port}"
-    handler = _sample_app_handler_factory(instance)
-
-    with APP_SERVER_LOCK:
-        existing = APP_SERVERS.get(instance["instance_id"])
-        if existing and existing.get("port") == host_port and existing.get("app_id") == instance.get("sample_app_id"):
-            server = existing.get("server")
-            thread = existing.get("thread")
-            if server and thread and thread.is_alive():
-                instance["sample_app_status"] = "running"
-                instance["endpoint_url"] = f"http://127.0.0.1:{host_port}"
-                return
-            APP_SERVERS.pop(instance["instance_id"], None)
-
-        last_error = None
-        existing_handle = None
-        if existing:
-            existing_handle = existing
-            APP_SERVERS.pop(instance["instance_id"], None)
-    if existing_handle:
-        _stop_sample_app_server(instance["instance_id"], existing_handle)
-
-    with APP_SERVER_LOCK:
-        last_error = None
-        for _ in range(5):
+def _lxd_ensure_launch_defaults() -> None:
+    if not _lxd_available():
+        raise HTTPException(status_code=503, detail="LXDUnavailable")
+    try:
+        completed = _lxd_run(["storage", "list", "--format", "json"], timeout=30)
+        pool_names: set[str] = set()
+        if completed.returncode == 0:
             try:
-                server = ThreadingHTTPServer(("127.0.0.1", host_port), handler)
-                server.daemon_threads = True
-                break
-            except OSError as exc:
-                last_error = exc
-                try:
-                    host_port = _allocate_host_port()
-                    instance["host_port"] = host_port
-                    instance["endpoint_url"] = f"http://127.0.0.1:{host_port}"
-                except Exception:
-                    instance["sample_app_status"] = "error"
-                    instance["sample_app_error"] = str(last_error or "Failed to bind sample app port")
-                    return
-        else:
-            instance["sample_app_status"] = "error"
-            instance["sample_app_error"] = str(last_error or "Failed to bind sample app port")
-            return
+                payload = json.loads(completed.stdout or "[]")
+            except Exception:
+                payload = []
+            if isinstance(payload, list):
+                for item in payload:
+                    if isinstance(item, dict):
+                        name = str(item.get("name") or "").strip().lower()
+                        if name:
+                            pool_names.add(name)
+        if "default" not in pool_names:
+            _lxd_run_checked(["storage", "create", "default", "dir"], timeout=120)
+    except HTTPException:
+        raise
+    except Exception:
+        pass
+    try:
+        completed = _lxd_run(["network", "list", "--format", "json"], timeout=30)
+        network_names: set[str] = set()
+        if completed.returncode == 0:
+            try:
+                payload = json.loads(completed.stdout or "[]")
+            except Exception:
+                payload = []
+            if isinstance(payload, list):
+                for item in payload:
+                    if isinstance(item, dict):
+                        name = str(item.get("name") or "").strip().lower()
+                        if name:
+                            network_names.add(name)
+        if "lxdbr0" not in network_names:
+            _lxd_run_checked(
+                [
+                    "network",
+                    "create",
+                    "lxdbr0",
+                    "ipv4.address=auto",
+                    "ipv4.nat=true",
+                    "ipv6.address=auto",
+                    "ipv6.nat=true",
+                ],
+                timeout=120,
+            )
+    except HTTPException:
+        raise
+    except Exception:
+        pass
+    try:
+        completed = _lxd_run(["profile", "show", "default"], timeout=30)
+        profile_text = completed.stdout or ""
+        if "root:" not in profile_text or "path: /" not in profile_text or "pool: default" not in profile_text:
+            _lxd_run_checked(["profile", "device", "add", "default", "root", "disk", "pool=default", "path=/"], timeout=120)
+        if "eth0:" not in profile_text or "network: lxdbr0" not in profile_text:
+            _lxd_run_checked(["profile", "device", "add", "default", "eth0", "nic", "network=lxdbr0", "name=eth0"], timeout=120)
+    except HTTPException:
+        raise
+    except Exception:
+        pass
 
-        thread = threading.Thread(target=server.serve_forever, daemon=True)
-        APP_SERVERS[instance["instance_id"]] = {
-            "server": server,
-            "thread": thread,
-            "port": host_port,
-            "app_id": instance.get("sample_app_id"),
-            "workspace": str(workspace),
-        }
-        thread.start()
-        instance["sample_app_status"] = "running"
-        instance["sample_app_error"] = ""
 
-
-def _deploy_sample_app(instance: dict, app_id: str, start_now: bool = True) -> dict:
-    manifest = _sample_app_manifest(app_id)
+def _ensure_lxd_workspace_mount(instance: dict) -> None:
+    ref = instance.get("container_id") or instance.get("container_name")
+    if not ref:
+        return
     workspace = _ensure_instance_workspace(instance)
-    _copy_sample_app_files(app_id, workspace)
-    instance["sample_app_id"] = app_id
-    instance["sample_app_name"] = manifest["name"]
-    instance["sample_app_status"] = "deployed"
-    instance["sample_app_command"] = manifest["start_command"]
-    instance["sample_app_kill_pattern"] = manifest["kill_pattern"]
-    instance["sample_app_port"] = manifest["container_port"]
-    instance["command"] = manifest["start_command"]
-    instance["user_data"] = instance.get("user_data", "")
-    if instance.get("state") == "running" and start_now and instance.get("container_id"):
-        _start_instance_command(instance)
-        _ensure_sample_app_server(instance)
-    return manifest
+    expected_source = str(workspace)
+    completed = _lxd_run(["config", "device", "get", ref, "workspace", "source"], timeout=30)
+    if completed.returncode == 0:
+        current_source = str(completed.stdout or "").strip()
+        if current_source == expected_source:
+            return
+        try:
+            _lxd_run_checked(["config", "device", "remove", ref, "workspace"], timeout=60)
+        except Exception:
+            pass
+    _lxd_run_checked(
+        ["config", "device", "add", ref, "workspace", "disk", f"source={workspace}", "path=/workspace"],
+        timeout=120,
+    )
+
+
+def _ensure_lxd_workspace_directory(instance: dict) -> None:
+    ref = instance.get("container_id") or instance.get("container_name")
+    if not ref:
+        return
+    try:
+        _lxd_run_checked(["exec", ref, "--", "mkdir", "-p", "/workspace"], timeout=60)
+    except Exception:
+        pass
 
 
 def _ensure_container(instance: dict) -> str:
-    if not _docker_available():
+    if not _lxd_available():
         raise HTTPException(503, detail="LXDUnavailable")
     if instance.get("state") == "terminated":
         raise HTTPException(409, detail="InstanceTerminated")
 
+    _lxd_ensure_launch_defaults()
+
     workspace = _ensure_instance_workspace(instance)
     instance.setdefault("runtime_image", LXD_RUNTIME_IMAGE)
-    instance.setdefault("container_port", DOCKER_CONSOLE_PORT)
+    instance.setdefault("container_port", LXD_CONSOLE_PORT)
     if not instance.get("host_port"):
         instance["host_port"] = _allocate_host_port()
     instance.setdefault("container_name", f"cloudlearn-{instance['instance_id']}")
@@ -5866,24 +6279,23 @@ def _ensure_container(instance: dict) -> str:
     instance["container_download_state"] = "downloading"
 
     container_ref = instance.get("container_id") or instance["container_name"]
-    if _docker_container_exists(container_ref):
+    if _lxd_container_exists(container_ref):
         if not instance.get("container_id"):
             instance["container_id"] = container_ref
         instance["container_download_state"] = "ready"
+        _ensure_lxd_workspace_mount(instance)
         return container_ref
-
-    if instance.get("sample_app_id"):
-        _copy_sample_app_files(instance["sample_app_id"], workspace)
 
     run_args = [
         "launch",
         instance["runtime_image"],
         instance["container_name"],
     ]
-    completed = _docker_run_checked(run_args, timeout=120)
+    completed = _lxd_run_checked(run_args, timeout=120)
     instance["container_id"] = instance["container_name"]
     instance["container_status"] = "created"
     instance["container_download_state"] = "ready"
+    _ensure_lxd_workspace_mount(instance)
     return instance["container_id"]
 
 
@@ -5892,41 +6304,44 @@ def _start_instance_command(instance: dict) -> None:
     if not command:
         return
     container_cwd = _container_cwd(instance)
-    kill_pattern = (instance.get("sample_app_kill_pattern") or "").strip()
-    prefix = ""
-    if kill_pattern:
-        prefix = f"pkill -f {shlex.quote(kill_pattern)} >/dev/null 2>&1 || true; "
-    boot_command = f"{prefix}nohup /bin/sh -lc {shlex.quote(command)} > .cloudlearn_app.log 2>&1 < /dev/null &"
+    boot_command = f"nohup /bin/sh -lc {shlex.quote(command)} > .cloudlearn_app.log 2>&1 < /dev/null &"
     _container_exec(instance, boot_command, cwd=container_cwd, detach=False)
-    instance["sample_app_status"] = "running" if instance.get("sample_app_id") else instance.get("sample_app_status", "running")
 
 
-def _sync_docker_instance(instance: dict) -> None:
-    if not _docker_cli_available():
-        instance.setdefault("container_status", "lxd-unavailable")
-        return
+def _sync_lxd_instance(instance: dict) -> None:
     ref = instance.get("container_id") or instance.get("container_name")
     if not ref:
         return
-    status = _docker_status(ref)
+    status = _lxd_status(ref)
     if not status:
-        if instance.get("state") != "terminated":
-            instance["state"] = "stopped"
         instance["container_status"] = "missing"
+        if str(instance.get("state") or "").strip().lower() != "terminated" and str(instance.get("state") or "").strip().lower() != "stopped":
+            instance["state"] = "stopped"
+        if str(instance.get("launch_status") or "").strip().lower() in {"queued", "starting", "error", "pending"}:
+            instance["launch_status"] = "ready"
+            instance["launch_error"] = ""
         return
     instance["container_status"] = status
     if status == "running":
         instance["state"] = "running"
-    elif status in {"exited", "created", "paused"} and instance.get("state") == "running":
-        instance["state"] = "stopped"
+        if str(instance.get("launch_status") or "").strip().lower() in {"queued", "starting", "error", "pending"}:
+            instance["launch_status"] = "ready"
+            instance["launch_error"] = ""
+    elif status in {"exited", "created", "paused", "stopped", "suspended"}:
+        if str(instance.get("state") or "").strip().lower() != "stopped":
+            instance["state"] = "stopped"
+        if str(instance.get("launch_status") or "").strip().lower() in {"queued", "starting", "error", "pending"}:
+            instance["launch_status"] = "ready"
+            instance["launch_error"] = ""
 
 
-def _start_docker_instance(instance: dict) -> dict:
+def _start_lxd_instance(instance: dict) -> dict:
     _ensure_container(instance)
     container_ref = instance.get("container_id") or instance["container_name"]
-    status = _docker_status(container_ref)
+    status = _lxd_status(container_ref)
     if status != "running":
-        _docker_run_checked(["start", container_ref], timeout=120)
+        _lxd_run_checked(["start", container_ref], timeout=120)
+    _ensure_lxd_workspace_directory(instance)
     instance["state"] = "running"
     instance["container_status"] = "running"
     instance["console_backend"] = "lxd-exec"
@@ -5934,63 +6349,54 @@ def _start_docker_instance(instance: dict) -> dict:
     instance["stopped_at"] = ""
     if instance.get("command"):
         _start_instance_command(instance)
-    if instance.get("sample_app_id"):
-        _ensure_sample_app_server(instance)
     instance["pid"] = None
     return instance
 
 
-def _stop_docker_instance(instance: dict) -> dict:
-    if not _docker_available():
+def _stop_lxd_instance(instance: dict) -> dict:
+    if not _lxd_available():
         raise HTTPException(status_code=503, detail="LXDUnavailable")
     ref = instance.get("container_id") or instance.get("container_name")
     if not ref:
         raise HTTPException(409, detail="InstanceContainerMissing")
-    status = _docker_status(ref)
+    status = _lxd_status(ref)
     if status == "running":
-        _docker_run_checked(["stop", ref], timeout=120)
+        _lxd_run_checked(["stop", ref], timeout=120)
     instance["state"] = "stopped"
     instance["stopped_at"] = _now()
     instance["container_status"] = "exited"
     instance["pid"] = None
-    instance["sample_app_status"] = "stopped" if instance.get("sample_app_id") else instance.get("sample_app_status", "stopped")
-    if instance.get("sample_app_id"):
-        _stop_sample_app_server(instance["instance_id"])
     return instance
 
 
-def _reboot_docker_instance(instance: dict) -> dict:
+def _reboot_lxd_instance(instance: dict) -> dict:
     ref = instance.get("container_id") or instance.get("container_name")
     if not ref:
         raise HTTPException(409, detail="InstanceContainerMissing")
-    if _docker_status(ref) != "running":
+    if _lxd_status(ref) != "running":
         raise HTTPException(409, detail="InstanceNotRunning")
     instance["state"] = "rebooting"
-    _docker_run_checked(["restart", ref], timeout=180)
+    _lxd_run_checked(["restart", ref], timeout=180)
+    _ensure_lxd_workspace_directory(instance)
     instance["state"] = "running"
     instance["container_status"] = "running"
     instance["console_backend"] = "lxd-exec"
     if instance.get("command"):
         _start_instance_command(instance)
-    if instance.get("sample_app_id"):
-        _ensure_sample_app_server(instance)
     instance["rebooted_at"] = _now()
     return instance
 
 
-def _terminate_docker_instance(instance: dict) -> dict:
-    if not _docker_available():
+def _terminate_lxd_instance(instance: dict) -> dict:
+    if not _lxd_available():
         raise HTTPException(status_code=503, detail="LXDUnavailable")
     ref = instance.get("container_id") or instance.get("container_name")
-    if ref and _docker_container_exists(ref):
-        _docker_run(["rm", "-f", ref], timeout=120)
+    if ref and _lxd_container_exists(ref):
+        _lxd_run(["rm", "-f", ref], timeout=120)
     instance["state"] = "terminated"
     instance["terminated_at"] = _now()
     instance["container_status"] = "removed"
     instance["pid"] = None
-    instance["sample_app_status"] = "terminated" if instance.get("sample_app_id") else instance.get("sample_app_status", "terminated")
-    if instance.get("sample_app_id"):
-        _stop_sample_app_server(instance["instance_id"])
     return instance
 
 
@@ -6164,7 +6570,7 @@ def _ensure_multipass_instance(instance: dict) -> str:
 
     workspace = _ensure_instance_workspace(instance)
     instance.setdefault("runtime_image", MULTIPASS_RUNTIME_IMAGE)
-    instance.setdefault("container_port", DOCKER_CONSOLE_PORT)
+    instance.setdefault("container_port", LXD_CONSOLE_PORT)
     if not instance.get("host_port"):
         instance["host_port"] = _allocate_host_port()
     instance.setdefault("container_name", f"cloudlearn-{instance['instance_id']}")
@@ -6177,9 +6583,6 @@ def _ensure_multipass_instance(instance: dict) -> str:
             instance["container_id"] = container_ref
         instance["container_download_state"] = "ready"
         return container_ref
-
-    if instance.get("sample_app_id"):
-        _copy_sample_app_files(instance["sample_app_id"], workspace)
 
     launch_image = str(instance["runtime_image"] or MULTIPASS_RUNTIME_IMAGE)
     if launch_image.startswith("ubuntu:"):
@@ -6229,16 +6632,26 @@ def _sync_multipass_instance(instance: dict) -> None:
         return
     status = _multipass_status(ref)
     if not status:
-        if instance.get("state") != "terminated":
-            instance["state"] = "stopped"
         instance["container_status"] = "missing"
+        if str(instance.get("state") or "").strip().lower() != "terminated" and str(instance.get("state") or "").strip().lower() != "stopped":
+            instance["state"] = "stopped"
+        if str(instance.get("launch_status") or "").strip().lower() in {"queued", "starting", "error", "pending"}:
+            instance["launch_status"] = "ready"
+            instance["launch_error"] = ""
         return
     instance["container_status"] = status
     if status == "running":
         instance["state"] = "running"
+        if str(instance.get("launch_status") or "").strip().lower() in {"queued", "starting", "error", "pending"}:
+            instance["launch_status"] = "ready"
+            instance["launch_error"] = ""
         _update_multipass_ssh_metadata(instance)
-    elif status in {"stopped", "deleted", "suspended"} and instance.get("state") == "running":
-        instance["state"] = "stopped"
+    elif status in {"stopped", "deleted", "suspended"}:
+        if str(instance.get("state") or "").strip().lower() != "stopped":
+            instance["state"] = "stopped"
+        if str(instance.get("launch_status") or "").strip().lower() in {"queued", "starting", "error", "pending"}:
+            instance["launch_status"] = "ready"
+            instance["launch_error"] = ""
 
 
 def _start_multipass_instance(instance: dict) -> dict:
@@ -6254,8 +6667,6 @@ def _start_multipass_instance(instance: dict) -> dict:
     instance["stopped_at"] = ""
     if instance.get("command"):
         _start_instance_command(instance)
-    if instance.get("sample_app_id"):
-        _ensure_sample_app_server(instance)
     _update_multipass_ssh_metadata(instance)
     instance["pid"] = None
     return instance
@@ -6274,9 +6685,6 @@ def _stop_multipass_instance(instance: dict) -> dict:
     instance["stopped_at"] = _now()
     instance["container_status"] = "stopped"
     instance["pid"] = None
-    instance["sample_app_status"] = "stopped" if instance.get("sample_app_id") else instance.get("sample_app_status", "stopped")
-    if instance.get("sample_app_id"):
-        _stop_sample_app_server(instance["instance_id"])
     return instance
 
 
@@ -6293,8 +6701,6 @@ def _reboot_multipass_instance(instance: dict) -> dict:
     instance["console_backend"] = "multipass-ssh"
     if instance.get("command"):
         _start_instance_command(instance)
-    if instance.get("sample_app_id"):
-        _ensure_sample_app_server(instance)
     instance["rebooted_at"] = _now()
     return instance
 
@@ -6312,9 +6718,6 @@ def _terminate_multipass_instance(instance: dict) -> dict:
     instance["terminated_at"] = _now()
     instance["container_status"] = "removed"
     instance["pid"] = None
-    instance["sample_app_status"] = "terminated" if instance.get("sample_app_id") else instance.get("sample_app_status", "terminated")
-    if instance.get("sample_app_id"):
-        _stop_sample_app_server(instance["instance_id"])
     return instance
 
 
@@ -6393,6 +6796,70 @@ def _spawn_multipass_console_session(instance: dict) -> dict:
         return session
 
 
+def _spawn_simulated_console_session(instance: dict) -> dict:
+    instance_id = instance["instance_id"]
+
+    with CONSOLE_LOCK:
+        session = CONSOLE_SESSIONS.get(instance_id)
+        if session and not session.get("closed") and session.get("proc") and session["proc"].poll() is None:
+            instance["console_state"] = "running"
+            instance["console_backend"] = session.get("console_backend", "simulated-shell")
+            return session
+        if session:
+            CONSOLE_SESSIONS.pop(instance_id, None)
+
+        master_fd, slave_fd = pty.openpty()
+        env = os.environ.copy()
+        env.update(
+            {
+                "TERM": env.get("TERM", "xterm"),
+                "CLOUDLEARN_INSTANCE_ID": instance_id,
+                "CLOUDLEARN_INSTANCE_NAME": instance.get("name", ""),
+                "CLOUDLEARN_AMI": instance.get("ami_name") or instance.get("ami") or "",
+                "CLOUDLEARN_CONTAINER_IMAGE": instance.get("container_image") or "",
+                "CLOUDLEARN_RUNTIME": instance.get("runtime") or "",
+                "HOME": _instance_workspace(instance_id).as_posix(),
+            }
+        )
+        proc = subprocess.Popen(
+            ["/bin/sh", "-i"],
+            stdin=slave_fd,
+            stdout=slave_fd,
+            stderr=slave_fd,
+            env=env,
+            start_new_session=True,
+            close_fds=True,
+        )
+        try:
+            os.close(slave_fd)
+        except Exception:
+            pass
+
+        session = {
+            "instance_id": instance_id,
+            "proc": proc,
+            "master_fd": master_fd,
+            "buffer": deque(maxlen=1000),
+            "created": _now(),
+            "last_output": _now(),
+            "closed": False,
+            "terminated": False,
+            "console_backend": "simulated-shell",
+            "affects_instance_state": False,
+        }
+        session["buffer"].append(
+            f"Connected to simulated EC2 runtime for {instance.get('name', instance_id)} ({instance.get('runtime_image') or 'simulated'})\n"
+        )
+        CONSOLE_SESSIONS[instance_id] = session
+        instance["pid"] = proc.pid
+        instance["console_state"] = "running"
+        instance["console_backend"] = "simulated-shell"
+        reader = threading.Thread(target=_console_reader_loop, args=(instance_id, session), daemon=True)
+        session["reader_thread"] = reader
+        reader.start()
+        return session
+
+
 def _start_simulated_instance(instance: dict) -> dict:
     session = _spawn_console_session(instance)
     RUNTIME_HANDLES[instance["instance_id"]] = session["proc"]
@@ -6401,6 +6868,8 @@ def _start_simulated_instance(instance: dict) -> dict:
     instance["stopped_at"] = ""
     instance["container_status"] = "simulated"
     instance["pid"] = session["proc"].pid
+    if instance.get("command"):
+        _start_instance_command(instance)
     return instance
 
 
@@ -6416,6 +6885,7 @@ def _stop_simulated_instance(instance: dict) -> dict:
     instance["stopped_at"] = _now()
     instance["pid"] = None
     instance["container_status"] = "simulated"
+    instance["console_state"] = "closed"
     return instance
 
 
@@ -6423,6 +6893,7 @@ def _terminate_simulated_instance(instance: dict) -> dict:
     _stop_simulated_instance(instance)
     instance["state"] = "terminated"
     instance["terminated_at"] = _now()
+    instance["console_state"] = "closed"
     return instance
 
 
@@ -6449,36 +6920,49 @@ def _ec2_profile_supported_host_os(profile: dict) -> list[str]:
     return list(dict.fromkeys(host_os))
 
 
-def _ec2_choose_runtime_backend(profile: dict, requested_backend: str = "") -> str:
+def _ec2_choose_runtime_backend(
+    profile: dict,
+    requested_backend: str = "",
+    host_os_hint: str = "",
+    require_available: bool = True,
+) -> str:
     requested = (requested_backend or "").strip().lower()
     supported = _ec2_profile_supported_backends(profile)
-    host_os = _parent_os()
+    host_os = str(host_os_hint or _parent_os()).strip().lower()
     host_supported = _ec2_profile_supported_host_os(profile)
-    if host_supported and host_os not in host_supported:
+    appliance_mode = _appliance_mode_enabled()
+
+    if appliance_mode:
+        requested = "lxd" if not requested else requested
+        if requested != "lxd":
+            supported_label = ", ".join(supported) if supported else "LXD"
+            raise HTTPException(400, detail=f"Appliance mode only supports LXD-backed EC2 instances. AMI '{profile.get('name', 'unknown')}' supports {supported_label}.")
+    elif host_supported and host_os not in host_supported:
         raise HTTPException(503, detail=f"AMI '{profile.get('name', 'unknown')}' is not supported on {host_os}.")
 
-    if requested:
-        if requested not in supported:
-            supported_label = ", ".join(supported) if supported else "no runtime backends"
-            raise HTTPException(400, detail=f"AMI '{profile.get('name', 'unknown')}' only supports {supported_label}.")
-        if _runtime_available(requested):
-            return requested
-        raise HTTPException(503, detail=f"Requested runtime backend '{requested}' is not available on this host.")
+    if requested and requested not in supported:
+        supported_label = ", ".join(supported) if supported else "no runtime backends"
+        raise HTTPException(400, detail=f"AMI '{profile.get('name', 'unknown')}' only supports {supported_label}.")
 
+    preferred = "lxd" if appliance_mode else ("multipass" if host_os in {"windows", "darwin"} else "lxd")
     ordered: list[str] = []
+    if requested:
+        ordered.append(requested)
+    ordered.append(preferred)
     default_backend = str(profile.get("default_runtime_backend") or "").strip().lower()
     if default_backend:
         ordered.append(default_backend)
-    ordered.extend(["multipass", "lxd"])
+    ordered.extend([backend for backend in ("multipass", "lxd") if backend != preferred])
 
     for backend in ordered:
         if backend not in supported:
             continue
-        if _runtime_available(backend):
+        if require_available:
+            if _runtime_available(backend):
+                return backend
+        else:
             return backend
 
-    if supported:
-        raise HTTPException(503, detail=f"No supported Multipass or LXD runtime is available for AMI '{profile.get('name', 'unknown')}'.")
     raise HTTPException(503, detail=f"AMI '{profile.get('name', 'unknown')}' is not launchable on this host.")
 
 
@@ -6520,14 +7004,15 @@ def _instance_console_script(instance: dict) -> str:
     )
 
 
-def _spawn_docker_console_session(instance: dict) -> dict:
+def _spawn_lxd_console_session(instance: dict) -> dict:
     instance_id = instance["instance_id"]
-    binary = _docker_cli()
+    binary = _lxd_cli()
     if not binary:
         raise HTTPException(503, detail="LXDUnavailable")
     ref = instance.get("container_id") or instance.get("container_name") or instance_id
-    if _docker_status(ref) != "running":
+    if _lxd_status(ref) != "running":
         raise HTTPException(409, detail="InstanceNotRunning")
+    _ensure_lxd_workspace_directory(instance)
 
     with CONSOLE_LOCK:
         session = CONSOLE_SESSIONS.get(instance_id)
@@ -6637,7 +7122,7 @@ def _spawn_console_session(instance: dict) -> dict:
     if backend == "multipass":
         return _spawn_multipass_console_session(instance)
     if backend == "lxd":
-        return _spawn_docker_console_session(instance)
+        return _spawn_lxd_console_session(instance)
     raise HTTPException(503, detail="RuntimeUnavailable")
 
 
@@ -7045,6 +7530,10 @@ def _space_payload(space: dict) -> dict:
     payload.setdefault("rds_count", 0)
     payload.setdefault("sqs_count", 0)
     payload.setdefault("dynamodb_count", 0)
+    cloudsim = payload.get("cloudsim")
+    if isinstance(cloudsim, dict):
+        cloudsim.pop("policy", None)
+    payload.pop("cloudsim_policy", None)
     return payload
 
 
@@ -7119,6 +7608,7 @@ def _federation_space_summary() -> dict:
 
 @app.get("/api/spaces")
 def api_list_spaces():
+    _refresh_cloudsim_gcp_summary()
     spaces = PLATFORM.list_spaces()
     spaces_state = _spaces_state()
     active_id = spaces_state.get("active_space_id", "")
@@ -7145,6 +7635,7 @@ def api_list_providers():
 
 @app.get("/api/spaces/active")
 def api_active_space():
+    _refresh_cloudsim_gcp_summary()
     spaces_state = _spaces_state()
     active_id = spaces_state.get("active_space_id", "")
     space = spaces_state.get("spaces", {}).get(active_id, {}) if active_id else {}
@@ -7153,6 +7644,7 @@ def api_active_space():
 
 @app.get("/api/spaces/{space_id}")
 def api_get_space(space_id: str):
+    _refresh_cloudsim_gcp_summary()
     space = _spaces_state().get("spaces", {}).get(space_id)
     if not isinstance(space, dict):
         raise HTTPException(status_code=404, detail="SimulationSpaceNotFound")
@@ -7232,12 +7724,27 @@ def api_delete_space(space_id: str):
 
 @app.get("/api/cloudsim/current")
 def api_cloudsim_current():
-    return PLATFORM.cloudsim_current()
+    _refresh_cloudsim_gcp_summary()
+    payload = PLATFORM.cloudsim_current()
+    if isinstance(payload, dict):
+        spaces_state = _spaces_state()
+        active_id = spaces_state.get("active_space_id", "")
+        active_space = spaces_state.get("spaces", {}).get(active_id, {}) if active_id else {}
+        summary = payload.setdefault("summary", {})
+        summary.update(_cloudsim_gcp_summary_counts(active_space if isinstance(active_space, dict) else None))
+    return payload
 
 
 @app.get("/api/cloudsim/summary")
 def api_cloudsim_summary():
-    return PLATFORM.cloudsim_summary()
+    _refresh_cloudsim_gcp_summary()
+    payload = PLATFORM.cloudsim_summary()
+    if isinstance(payload, dict):
+        spaces_state = _spaces_state()
+        active_id = spaces_state.get("active_space_id", "")
+        active_space = spaces_state.get("spaces", {}).get(active_id, {}) if active_id else {}
+        payload.setdefault("summary", {}).update(_cloudsim_gcp_summary_counts(active_space if isinstance(active_space, dict) else None))
+    return payload
 
 
 @app.post("/api/cloudsim/reconcile")
@@ -7251,6 +7758,316 @@ def api_cloudsim_reconcile():
 @app.get("/api/cloudsim/events")
 def api_cloudsim_events():
     return PLATFORM.cloudsim_events()
+
+
+@app.get("/api/terraform/export")
+def api_terraform_export():
+    space = PLATFORM.get_active_space()
+    if not isinstance(space, dict) or not space:
+        raise HTTPException(404, detail="NoActiveSpace")
+    export = export_space_to_terraform_json(space)
+    _record_usage(
+        "terraform.export",
+        {
+            "space_id": export.get("space_id", ""),
+            "resource_count": export.get("summary", {}).get("resource_count", 0),
+            "supported_resources": export.get("summary", {}).get("supported_resources", 0),
+            "unsupported_resources": export.get("summary", {}).get("unsupported_resources", 0),
+        },
+    )
+    return export
+
+
+@app.post("/api/terraform/import")
+async def api_terraform_import(request: Request):
+    payload = {}
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    if not isinstance(payload, dict):
+        raise HTTPException(400, detail="InvalidTerraformImportPayload")
+
+    spaces_state = _spaces_state()
+    active_id = str(spaces_state.get("active_space_id", "") or "").strip()
+    if not active_id:
+        raise HTTPException(404, detail="NoActiveSpace")
+    space = spaces_state.get("spaces", {}).get(active_id)
+    if not isinstance(space, dict):
+        raise HTTPException(404, detail="NoActiveSpace")
+
+    terraform_json = {}
+    if isinstance(payload.get("terraform_json"), dict):
+        terraform_json = payload["terraform_json"]
+    elif isinstance(payload.get("resource"), dict):
+        terraform_json = payload
+    elif isinstance(payload.get("bundle"), dict):
+        terraform_json = payload["bundle"].get("terraform_json") if isinstance(payload["bundle"], dict) else {}
+        if not isinstance(terraform_json, dict):
+            terraform_json = payload["bundle"] if isinstance(payload["bundle"], dict) else {}
+
+    if not isinstance(terraform_json, dict) or not isinstance(terraform_json.get("resource"), dict) or not terraform_json.get("resource"):
+        raise HTTPException(400, detail="InvalidTerraformImportPayload")
+
+    import_result = terraform_import_bundle(payload, space)
+    service_state_updates = import_result.get("service_state_updates", {})
+    if not isinstance(service_state_updates, dict):
+        service_state_updates = {}
+
+    service_states = space.setdefault("service_states", {})
+    if not isinstance(service_states, dict):
+        service_states = {}
+        space["service_states"] = service_states
+    for service_key, service_state in service_state_updates.items():
+        service_states[service_key] = copy.deepcopy(service_state)
+
+    now = _now()
+    space["updated_at"] = now
+    space.setdefault("cloudsim", {}).setdefault("summary", {})
+
+    import_id = _id("tfimport")
+    target_space_id = active_id
+    source_space_id = str(import_result.get("space_id") or "")
+    target_space_name = str(space.get("name") or "").strip()
+    target_provider = str(space.get("provider") or "").strip()
+    record = {
+        "import_id": import_id,
+        "space_id": target_space_id,
+        "space_name": target_space_name,
+        "provider": target_provider,
+        "created_at": now,
+        "workflow_kind": "import",
+        "source_space_id": source_space_id,
+        "source_space_name": import_result.get("space_name", ""),
+        "source_provider": import_result.get("provider", ""),
+        "summary": copy.deepcopy(import_result.get("summary", {})),
+        "imported_resources": copy.deepcopy(import_result.get("imported_resources", [])),
+        "unsupported_resources": copy.deepcopy(import_result.get("unsupported_resources", [])),
+        "service_keys": copy.deepcopy(import_result.get("service_keys", [])),
+        "status": "imported",
+    }
+
+    terraform_state = _terraform_state()
+    terraform_state.setdefault("imports", {})[import_id] = copy.deepcopy(record)
+    space_state = _terraform_space_state(target_space_id)
+    space_state.setdefault("imports", {})[import_id] = copy.deepcopy(record)
+    space_state["last_import"] = copy.deepcopy(record)
+
+    _record_usage(
+        "terraform.import",
+        {
+            "space_id": target_space_id,
+            "import_id": import_id,
+            "resource_count": import_result.get("summary", {}).get("resource_count", 0),
+            "supported_resources": import_result.get("summary", {}).get("supported_resources", 0),
+            "unsupported_resources": import_result.get("summary", {}).get("unsupported_resources", 0),
+            "service_keys": copy.deepcopy(import_result.get("service_keys", [])),
+        },
+    )
+    _persist_state()
+
+    return {
+        **record,
+        "terraform_json": import_result.get("terraform_json", {}),
+        "service_state_updates": service_state_updates,
+        "nodes": import_result.get("nodes", []),
+        "resource_count": import_result.get("resource_count", 0),
+        "supported_resources": import_result.get("supported_resources", 0),
+        "unsupported_resources": copy.deepcopy(import_result.get("unsupported_resources", [])),
+    }
+
+
+@app.get("/api/terraform/status")
+def api_terraform_status():
+    space = PLATFORM.get_active_space()
+    if not isinstance(space, dict) or not space:
+        raise HTTPException(404, detail="NoActiveSpace")
+    export = export_space_to_terraform_json(space)
+    space_id = export.get("space_id") or _string(space.get("space_id"), "")
+    terraform_state = _terraform_state()
+    space_state = _terraform_space_state(space_id)
+    last_plan = {}
+    last_apply = {}
+    if isinstance(space_state.get("last_plan"), dict):
+        last_plan = copy.deepcopy(space_state["last_plan"])
+    if isinstance(space_state.get("last_apply"), dict):
+        last_apply = copy.deepcopy(space_state["last_apply"])
+    last_import = {}
+    if isinstance(space_state.get("last_import"), dict):
+        last_import = copy.deepcopy(space_state["last_import"])
+    return {
+        "space_id": space_id,
+        "space_name": export.get("space_name", ""),
+        "provider": export.get("provider", ""),
+        "summary": export.get("summary", {}),
+        "terraform_cli_available": terraform_cli_available(),
+        "terraform_cli_path": terraform_cli_path() or "",
+        "terraform_workspace_root": str(terraform_workspace_root()),
+        "workspace_dir": str(terraform_space_dir(space_id)),
+        "last_plan": last_plan,
+        "last_apply": last_apply,
+        "last_import": last_import,
+        "plan_count": len(terraform_state.get("plans", {})),
+        "apply_count": len(terraform_state.get("applies", {})),
+        "import_count": len(terraform_state.get("imports", {})),
+    }
+
+
+@app.post("/api/terraform/plan")
+def api_terraform_plan():
+    space = PLATFORM.get_active_space()
+    if not isinstance(space, dict) or not space:
+        raise HTTPException(404, detail="NoActiveSpace")
+    export = export_space_to_terraform_json(space)
+    space_id = export.get("space_id") or _string(space.get("space_id"), "")
+    space_state = _terraform_space_state(space_id)
+    previous = space_state.get("last_apply") if isinstance(space_state.get("last_apply"), dict) else {}
+    summary = terraform_build_plan_summary(export, previous)
+    workflow_id = _id("tfplan")
+    stage = terraform_stage_workflow_bundle(export, workflow_id, "plan", summary)
+    execution = terraform_run_cli(stage["stage_dir"], "plan")
+    if not execution.get("available"):
+        execution = {
+            **execution,
+            "status": "simulated",
+            "stdout": execution.get("error", "Terraform CLI is not installed on this runtime."),
+            "stderr": "",
+            "exit_code": 0,
+        }
+    record = {
+        "plan_id": workflow_id,
+        "space_id": space_id,
+        "space_name": export.get("space_name", ""),
+        "provider": export.get("provider", ""),
+        "created_at": _now(),
+        "workflow_kind": "plan",
+        "stage_dir": stage["stage_dir"],
+        "files": stage["files"],
+        "terraform_cli_available": stage["terraform_cli_available"],
+        "terraform_cli_path": stage["terraform_cli_path"],
+        "summary": export.get("summary", {}),
+        "plan_summary": summary,
+        "unsupported_resources": copy.deepcopy(export.get("unsupported_resources", [])),
+        "execution": execution,
+    }
+    terraform_state = _terraform_state()
+    terraform_state.setdefault("plans", {})[workflow_id] = record
+    space_state.setdefault("plans", {})[workflow_id] = copy.deepcopy(record)
+    space_state["last_plan"] = copy.deepcopy(record)
+    _record_usage(
+        "terraform.plan",
+        {
+            "space_id": space_id,
+            "plan_id": workflow_id,
+            "resource_count": export.get("summary", {}).get("resource_count", 0),
+            "supported_resources": export.get("summary", {}).get("supported_resources", 0),
+            "unsupported_resources": export.get("summary", {}).get("unsupported_resources", 0),
+        },
+    )
+    _persist_state()
+    return record
+
+
+@app.post("/api/terraform/apply")
+async def api_terraform_apply(request: Request):
+    payload = {}
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    plan_id = str((payload or {}).get("plan_id") or "").strip()
+    confirm = bool((payload or {}).get("confirm", False))
+    if not confirm:
+        raise HTTPException(status_code=400, detail="ConfirmationRequired")
+
+    terraform_state = _terraform_state()
+    plan_record = terraform_state.get("plans", {}).get(plan_id) if plan_id else None
+
+    space = PLATFORM.get_active_space()
+    if not isinstance(space, dict) or not space:
+        raise HTTPException(404, detail="NoActiveSpace")
+    export = export_space_to_terraform_json(space)
+    space_id = export.get("space_id") or _string(space.get("space_id"), "")
+    space_state = _terraform_space_state(space_id)
+
+    if not plan_record:
+        previous = space_state.get("last_apply") if isinstance(space_state.get("last_apply"), dict) else {}
+        summary = terraform_build_plan_summary(export, previous)
+        plan_id = _id("tfplan")
+        stage = terraform_stage_workflow_bundle(export, plan_id, "apply", summary)
+        plan_record = {
+            "plan_id": plan_id,
+            "space_id": space_id,
+            "space_name": export.get("space_name", ""),
+            "provider": export.get("provider", ""),
+            "created_at": _now(),
+            "workflow_kind": "apply",
+            "stage_dir": stage["stage_dir"],
+            "files": stage["files"],
+            "terraform_cli_available": stage["terraform_cli_available"],
+            "terraform_cli_path": stage["terraform_cli_path"],
+            "summary": export.get("summary", {}),
+            "plan_summary": summary,
+            "unsupported_resources": copy.deepcopy(export.get("unsupported_resources", [])),
+        }
+        terraform_state.setdefault("plans", {})[plan_id] = plan_record
+        space_state.setdefault("plans", {})[plan_id] = copy.deepcopy(plan_record)
+    else:
+        plan_record = copy.deepcopy(plan_record)
+
+    execution = terraform_run_cli(plan_record.get("stage_dir", ""), "apply")
+    if not execution.get("available"):
+        execution = {
+            **execution,
+            "status": "simulated",
+            "stdout": execution.get("error", "Terraform CLI is not installed on this runtime."),
+            "stderr": "",
+            "exit_code": 0,
+        }
+
+    apply_id = _id("tfapply")
+    apply_record = {
+        "apply_id": apply_id,
+        "plan_id": plan_id,
+        "space_id": space_id,
+        "space_name": export.get("space_name", ""),
+        "provider": export.get("provider", ""),
+        "created_at": _now(),
+        "workflow_kind": "apply",
+        "stage_dir": plan_record.get("stage_dir", ""),
+        "files": plan_record.get("files", []),
+        "terraform_cli_available": plan_record.get("terraform_cli_available", False),
+        "terraform_cli_path": plan_record.get("terraform_cli_path", ""),
+        "summary": export.get("summary", {}),
+        "plan_summary": plan_record.get("plan_summary", {}),
+        "unsupported_resources": copy.deepcopy(export.get("unsupported_resources", [])),
+        "execution": execution,
+    }
+    terraform_state.setdefault("applies", {})[apply_id] = apply_record
+    space_state.setdefault("applies", {})[apply_id] = copy.deepcopy(apply_record)
+    space_state["last_apply"] = copy.deepcopy({
+        "apply_id": apply_id,
+        "plan_id": plan_id,
+        "space_id": space_id,
+        "space_name": export.get("space_name", ""),
+        "provider": export.get("provider", ""),
+        "created_at": _now(),
+        "resource_index": plan_record.get("plan_summary", {}).get("resource_index", {}),
+        "fingerprint": plan_record.get("plan_summary", {}).get("fingerprint", ""),
+    })
+    _record_usage(
+        "terraform.apply",
+        {
+            "space_id": space_id,
+            "plan_id": plan_id,
+            "apply_id": apply_id,
+            "resource_count": export.get("summary", {}).get("resource_count", 0),
+            "supported_resources": export.get("summary", {}).get("supported_resources", 0),
+            "unsupported_resources": export.get("summary", {}).get("unsupported_resources", 0),
+        },
+    )
+    _persist_state()
+    return apply_record
 
 
 @app.get("/api/packs")
@@ -7403,46 +8220,48 @@ def api_host_cpu():
     return _sample_host_cpu_metrics()
 
 
-def api_ec2_runtime():
+@app.get("/api/host/sizing")
+def api_host_sizing():
+    return _host_sizing()
+
+
+def api_ec2_runtime(host_os_hint: str = ""):
     status = _runtime_bootstrap_status()
-    host_os = _parent_os()
-    family = "Multipass" if host_os in {"windows", "darwin"} else "Multipass or LXD"
+    host_os = _resolved_host_os(host_os_hint or str(status.get("host_os") or "").strip().lower())
+    distribution_mode = _distribution_mode()
+    appliance_mode = distribution_mode == "appliance"
+    preferred_backend = "lxd" if appliance_mode else str(status.get("preferred_backend") or ("multipass" if host_os in {"windows", "darwin"} else "lxd")).strip().lower()
+    family = "LXD" if appliance_mode else ("Multipass" if host_os in {"windows", "darwin"} else "Multipass or LXD")
+    status["host_os"] = host_os
+    status["distribution_mode"] = distribution_mode
+    status["preferred_backend"] = preferred_backend
+    if appliance_mode:
+        status["target"] = {
+            "helper": "lxd",
+            "label": "LXD",
+            "message": "Appliance mode uses LXD only for EC2.",
+        }
+    elif "target" not in status:
+        status["target"] = {
+            "helper": preferred_backend,
+            "label": "Multipass" if preferred_backend == "multipass" else "LXD",
+            "message": "",
+        }
     status["instructions"] = {
-        "label": status.get("preferred_backend", "runtime"),
+        "label": "LXD" if appliance_mode else ("Multipass" if preferred_backend == "multipass" else "LXD"),
         "message": (
-            "The simulator uses Multipass on macOS for EC2-style sandboxes."
+            "The appliance runs EC2-style sandboxes on LXD inside the Multipass VM."
+            if appliance_mode
+            else "The simulator uses Multipass on macOS for EC2-style sandboxes."
             if host_os == "darwin"
             else "The simulator uses Multipass on Windows for EC2-style sandboxes."
             if host_os == "windows"
             else "The simulator can use Multipass on Windows/macOS/Linux and LXD on Linux for EC2-style sandboxes."
         ),
-        "helper": status.get("preferred_backend", "runtime"),
+        "helper": preferred_backend,
         "family": family,
     }
     return status
-
-def api_ec2_runtime_docker():
-    backend = _preferred_runtime_backend()
-    status = _runtime_bootstrap_status(backend)
-    target = _runtime_bootstrap_target(backend)
-    status["instructions"] = {
-        "label": target.get("label", "Runtime sandbox"),
-        "message": target.get("message", ""),
-        "helper": target.get("helper", backend),
-    }
-    if "target" not in status:
-        status["target"] = {
-            "helper": target.get("helper", backend),
-            "label": target.get("label", "Runtime sandbox"),
-            "message": target.get("message", ""),
-        }
-    return status
-
-
-def api_ec2_runtime_docker_bootstrap():
-    _start_docker_bootstrap()
-    return api_ec2_runtime_docker()
-
 
 def api_ec2_runtime_lxd():
     status = _runtime_bootstrap_status("lxd")
@@ -7457,7 +8276,13 @@ def api_ec2_runtime_lxd():
 
 
 def api_ec2_runtime_multipass():
-    status = _runtime_bootstrap_status("multipass")
+    if _appliance_mode_enabled():
+        status = _runtime_bootstrap_status("lxd")
+        status["message"] = status.get("message") or "Appliance mode uses LXD only for EC2."
+        status["label"] = "LXD"
+        status["helper"] = status.get("helper", "manual")
+    else:
+        status = _runtime_bootstrap_status("multipass")
     status["mode"] = status.get("mode", "auto")
     status["next_step"] = "install" if not status["available"] else "ready"
     status["instructions"] = {
@@ -7469,10 +8294,10 @@ def api_ec2_runtime_multipass():
 
 
 def api_ec2_runtime_bootstrap():
-    status = _start_docker_bootstrap()
-    status["message"] = status.get("message") or "Multipass and LXD runtime readiness checked."
+    status = _start_lxd_bootstrap()
+    status["message"] = status.get("message") or ("LXD runtime readiness checked inside the appliance VM." if _appliance_mode_enabled() else "Multipass and LXD runtime readiness checked.")
     status["instructions"] = {
-        "label": status.get("preferred_backend", "runtime"),
+        "label": "LXD" if _appliance_mode_enabled() else status.get("preferred_backend", "runtime"),
         "message": status.get("message", ""),
         "helper": status.get("helper", "manual"),
     }
@@ -7480,7 +8305,7 @@ def api_ec2_runtime_bootstrap():
 
 
 def api_ec2_runtime_lxd_bootstrap():
-    status = _start_docker_bootstrap()
+    status = _start_lxd_bootstrap()
     status["message"] = status.get("message") or "LXD runtime readiness checked."
     status["instructions"] = {
         "label": status.get("label", "LXD"),
@@ -7491,10 +8316,14 @@ def api_ec2_runtime_lxd_bootstrap():
 
 
 def api_ec2_runtime_multipass_bootstrap():
-    status = _start_docker_bootstrap()
-    status["message"] = status.get("message") or "Multipass runtime readiness checked."
+    if _appliance_mode_enabled():
+        status = _start_lxd_bootstrap()
+        status["message"] = status.get("message") or "LXD runtime readiness checked inside the appliance VM."
+    else:
+        status = _start_lxd_bootstrap()
+        status["message"] = status.get("message") or "Multipass runtime readiness checked."
     status["instructions"] = {
-        "label": status.get("label", "Multipass"),
+        "label": "LXD" if _appliance_mode_enabled() else status.get("label", "Multipass"),
         "message": status.get("message", ""),
         "helper": status.get("helper", "manual"),
     }
@@ -7553,7 +8382,7 @@ def api_ec2_list_instances():
             if backend == "multipass":
                 _sync_multipass_instance(instance)
             elif backend == "lxd":
-                _sync_docker_instance(instance)
+                _sync_lxd_instance(instance)
     _prune_expired_terminated_instances()
     instances = []
     for instance_id in _ec2_instance_ids():
@@ -7563,7 +8392,7 @@ def api_ec2_list_instances():
     return {"instances": instances, "count": len(instances)}
 
 
-def api_ec2_create_instance(req: EC2InstanceRequest, *, auto_start: bool = True):
+def api_ec2_create_instance(req: EC2InstanceRequest, *, auto_start: bool = True, host_os_hint: str = ""):
     instance_id = _id("i")
     pack = _activate_pack("cloudlearn.ec2.basic")
     if req.vpc_id and req.vpc_id not in vpc_state["vpcs"]:
@@ -7583,13 +8412,19 @@ def api_ec2_create_instance(req: EC2InstanceRequest, *, auto_start: bool = True)
         req_runtime = profile.get("default_runtime", "python")
     else:
         req_runtime = req.runtime
-    runtime_backend = _ec2_choose_runtime_backend(profile, requested_backend)
+    trusted_host_os = _resolved_host_os(host_os_hint)
+    runtime_backend = _ec2_choose_runtime_backend(
+        profile,
+        requested_backend,
+        trusted_host_os,
+        require_available=True if _appliance_mode_enabled() else not bool(trusted_host_os),
+    )
+    _cloudsim_validate_ec2_launch_policy(_cloudsim_active_space_ref(), req, profile, runtime_backend)
     host_port = _allocate_host_port()
     workspace = _instance_workspace(instance_id)
     workspace.mkdir(parents=True, exist_ok=True)
-    runtime_image = profile.get("runtime_image") or (
-        MULTIPASS_RUNTIME_IMAGE if runtime_backend == "multipass" else LXD_RUNTIME_IMAGE
-    )
+    runtime_image = profile.get("runtime_image") or (LXD_RUNTIME_IMAGE if _appliance_mode_enabled() else MULTIPASS_RUNTIME_IMAGE if runtime_backend == "multipass" else LXD_RUNTIME_IMAGE)
+    runtime_backend_requested = "lxd" if _appliance_mode_enabled() else (req.runtime_backend or "").strip().lower()
     instance = {
         "instance_id": instance_id,
         "reservation_id": f"r-{instance_id.replace('i-', '')}",
@@ -7602,7 +8437,7 @@ def api_ec2_create_instance(req: EC2InstanceRequest, *, auto_start: bool = True)
         "container_image": profile.get("container_image", ""),
         "runtime_image": runtime_image,
         "runtime": req_runtime,
-        "runtime_backend_requested": (req.runtime_backend or "").strip().lower(),
+        "runtime_backend_requested": runtime_backend_requested,
         "key_pair": req.key_pair,
         "state": "pending",
         "az": req.az,
@@ -7621,37 +8456,28 @@ def api_ec2_create_instance(req: EC2InstanceRequest, *, auto_start: bool = True)
         "pid": None,
         "container_name": f"cloudlearn-{instance_id}",
         "container_id": "",
-        "container_port": DOCKER_CONSOLE_PORT,
+        "container_port": LXD_CONSOLE_PORT,
         "host_port": host_port,
         "endpoint_url": f"{runtime_backend}://{instance_id}",
         "console_state": {"cwd": str(workspace)},
         "console_log": [],
-        "sample_app_id": getattr(req, "sample_app_id", ""),
-        "sample_app_name": "",
-        "sample_app_status": "not deployed",
-        "sample_app_command": "",
-        "sample_app_port": DOCKER_CONSOLE_PORT,
         "deployment_path": str(workspace),
         "workspace": str(workspace),
         "container_status": "created",
-        "console_backend": "multipass-ssh" if runtime_backend == "multipass" else f"{runtime_backend}-exec",
+        "console_backend": (
+            "multipass-ssh"
+            if runtime_backend == "multipass"
+            else "lxd-exec"
+        ),
         "console_prompt": _cmd_prompt({"runtime_backend": runtime_backend, "container_name": f"cloudlearn-{instance_id}", "container_id": ""}),
         "runtime_bundle_id": _cloudsim_runtime_bundle("ec2").get("id", ""),
         "runtime_bundle_name": _cloudsim_runtime_bundle("ec2").get("name", ""),
         "runtime_bundle_kind": _cloudsim_runtime_bundle("ec2").get("kind", ""),
     }
-    if instance["sample_app_id"]:
-        manifest = _sample_app_manifest(instance["sample_app_id"])
-        instance["sample_app_name"] = manifest["name"]
-        instance["sample_app_command"] = manifest["start_command"]
-        instance["sample_app_kill_pattern"] = manifest["kill_pattern"]
-        instance["sample_app_port"] = manifest["container_port"]
-        instance["sample_app_status"] = "deployed"
-        instance["command"] = manifest["start_command"]
-        _copy_sample_app_files(instance["sample_app_id"], workspace)
     if req.command:
         instance["public_ip"] = _public_ip()
     ec2_state["instances"][instance_id] = instance
+    _cloudsim_sync_ec2_resource(instance, "upsert")
     if auto_start:
         _queue_runtime_start(instance_id)
     _record_usage("ec2.create_instance", instance)
@@ -7664,7 +8490,7 @@ def _start_runtime_process(instance: dict) -> None:
         _start_multipass_instance(instance)
         return
     if backend == "lxd":
-        _start_docker_instance(instance)
+        _start_lxd_instance(instance)
         return
     raise HTTPException(status_code=503, detail="RuntimeUnavailable")
 
@@ -7683,6 +8509,7 @@ def _queue_runtime_start_for_store(instances_store, instance_id: str) -> None:
                 instance = instances_store.get(instance_id)
                 if isinstance(instance, dict):
                     instance["launch_status"] = "ready"
+                    _cloudsim_sync_ec2_resource(instance, "upsert")
                     _persist_state()
         except HTTPException as exc:
             with STATE_LOCK:
@@ -7691,8 +8518,9 @@ def _queue_runtime_start_for_store(instances_store, instance_id: str) -> None:
                     instance["launch_status"] = "error"
                     instance["launch_error"] = str(exc.detail)
                     if instance.get("state") == "pending":
-                        instance["state"] = "stopped"
+                        instance["state"] = "pending"
                     instance["container_status"] = "launch-failed"
+                    _cloudsim_sync_ec2_resource(instance, "upsert")
                     _persist_state()
         except Exception as exc:
             with STATE_LOCK:
@@ -7701,8 +8529,9 @@ def _queue_runtime_start_for_store(instances_store, instance_id: str) -> None:
                     instance["launch_status"] = "error"
                     instance["launch_error"] = str(exc)
                     if instance.get("state") == "pending":
-                        instance["state"] = "stopped"
+                        instance["state"] = "pending"
                     instance["container_status"] = "launch-failed"
+                    _cloudsim_sync_ec2_resource(instance, "upsert")
                     _persist_state()
 
     threading.Thread(target=_worker, name=f"cloudlearn-launch-{instance_id}", daemon=True).start()
@@ -7718,7 +8547,7 @@ def _stop_runtime_process(instance: dict) -> None:
         _stop_multipass_instance(instance)
         return
     if backend == "lxd":
-        _stop_docker_instance(instance)
+        _stop_lxd_instance(instance)
         return
     raise HTTPException(status_code=503, detail="RuntimeUnavailable")
 
@@ -7729,7 +8558,7 @@ def _reboot_runtime_process(instance: dict) -> None:
         _reboot_multipass_instance(instance)
         return
     if backend == "lxd":
-        _reboot_docker_instance(instance)
+        _reboot_lxd_instance(instance)
         return
     raise HTTPException(status_code=503, detail="RuntimeUnavailable")
 
@@ -7740,6 +8569,7 @@ def api_ec2_start_instance(instance_id: str):
         raise HTTPException(404, detail="NoSuchInstance")
     instance["state"] = "pending"
     _queue_runtime_start(instance_id)
+    _cloudsim_sync_ec2_resource(instance, "upsert")
     _record_usage("ec2.start_instance", {"instance_id": instance_id})
     return instance
 
@@ -7749,6 +8579,7 @@ def api_ec2_stop_instance(instance_id: str):
     if not instance:
         raise HTTPException(404, detail="NoSuchInstance")
     _stop_runtime_process(instance)
+    _cloudsim_sync_ec2_resource(instance, "upsert")
     _record_usage("ec2.stop_instance", {"instance_id": instance_id})
     return instance
 
@@ -7758,6 +8589,7 @@ def api_ec2_reboot_instance(instance_id: str):
     if not instance:
         raise HTTPException(404, detail="NoSuchInstance")
     _reboot_runtime_process(instance)
+    _cloudsim_sync_ec2_resource(instance, "upsert")
     _record_usage("ec2.reboot_instance", {"instance_id": instance_id})
     return instance
 
@@ -7767,12 +8599,15 @@ def api_ec2_terminate_instance(instance_id: str):
     if not instance:
         raise HTTPException(404, detail="NoSuchInstance")
     backend = str(instance.get("runtime_backend") or "").strip().lower()
-    if backend == "multipass":
+    if instance.get("launch_status") == "error" and not str(instance.get("container_id") or "").strip():
+        _terminate_simulated_instance(instance)
+    elif backend == "multipass":
         _terminate_multipass_instance(instance)
     elif backend == "lxd":
-        _terminate_docker_instance(instance)
+        _terminate_lxd_instance(instance)
     else:
-        _terminate_simulated_instance(instance)
+        raise HTTPException(503, detail="RuntimeUnavailable")
+    _cloudsim_sync_ec2_resource(instance, "delete")
     _record_usage("ec2.terminate_instance", {"instance_id": instance_id})
     return instance
 
@@ -7785,7 +8620,7 @@ def api_ec2_console(instance_id: str):
     if backend == "multipass":
         _sync_multipass_instance(instance)
     elif backend == "lxd":
-        _sync_docker_instance(instance)
+        _sync_lxd_instance(instance)
     if backend in {"multipass", "lxd"}:
         with CONSOLE_LOCK:
             session = CONSOLE_SESSIONS.get(instance_id)
@@ -7804,9 +8639,6 @@ def api_ec2_console(instance_id: str):
             "container_status": instance.get("container_status", ""),
             "runtime_image": instance.get("runtime_image", ""),
             "console_prompt": instance.get("console_prompt", _cmd_prompt(instance)),
-            "sample_app_id": instance.get("sample_app_id", ""),
-            "sample_app_name": instance.get("sample_app_name", ""),
-            "sample_app_status": instance.get("sample_app_status", ""),
             "endpoint_url": instance.get("endpoint_url", ""),
         }
     raise HTTPException(status_code=503, detail="RuntimeUnavailable")
@@ -7820,7 +8652,7 @@ def api_ec2_console_input(instance_id: str, req: EC2ConsoleInputRequest):
     if backend == "multipass":
         _sync_multipass_instance(instance)
     elif backend == "lxd":
-        _sync_docker_instance(instance)
+        _sync_lxd_instance(instance)
     if instance.get("state") != "running":
         raise HTTPException(409, detail="InstanceNotRunning")
     result = _console_execute(instance, req.data)
@@ -7836,35 +8668,12 @@ def api_ec2_console_exec(instance_id: str, req: EC2ConsoleCommandRequest):
     if backend == "multipass":
         _sync_multipass_instance(instance)
     elif backend == "lxd":
-        _sync_docker_instance(instance)
+        _sync_lxd_instance(instance)
     if instance.get("state") != "running":
         raise HTTPException(409, detail="InstanceNotRunning")
     result = _console_execute(instance, req.command)
     _record_usage("ec2.console_command", {"instance_id": instance_id, "command": req.command, "exit_code": result["exit_code"]})
     return {"message": "Console command executed", "instance_id": instance_id, **result}
-
-
-def api_ec2_sample_apps():
-    return {"sample_apps": _sample_app_catalog(), "count": len(SAMPLE_APP_MANIFESTS)}
-
-
-def api_ec2_deploy_sample_app(instance_id: str, app_id: str):
-    instance = ec2_state["instances"].get(instance_id)
-    if not instance:
-        raise HTTPException(404, detail="NoSuchInstance")
-    manifest = _deploy_sample_app(instance, app_id, start_now=False)
-    if instance.get("state") == "running" and instance.get("container_id"):
-        _start_instance_command(instance)
-        _ensure_sample_app_server(instance)
-    _record_usage("ec2.deploy_sample_app", {"instance_id": instance_id, "sample_app_id": app_id})
-    return {
-        "message": "Sample app deployed",
-        "instance_id": instance_id,
-        "sample_app": manifest,
-        "endpoint_url": instance.get("endpoint_url", ""),
-        "command": instance.get("command", ""),
-        "workspace": instance.get("workspace", ""),
-    }
 
 
 async def _ec2_query_params(request: Request) -> dict[str, Any]:
@@ -8094,7 +8903,6 @@ def _ec2_query_run_instances(params: dict[str, Any]) -> Response:
     subnet_id = str(params.get("SubnetId", params.get("Placement.SubnetId", "")))
     az = str(params.get("Placement.AvailabilityZone", params.get("AvailabilityZone", "us-east-1a")))
     vpc_id = str(params.get("VpcId", ""))
-    sample_app_id = str(params.get("TagSpecification.1.SampleAppId", ""))
     security_group_ids = _ec2_filter_values(params, "SecurityGroupId.")
     if not security_group_ids:
         security_group_ids = _ec2_filter_values(params, "NetworkInterface.1.SecurityGroupId.")
@@ -8113,8 +8921,10 @@ def _ec2_query_run_instances(params: dict[str, Any]) -> Response:
             storage_gb=8,
             command="",
             user_data="",
-            sample_app_id=sample_app_id,
         )
+        trusted_host_os = _resolved_host_os()
+        if trusted_host_os:
+            req.runtime_backend = ""
         instance = api_ec2_create_instance(req, auto_start=False)
         launched.append(instance)
 
@@ -8136,13 +8946,42 @@ def _ec2_query_run_instances(params: dict[str, Any]) -> Response:
 
 def _gcp_compute_instance_ids() -> list[str]:
     with STATE_LOCK:
-        return list(gcp_compute_state.get("instances", {}).keys())
+        return list(_gcp_compute_instance_bucket().keys())
+
+
+def _gcp_compute_instance_bucket() -> dict[str, dict]:
+    spaces_state = _spaces_state()
+    active_id = str(spaces_state.get("active_space_id", "") or "").strip()
+    space = spaces_state.get("spaces", {}).get(active_id, {})
+    if not isinstance(space, dict):
+        return gcp_compute_state.get("instances", {})
+    service_states = space.setdefault("service_states", {})
+    if not isinstance(service_states, dict):
+        service_states = {}
+        space["service_states"] = service_states
+    candidates: list[tuple[int, dict]] = []
+    for key in ("gcp_gcp_compute", "gcp_compute"):
+        bucket = service_states.get(key)
+        if isinstance(bucket, dict):
+            score = 0
+            for value in bucket.values():
+                if isinstance(value, dict):
+                    score += len(value)
+                elif isinstance(value, (list, tuple, set)):
+                    score += len(value)
+                elif value not in (None, "", False):
+                    score += 1
+            candidates.append((score, bucket))
+    if candidates:
+        candidates.sort(key=lambda item: item[0], reverse=True)
+        return candidates[0][1].setdefault("instances", {}) if "instances" not in candidates[0][1] else candidates[0][1]["instances"]
+    return gcp_compute_state.get("instances", {})
 
 
 def _gcp_compute_find_instance(project: str, zone: str, instance_ref: str) -> dict | None:
-    instance = gcp_compute_state.get("instances", {}).get(instance_ref)
+    instance = _gcp_compute_instance_bucket().get(instance_ref)
     if not isinstance(instance, dict):
-        for candidate in gcp_compute_state.get("instances", {}).values():
+        for candidate in _gcp_compute_instance_bucket().values():
             if not isinstance(candidate, dict):
                 continue
             if str(candidate.get("name") or "").strip() == str(instance_ref or "").strip():
@@ -8203,6 +9042,175 @@ def _gcp_compute_numeric_id(value: str) -> str:
     return str(int(token, 16))
 
 
+def _gcp_compute_sync_runtime_instances() -> None:
+    changed = False
+    for instance in gcp_compute_state.get("instances", {}).values():
+        if not isinstance(instance, dict):
+            continue
+        workspace_before = str(instance.get("workspace") or "")
+        workspace = _ensure_instance_workspace(instance)
+        if str(workspace) != workspace_before:
+            changed = True
+        backend = str(instance.get("runtime_backend") or "").strip().lower()
+        if backend == "multipass":
+            _sync_multipass_instance(instance)
+            changed = True
+        elif backend == "lxd":
+            _sync_lxd_instance(instance)
+            changed = True
+    if _gcp_compute_sync_resource_links():
+        changed = True
+    if changed:
+        _persist_state()
+
+
+def _gcp_compute_requested_instance_groups(payload: dict[str, Any]) -> list[str]:
+    raw = payload.get("requested_groups") or payload.get("requested_instance_groups") or payload.get("instanceGroups") or payload.get("instanceGroup") or payload.get("instance_groups") or payload.get("instance_group") or []
+    if isinstance(raw, str):
+        raw = [part.strip() for part in raw.split(",")]
+    if isinstance(raw, dict):
+        raw = [str(raw.get("name") or raw.get("group") or raw.get("baseInstanceName") or "").strip()]
+    if not isinstance(raw, list):
+        return []
+    groups: list[str] = []
+    for item in raw:
+        name = str(item or "").strip()
+        if name and name not in groups:
+            groups.append(name)
+    return groups
+
+
+def _gcp_compute_requested_disk_specs(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    raw = payload.get("disks") or payload.get("attachedDisks") or payload.get("attached_disks") or []
+    if not isinstance(raw, list):
+        return []
+    specs: list[dict[str, Any]] = []
+    for item in raw:
+        if isinstance(item, dict):
+            specs.append(item)
+    return specs
+
+
+def _gcp_compute_sync_resource_links() -> bool:
+    changed = False
+    instances = gcp_compute_state.get("instances", {})
+    groups = gcp_compute_state.setdefault("instance_groups", {})
+    disks = gcp_compute_state.setdefault("disks", {})
+    for instance in instances.values():
+        if not isinstance(instance, dict):
+            continue
+        instance_name = str(instance.get("name") or instance.get("instance_id") or "").strip()
+        instance_id = str(instance.get("instance_id") or "").strip()
+        runtime_state = str(instance.get("state") or "").strip().lower()
+        attached_disk_names: list[str] = []
+        group_names: list[str] = []
+        requested_groups = _gcp_compute_requested_instance_groups(instance)
+
+        for disk in disks.values():
+            if not isinstance(disk, dict):
+                continue
+            disk_name = str(disk.get("name") or "").strip()
+            if not disk_name:
+                continue
+            disk_instance = str(disk.get("instance") or disk.get("instance_name") or "").strip()
+            disk_instance_id = str(disk.get("instance_id") or "").strip()
+            if disk_instance and disk_instance != instance_name and disk_instance_id != instance_id:
+                continue
+            if not disk_instance and not disk_instance_id and disk.get("boot") and disk_name.startswith(instance_name):
+                disk_instance = instance_name
+            if disk_instance and disk_instance not in {instance_name, instance_id}:
+                continue
+            attached_disk_names.append(disk_name)
+            boot_flag = bool(disk.get("boot")) or disk_name == f"{instance_name}-boot"
+            auto_delete_flag = disk.get("autoDelete")
+            if auto_delete_flag is None:
+                auto_delete_flag = boot_flag
+            if disk.get("boot") is None or disk.get("boot") != boot_flag:
+                disk["boot"] = boot_flag
+                changed = True
+            if disk.get("autoDelete") is None or bool(disk.get("autoDelete")) != bool(auto_delete_flag):
+                disk["autoDelete"] = bool(auto_delete_flag)
+                changed = True
+            if disk.get("deviceName") != disk_name:
+                disk["deviceName"] = disk_name
+                changed = True
+            desired_status = "IN_USE" if runtime_state == "running" else "READY"
+            if str(disk.get("status") or "").upper() != desired_status:
+                disk["status"] = desired_status
+                changed = True
+            if disk.get("instance") != instance_name:
+                disk["instance"] = instance_name
+                changed = True
+            if disk.get("instance_id") != instance_id:
+                disk["instance_id"] = instance_id
+                changed = True
+            if disk.get("updateTime") != _now():
+                disk["updateTime"] = _now()
+                changed = True
+
+        for group_name, group in groups.items():
+            if not isinstance(group, dict):
+                continue
+            group_name = str(group.get("name") or group_name or "").strip()
+            if not group_name:
+                continue
+            members = group.setdefault("instances", [])
+            if not isinstance(members, list):
+                members = []
+                group["instances"] = members
+                changed = True
+            base_instance_name = str(group.get("baseInstanceName") or "").strip()
+            if instance_name in members or base_instance_name == instance_name or group_name in requested_groups:
+                if instance_name and instance_name not in members:
+                    members.append(instance_name)
+                    changed = True
+                if group_name not in group_names:
+                    group_names.append(group_name)
+                desired_size = max(int(group.get("targetSize") or 0), len([v for v in members if str(v).strip()]))
+                if int(group.get("targetSize") or 0) != desired_size:
+                    group["targetSize"] = desired_size
+                    changed = True
+                if group.get("updateTime") != _now():
+                    group["updateTime"] = _now()
+                    changed = True
+            elif group_name in requested_groups:
+                if instance_name and instance_name not in members:
+                    members.append(instance_name)
+                    changed = True
+
+        for group_name in requested_groups:
+            if group_name in groups:
+                continue
+            groups[group_name] = {
+                "name": group_name,
+                "project": str(instance.get("project") or "cloudlearn"),
+                "zone": str(instance.get("zone") or instance.get("az") or "us-central1-a"),
+                "description": "",
+                "baseInstanceName": instance_name or group_name,
+                "targetSize": 1 if instance_name else 0,
+                "instances": [instance_name] if instance_name else [],
+                "namedPorts": [],
+                "state": "STABLE",
+                "created": _now(),
+                "updateTime": _now(),
+            }
+            group_names.append(group_name)
+            changed = True
+
+        if instance.get("attached_disk_names") != sorted(dict.fromkeys(attached_disk_names)):
+            instance["attached_disk_names"] = sorted(dict.fromkeys(attached_disk_names))
+            changed = True
+        if instance.get("instance_groups") != sorted(dict.fromkeys(group_names)):
+            instance["instance_groups"] = sorted(dict.fromkeys(group_names))
+            changed = True
+        if instance.get("instance_group_refs") != requested_groups:
+            instance["instance_group_refs"] = requested_groups
+            changed = True
+    if changed:
+        _refresh_cloudsim_gcp_summary()
+    return changed
+
+
 def _gcp_compute_instance_json(instance: dict) -> dict:
     project = str(instance.get("project") or "cloudlearn")
     zone = str(instance.get("zone") or instance.get("az") or "us-central1-a")
@@ -8220,21 +9228,44 @@ def _gcp_compute_instance_json(instance: dict) -> dict:
             "stackType": "IPV4_ONLY",
         }
     ]
-    disks = [
-        {
-            "kind": "compute#attachedDisk",
-            "type": "PERSISTENT",
-            "mode": "READ_WRITE",
-            "boot": True,
-            "autoDelete": True,
-            "deviceName": instance_name,
-            "initializeParams": {
-                "sourceImage": f"{_gcp_compute_api_root()}/projects/{project}/global/images/{instance.get('ami') or 'sim-ubuntu-22.04'}",
-                "diskSizeGb": str(instance.get("storage_gb") or 8),
-                "diskType": f"{_gcp_compute_api_root()}/projects/{project}/zones/{zone}/diskTypes/{instance.get('boot_disk_type') or 'pd-balanced'}",
-            },
-        }
-    ]
+    disks = []
+    attached_disk_names = [str(name).strip() for name in (instance.get("attached_disk_names") or []) if str(name).strip()]
+    for disk_name in attached_disk_names:
+        disk = gcp_compute_state.get("disks", {}).get(disk_name)
+        if not isinstance(disk, dict):
+            continue
+        disks.append(
+            {
+                "kind": "compute#attachedDisk",
+                "type": "PERSISTENT",
+                "mode": "READ_WRITE",
+                "boot": bool(disk.get("boot", disk_name == f"{instance_name}-boot")),
+                "autoDelete": bool(disk.get("autoDelete", True)),
+                "deviceName": disk.get("deviceName") or disk_name,
+                "initializeParams": {
+                    "sourceImage": f"{_gcp_compute_api_root()}/projects/{project}/global/images/{disk.get('sourceImage') or instance.get('ami') or 'sim-ubuntu-22.04'}",
+                    "sourceSnapshot": f"{_gcp_compute_api_root()}/projects/{project}/global/snapshots/{disk.get('sourceSnapshot')}" if disk.get("sourceSnapshot") else "",
+                    "diskSizeGb": str(disk.get("sizeGb") or instance.get("storage_gb") or 8),
+                    "diskType": f"{_gcp_compute_api_root()}/projects/{project}/zones/{zone}/diskTypes/{disk.get('type') or instance.get('boot_disk_type') or 'pd-balanced'}",
+                },
+            }
+        )
+    if not disks:
+        disks = [
+            {
+                "kind": "compute#attachedDisk",
+                "type": "PERSISTENT",
+                "mode": "READ_WRITE",
+                "boot": True,
+                "autoDelete": True,
+                "deviceName": instance_name,
+                "initializeParams": {
+                    "sourceImage": f"{_gcp_compute_api_root()}/projects/{project}/global/images/{instance.get('ami') or 'sim-ubuntu-22.04'}",
+                    "diskSizeGb": str(instance.get("storage_gb") or 8),
+                    "diskType": f"{_gcp_compute_api_root()}/projects/{project}/zones/{zone}/diskTypes/{instance.get('boot_disk_type') or 'pd-balanced'}",
+                },
+            }
+        ]
     return {
         "kind": "compute#instance",
         "id": resource_id,
@@ -8253,6 +9284,7 @@ def _gcp_compute_instance_json(instance: dict) -> dict:
         "disks": disks,
         "networkInterfaces": network_interfaces,
         "labels": instance.get("labels", {}),
+        "instanceGroups": [f"{_gcp_compute_api_root()}/projects/{project}/zones/{zone}/instanceGroups/{name}" for name in (instance.get("instance_groups") or [])],
         "creationTimestamp": instance.get("created", _now()),
         "selfLink": _gcp_compute_instance_path(project, zone, instance_name),
         "canIpForward": bool(instance.get("assign_external_ip", True)),
@@ -8303,6 +9335,7 @@ def _gcp_compute_operation_json(instance: dict, operation_type: str, status: str
 
 
 def _gcp_compute_json_list(project: str, zone: str) -> dict:
+    _gcp_compute_sync_runtime_instances()
     instances = []
     zone_key = str(zone or "").strip().lower()
     for instance in gcp_compute_state.get("instances", {}).values():
@@ -8328,7 +9361,19 @@ def _gcp_compute_create_instance_instance(project: str, zone: str, payload: dict
     machine_type_ref = str(payload.get("machineType") or payload.get("instance_type") or "e2-micro")
     boot_disk_type_ref = str(payload.get("bootDiskType") or payload.get("boot_disk_type") or "pd-balanced")
     profile = _ami_profile(_gcp_resource_name(source_image_ref, "sim-ubuntu-22.04"))
-    runtime_backend = _ec2_choose_runtime_backend(profile, str(payload.get("runtimeBackend") or payload.get("runtime_backend") or ""))
+    trusted_host_os = _resolved_host_os()
+    try:
+        runtime_backend = _ec2_choose_runtime_backend(
+            profile,
+            str(payload.get("runtimeBackend") or payload.get("runtime_backend") or ""),
+            trusted_host_os,
+            require_available=not bool(trusted_host_os),
+        )
+    except HTTPException:
+        # Real GCP returns a long-running Operation immediately and provisions the
+        # VM asynchronously. If no host runtime backend supports this image, record
+        # the instance and defer provisioning rather than failing the control-plane call.
+        runtime_backend = "simulated"
     workspace = _instance_workspace(instance_id)
     workspace.mkdir(parents=True, exist_ok=True)
     runtime_image = profile.get("runtime_image") or (
@@ -8340,6 +9385,8 @@ def _gcp_compute_create_instance_instance(project: str, zone: str, payload: dict
     network_ref = first_network.get("network") or f"{_gcp_compute_api_root()}/projects/{project}/global/networks/default"
     subnetwork_ref = first_network.get("subnetwork") or f"{_gcp_compute_api_root()}/projects/{project}/regions/{zone.rsplit('-', 1)[0] if '-' in zone else 'us-central1'}/subnetworks/default"
     access_configs = first_network.get("accessConfigs") if isinstance(first_network.get("accessConfigs"), list) else []
+    disk_specs = _gcp_compute_requested_disk_specs(payload)
+    requested_groups = _gcp_compute_requested_instance_groups(payload)
     metadata_items_raw = []
     metadata = payload.get("metadata")
     if isinstance(metadata, dict):
@@ -8398,37 +9445,191 @@ def _gcp_compute_create_instance_instance(project: str, zone: str, payload: dict
         "integrity_monitoring": bool(payload.get("integrityMonitoring", payload.get("integrity_monitoring", True))),
         "labels": labels,
         "metadata_items": metadata_items,
+        "requested_disks": disk_specs,
+        "requested_disk_names": [str(item.get("deviceName") or "").strip() for item in disk_specs if isinstance(item, dict) and str(item.get("deviceName") or "").strip()],
+        "requested_groups": requested_groups,
+        "requested_instance_groups": requested_groups,
         "created": _now(),
         "workspace": str(workspace),
         "deployment_path": str(workspace),
         "console_state": {"cwd": str(workspace)},
         "console_log": [],
+        "ssh_command": "ssh -i ~/.ssh/cloudlearn_multipass_ed25519 ubuntu@<appliance-ip>",
         "container_download_state": "pending",
         "container_name": f"cloudlearn-{instance_id}",
         "container_id": "",
-        "container_port": DOCKER_CONSOLE_PORT,
+        "container_port": LXD_CONSOLE_PORT,
         "host_port": _allocate_host_port(),
         "endpoint_url": f"gcp://{instance_id}",
         "container_status": "created",
         "console_backend": "multipass-ssh" if runtime_backend == "multipass" else f"{runtime_backend}-exec",
         "console_prompt": _cmd_prompt({"runtime_backend": runtime_backend, "container_name": f"cloudlearn-{instance_id}", "container_id": ""}),
-        "sample_app_id": str(payload.get("sampleAppId") or payload.get("sample_app_id") or ""),
-        "sample_app_name": "",
-        "sample_app_status": "not deployed",
-        "sample_app_command": "",
-        "sample_app_port": DOCKER_CONSOLE_PORT,
         "network_interfaces": network_interfaces_payload,
     }
-    if instance["sample_app_id"]:
-        manifest = _sample_app_manifest(instance["sample_app_id"])
-        instance["sample_app_name"] = manifest["name"]
-        instance["sample_app_command"] = manifest["start_command"]
-        instance["sample_app_kill_pattern"] = manifest["kill_pattern"]
-        instance["sample_app_port"] = manifest["container_port"]
-        instance["sample_app_status"] = "deployed"
-        instance["command"] = manifest["start_command"]
-        _copy_sample_app_files(instance["sample_app_id"], workspace)
     return instance
+
+
+def _gcp_compute_instance_group_record(project: str, zone: str, payload: dict[str, Any] | None = None) -> dict:
+    payload = payload or {}
+    name = str(payload.get("name") or payload.get("group") or "").strip()
+    if not name:
+        name = f"group-{_id('mig')}"
+    instances = [str(v).strip() for v in (payload.get("instances") or []) if str(v).strip()] if isinstance(payload.get("instances"), list) else []
+    return {
+        "name": name,
+        "project": project,
+        "zone": zone,
+        "description": str(payload.get("description") or ""),
+        "baseInstanceName": str(payload.get("baseInstanceName") or payload.get("base_instance_name") or name),
+        "targetSize": int(payload.get("targetSize") or payload.get("target_size") or max(len(instances), 1)),
+        "instances": instances,
+        "namedPorts": payload.get("namedPorts", []) if isinstance(payload.get("namedPorts"), list) else [],
+        "state": str(payload.get("state") or "STABLE"),
+        "created": _now(),
+        "updateTime": _now(),
+    }
+
+
+def _gcp_compute_instance_group_view(group: dict) -> dict:
+    return {
+        "kind": "compute#instanceGroup",
+        "id": _gcp_compute_numeric_id(f"{group.get('project')}:{group.get('zone')}:{group.get('name')}"),
+        "name": group.get("name", ""),
+        "description": group.get("description", ""),
+        "zone": _gcp_compute_zone_path(str(group.get("project") or "cloudlearn"), str(group.get("zone") or "us-central1-a")),
+        "network": f"{_gcp_compute_api_root()}/projects/{group.get('project') or 'cloudlearn'}/global/networks/default",
+        "size": int(group.get("targetSize") or len(group.get("instances") or [])),
+        "namedPorts": group.get("namedPorts", []),
+        "instances": [f"{_gcp_compute_api_root()}/projects/{group.get('project') or 'cloudlearn'}/zones/{group.get('zone') or 'us-central1-a'}/instances/{name}" for name in (group.get("instances") or [])],
+        "creationTimestamp": group.get("created", _now()),
+        "updateTime": group.get("updateTime", _now()),
+        "state": group.get("state", "STABLE"),
+        "baseInstanceName": group.get("baseInstanceName", group.get("name", "")),
+        "selfLink": f"{_gcp_compute_api_root()}/projects/{group.get('project') or 'cloudlearn'}/zones/{group.get('zone') or 'us-central1-a'}/instanceGroups/{group.get('name', '')}",
+    }
+
+
+def _gcp_compute_disk_record(project: str, zone: str, payload: dict[str, Any] | None = None) -> dict:
+    payload = payload or {}
+    name = str(payload.get("name") or payload.get("disk") or "").strip() or f"disk-{_id('pd')}"
+    return {
+        "name": name,
+        "project": project,
+        "zone": zone,
+        "sizeGb": int(payload.get("sizeGb") or payload.get("size_gb") or 10),
+        "type": str(payload.get("type") or payload.get("diskType") or "pd-balanced"),
+        "status": str(payload.get("status") or "READY"),
+        "sourceImage": str(payload.get("sourceImage") or ""),
+        "sourceSnapshot": str(payload.get("sourceSnapshot") or ""),
+        "instance": str(payload.get("instance") or ""),
+        "instance_id": str(payload.get("instance_id") or ""),
+        "boot": bool(payload.get("boot", False)),
+        "autoDelete": bool(payload.get("autoDelete", payload.get("auto_delete", False))),
+        "deviceName": str(payload.get("deviceName") or payload.get("device_name") or name),
+        "labels": payload.get("labels", {}) if isinstance(payload.get("labels"), dict) else {},
+        "created": _now(),
+        "updateTime": _now(),
+    }
+
+
+def _gcp_compute_disk_view(disk: dict) -> dict:
+    project = str(disk.get("project") or "cloudlearn")
+    zone = str(disk.get("zone") or "us-central1-a")
+    name = str(disk.get("name") or "")
+    return {
+        "kind": "compute#disk",
+        "id": _gcp_compute_numeric_id(f"{project}:{zone}:{name}"),
+        "name": name,
+        "zone": f"{_gcp_compute_api_root()}/projects/{project}/zones/{zone}",
+        "sizeGb": str(disk.get("sizeGb") or 10),
+        "type": f"{_gcp_compute_api_root()}/projects/{project}/zones/{zone}/diskTypes/{disk.get('type') or 'pd-balanced'}",
+        "status": disk.get("status", "READY"),
+        "sourceImage": disk.get("sourceImage", ""),
+        "sourceSnapshot": disk.get("sourceSnapshot", ""),
+        "instance": disk.get("instance", ""),
+        "instanceId": disk.get("instance_id", ""),
+        "boot": bool(disk.get("boot", False)),
+        "autoDelete": bool(disk.get("autoDelete", False)),
+        "deviceName": disk.get("deviceName", name),
+        "users": [f"{_gcp_compute_api_root()}/projects/{project}/zones/{zone}/instances/{disk.get('instance')}"] if disk.get("instance") else [],
+        "labels": disk.get("labels", {}),
+        "creationTimestamp": disk.get("created", _now()),
+        "updateTime": disk.get("updateTime", _now()),
+        "selfLink": f"{_gcp_compute_api_root()}/projects/{project}/zones/{zone}/disks/{name}",
+    }
+
+
+def _gcp_compute_snapshot_record(project: str, payload: dict[str, Any] | None = None) -> dict:
+    payload = payload or {}
+    source_disk = str(payload.get("sourceDisk") or payload.get("source_disk") or "").strip()
+    name = str(payload.get("name") or payload.get("snapshot") or "").strip() or f"snapshot-{_id('snap')}"
+    zone = str(payload.get("zone") or payload.get("region") or "global")
+    return {
+        "name": name,
+        "project": project,
+        "zone": zone,
+        "sourceDisk": source_disk,
+        "description": str(payload.get("description") or ""),
+        "storageLocations": payload.get("storageLocations", ["us"]) if isinstance(payload.get("storageLocations"), list) else ["us"],
+        "status": str(payload.get("status") or "READY"),
+        "sizeGb": int(payload.get("sizeGb") or payload.get("size_gb") or 10),
+        "labels": payload.get("labels", {}) if isinstance(payload.get("labels"), dict) else {},
+        "created": _now(),
+        "updateTime": _now(),
+    }
+
+
+def _gcp_compute_snapshot_view(snapshot: dict) -> dict:
+    project = str(snapshot.get("project") or "cloudlearn")
+    name = str(snapshot.get("name") or "")
+    return {
+        "kind": "compute#snapshot",
+        "id": _gcp_compute_numeric_id(f"{project}:{name}"),
+        "name": name,
+        "description": snapshot.get("description", ""),
+        "sourceDisk": snapshot.get("sourceDisk", ""),
+        "storageLocations": snapshot.get("storageLocations", []),
+        "status": snapshot.get("status", "READY"),
+        "diskSizeGb": str(snapshot.get("sizeGb") or 10),
+        "creationTimestamp": snapshot.get("created", _now()),
+        "labels": snapshot.get("labels", {}),
+        "selfLink": f"{_gcp_compute_api_root()}/projects/{project}/global/snapshots/{name}",
+    }
+
+
+def _gcp_compute_image_record(project: str, payload: dict[str, Any] | None = None) -> dict:
+    payload = payload or {}
+    name = str(payload.get("name") or payload.get("image") or "").strip() or f"image-{_id('img')}"
+    return {
+        "name": name,
+        "project": project,
+        "family": str(payload.get("family") or ""),
+        "sourceSnapshot": str(payload.get("sourceSnapshot") or payload.get("source_snapshot") or ""),
+        "sourceDisk": str(payload.get("sourceDisk") or payload.get("source_disk") or ""),
+        "description": str(payload.get("description") or ""),
+        "status": str(payload.get("status") or "READY"),
+        "labels": payload.get("labels", {}) if isinstance(payload.get("labels"), dict) else {},
+        "created": _now(),
+        "updateTime": _now(),
+    }
+
+
+def _gcp_compute_image_view(image: dict) -> dict:
+    project = str(image.get("project") or "cloudlearn")
+    name = str(image.get("name") or "")
+    return {
+        "kind": "compute#image",
+        "id": _gcp_compute_numeric_id(f"{project}:{name}"),
+        "name": name,
+        "family": image.get("family", ""),
+        "sourceSnapshot": image.get("sourceSnapshot", ""),
+        "sourceDisk": image.get("sourceDisk", ""),
+        "status": image.get("status", "READY"),
+        "description": image.get("description", ""),
+        "labels": image.get("labels", {}),
+        "creationTimestamp": image.get("created", _now()),
+        "selfLink": f"{_gcp_compute_api_root()}/projects/{project}/global/images/{name}",
+    }
 
 
 def _gcp_compute_queue_runtime_start(instance_id: str) -> None:
@@ -8516,10 +9717,12 @@ async def api_ec2_query(request: Request):
                     raise HTTPException(404, detail=f"InvalidInstanceID.NotFound: {instance_id}")
                 previous = instance.get("state", "running")
                 backend = str(instance.get("runtime_backend") or "").strip().lower()
-                if backend == "multipass":
+                if instance.get("launch_status") == "error" and not str(instance.get("container_id") or "").strip():
+                    _terminate_simulated_instance(instance)
+                elif backend == "multipass":
                     _terminate_multipass_instance(instance)
                 elif backend == "lxd":
-                    _terminate_docker_instance(instance)
+                    _terminate_lxd_instance(instance)
                 else:
                     _terminate_simulated_instance(instance)
                 changes.append((instance, previous, "shutting-down"))
@@ -8553,12 +9756,70 @@ async def api_gcp_compute_create_instance(project: str, zone: str, request: Requ
     instance["runtime_bundle_name"] = _cloudsim_runtime_bundle("gcp_compute").get("name", "")
     instance["runtime_bundle_kind"] = _cloudsim_runtime_bundle("gcp_compute").get("kind", "")
     gcp_compute_state["instances"][instance["instance_id"]] = instance
+    disk_specs = instance.get("requested_disks") if isinstance(instance.get("requested_disks"), list) else []
+    attached_disk_names: list[str] = []
+    if not disk_specs:
+        disk_specs = [{
+            "boot": True,
+            "autoDelete": True,
+            "deviceName": f"{instance['name']}-boot",
+            "initializeParams": {
+                "diskSizeGb": str(instance.get("storage_gb") or 8),
+                "diskType": instance.get("boot_disk_type") or "pd-balanced",
+                "sourceImage": instance.get("ami") or "",
+                "sourceSnapshot": "",
+            },
+        }]
+    for idx, spec in enumerate(disk_specs):
+        if not isinstance(spec, dict):
+            continue
+        init = spec.get("initializeParams") if isinstance(spec.get("initializeParams"), dict) else {}
+        disk_name = str(spec.get("deviceName") or spec.get("device_name") or (f"{instance['name']}-boot" if idx == 0 else f"{instance['name']}-disk-{idx + 1}")).strip()
+        if not disk_name:
+            disk_name = f"{instance['name']}-disk-{idx + 1}"
+        disk = _gcp_compute_disk_record(project, zone, {
+            "name": disk_name,
+            "sizeGb": int(str(init.get("diskSizeGb") or spec.get("diskSizeGb") or instance.get("storage_gb") or 8).strip() or 8),
+            "type": str(init.get("diskType") or spec.get("type") or instance.get("boot_disk_type") or "pd-balanced"),
+            "sourceImage": str(init.get("sourceImage") or spec.get("sourceImage") or instance.get("ami") or ""),
+            "sourceSnapshot": str(init.get("sourceSnapshot") or spec.get("sourceSnapshot") or ""),
+            "instance": instance["name"],
+            "instance_id": instance["instance_id"],
+            "status": "READY",
+            "boot": bool(spec.get("boot", idx == 0)),
+            "autoDelete": bool(spec.get("autoDelete", spec.get("auto_delete", idx == 0))),
+            "deviceName": disk_name,
+        })
+        gcp_compute_state.setdefault("disks", {})[disk["name"]] = disk
+        attached_disk_names.append(disk["name"])
+    instance["attached_disk_names"] = attached_disk_names
+    for group_name in instance.get("requested_instance_groups") or []:
+        group = gcp_compute_state.setdefault("instance_groups", {}).get(group_name)
+        if not isinstance(group, dict):
+            group = _gcp_compute_instance_group_record(project, zone, {
+                "name": group_name,
+                "baseInstanceName": instance["name"],
+                "targetSize": 1,
+                "instances": [instance["name"]],
+                "state": "STABLE",
+            })
+            gcp_compute_state["instance_groups"][group_name] = group
+        members = group.setdefault("instances", [])
+        if instance["name"] not in members:
+            members.append(instance["name"])
+        group["targetSize"] = max(int(group.get("targetSize") or 0), len([v for v in members if str(v).strip()]))
+        group["updateTime"] = _now()
+        instance.setdefault("instance_groups", [])
+        if group_name not in instance["instance_groups"]:
+            instance["instance_groups"].append(group_name)
     _gcp_compute_queue_runtime_start(instance["instance_id"])
+    _gcp_compute_sync_resource_links()
     _record_usage("gcp.compute.create_instance", instance)
     return _gcp_compute_operation_json(instance, "insert", "PENDING")
 
 
 def api_gcp_compute_get_instance(project: str, zone: str, instance: str):
+    _gcp_compute_sync_runtime_instances()
     instance = _gcp_compute_find_instance(project, zone, instance)
     if not instance:
         raise HTTPException(404, detail="NoSuchInstance")
@@ -8573,6 +9834,7 @@ def api_gcp_compute_start_instance(project: str, zone: str, instance: str):
     instance["state"] = "pending"
     instance["launch_status"] = "starting"
     _gcp_compute_queue_runtime_start(str(instance.get("instance_id", "")))
+    _gcp_compute_sync_resource_links()
     _record_usage("gcp.compute.start_instance", {"instance_id": instance.get("instance_id", ""), "project": project, "zone": zone})
     return _gcp_compute_operation_json(instance, "start", "PENDING")
 
@@ -8586,6 +9848,7 @@ def api_gcp_compute_stop_instance(project: str, zone: str, instance: str):
     instance["state"] = "stopped"
     instance["stopped_at"] = _now()
     instance["launch_status"] = "ready"
+    _gcp_compute_sync_resource_links()
     _record_usage("gcp.compute.stop_instance", {"instance_id": instance.get("instance_id", ""), "project": project, "zone": zone})
     return _gcp_compute_operation_json(instance, "stop", "DONE")
 
@@ -8599,6 +9862,7 @@ def api_gcp_compute_reset_instance(project: str, zone: str, instance: str):
         raise HTTPException(409, detail="InstanceNotRunning")
     _reboot_runtime_process(instance)
     instance["launch_status"] = "ready"
+    _gcp_compute_sync_resource_links()
     _record_usage("gcp.compute.reset_instance", {"instance_id": instance.get("instance_id", ""), "project": project, "zone": zone})
     return _gcp_compute_operation_json(instance, "reset", "DONE")
 
@@ -8611,14 +9875,40 @@ def api_gcp_compute_delete_instance(project: str, zone: str, instance: str):
     if backend == "multipass":
         _terminate_multipass_instance(instance)
     elif backend == "lxd":
-        _terminate_docker_instance(instance)
+        _terminate_lxd_instance(instance)
     else:
         _terminate_simulated_instance(instance)
+    instance_name = str(instance.get("name") or instance.get("instance_id") or "").strip()
+    for group in gcp_compute_state.get("instance_groups", {}).values():
+        if not isinstance(group, dict):
+            continue
+        members = group.get("instances")
+        if not isinstance(members, list):
+            continue
+        if instance_name in members:
+            members[:] = [name for name in members if str(name).strip() != instance_name]
+            group["targetSize"] = len(members)
+            group["updateTime"] = _now()
+    for disk_name in list(instance.get("attached_disk_names") or []):
+        disk = gcp_compute_state.get("disks", {}).get(str(disk_name))
+        if not isinstance(disk, dict):
+            continue
+        if bool(disk.get("autoDelete", disk.get("boot", False))):
+            gcp_compute_state.get("disks", {}).pop(str(disk_name), None)
+        else:
+            disk["instance"] = ""
+            disk["instance_id"] = ""
+            disk["status"] = "READY"
+            disk["updateTime"] = _now()
+    instance["attached_disk_names"] = []
+    instance["instance_groups"] = []
+    _gcp_compute_sync_resource_links()
     _record_usage("gcp.compute.delete_instance", {"instance_id": instance.get("instance_id", ""), "project": project, "zone": zone})
     return _gcp_compute_operation_json(instance, "delete", "DONE")
 
 
 def api_gcp_compute_get_operation(project: str, zone: str, operation_id: str):
+    _gcp_compute_sync_runtime_instances()
     instance = None
     for candidate in gcp_compute_state.get("instances", {}).values():
         if not isinstance(candidate, dict):
@@ -8642,15 +9932,189 @@ def api_gcp_compute_get_operation(project: str, zone: str, operation_id: str):
     return _gcp_compute_operation_json(instance, operation_id.split("-", 1)[0] or "insert", status)
 
 
+def api_gcp_compute_list_instance_groups(project: str, zone: str):
+    project = _gcp_project_name(project)
+    groups = []
+    for group in gcp_compute_state.get("instance_groups", {}).values():
+        if str(group.get("project") or project) != project or str(group.get("zone") or zone) != zone:
+            continue
+        groups.append(_gcp_compute_instance_group_view(group))
+    groups.sort(key=lambda item: item.get("name", ""))
+    return {"kind": "compute#instanceGroupList", "items": groups}
+
+
+async def api_gcp_compute_create_instance_group(project: str, zone: str, request: Request):
+    project = _gcp_project_name(project)
+    payload = {}
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    if not isinstance(payload, dict):
+        payload = {}
+    group = _gcp_compute_instance_group_record(project, zone, payload)
+    gcp_compute_state.setdefault("instance_groups", {})[group["name"]] = group
+    for instance_name in group.get("instances") or []:
+        instance = _gcp_compute_find_instance(project, zone, str(instance_name))
+        if not instance:
+            continue
+        instance.setdefault("instance_groups", [])
+        if group["name"] not in instance["instance_groups"]:
+            instance["instance_groups"].append(group["name"])
+        instance["instance_groups"] = sorted(dict.fromkeys(instance["instance_groups"]))
+        instance["requested_instance_groups"] = sorted(dict.fromkeys((instance.get("requested_instance_groups") or []) + [group["name"]]))
+    _gcp_compute_sync_resource_links()
+    _record_usage("gcp.compute.create_instance_group", {"project": project, "zone": zone, "group": group["name"]})
+    return _gcp_compute_instance_group_view(group)
+
+
+def api_gcp_compute_delete_instance_group(project: str, zone: str, group: str):
+    project = _gcp_project_name(project)
+    rec = gcp_compute_state.get("instance_groups", {}).get(group)
+    if not rec or str(rec.get("project") or project) != project or str(rec.get("zone") or zone) != zone:
+        raise HTTPException(404, detail="InstanceGroupNotFound")
+    del gcp_compute_state["instance_groups"][group]
+    _record_usage("gcp.compute.delete_instance_group", {"project": project, "zone": zone, "group": group})
+    return {"kind": "compute#instanceGroup", "deleted": True, "name": group}
+
+
+def api_gcp_compute_list_disks(project: str, zone: str):
+    project = _gcp_project_name(project)
+    disks = []
+    for disk in gcp_compute_state.get("disks", {}).values():
+        if str(disk.get("project") or project) != project or str(disk.get("zone") or zone) != zone:
+            continue
+        disks.append(_gcp_compute_disk_view(disk))
+    disks.sort(key=lambda item: item.get("name", ""))
+    return {"kind": "compute#diskList", "items": disks}
+
+
+async def api_gcp_compute_create_disk(project: str, zone: str, request: Request):
+    project = _gcp_project_name(project)
+    payload = {}
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    if not isinstance(payload, dict):
+        payload = {}
+    disk = _gcp_compute_disk_record(project, zone, payload)
+    gcp_compute_state.setdefault("disks", {})[disk["name"]] = disk
+    target_instance = str(payload.get("instance") or payload.get("instanceName") or payload.get("instance_name") or "").strip()
+    if target_instance:
+        instance = _gcp_compute_find_instance(project, zone, target_instance)
+        if instance:
+            disk["instance"] = str(instance.get("name") or target_instance)
+            disk["instance_id"] = str(instance.get("instance_id") or "")
+            disk["status"] = "IN_USE" if str(instance.get("state") or "").lower() == "running" else "READY"
+            instance.setdefault("attached_disk_names", [])
+            if disk["name"] not in instance["attached_disk_names"]:
+                instance["attached_disk_names"].append(disk["name"])
+            instance.setdefault("requested_disks", [])
+            instance.setdefault("instance_groups", instance.get("instance_groups", []))
+            _gcp_compute_sync_resource_links()
+    _record_usage("gcp.compute.create_disk", {"project": project, "zone": zone, "disk": disk["name"]})
+    return _gcp_compute_disk_view(disk)
+
+
+def api_gcp_compute_delete_disk(project: str, zone: str, disk: str):
+    project = _gcp_project_name(project)
+    rec = gcp_compute_state.get("disks", {}).get(disk)
+    if not rec or str(rec.get("project") or project) != project or str(rec.get("zone") or zone) != zone:
+        raise HTTPException(404, detail="DiskNotFound")
+    instance_name = str(rec.get("instance") or "").strip()
+    if instance_name:
+        instance = _gcp_compute_find_instance(project, zone, instance_name)
+        if instance:
+            instance["attached_disk_names"] = [name for name in (instance.get("attached_disk_names") or []) if str(name).strip() != disk]
+    del gcp_compute_state["disks"][disk]
+    _gcp_compute_sync_resource_links()
+    _record_usage("gcp.compute.delete_disk", {"project": project, "zone": zone, "disk": disk})
+    return {"kind": "compute#disk", "deleted": True, "name": disk}
+
+
+def api_gcp_compute_list_snapshots(project: str):
+    project = _gcp_project_name(project)
+    snapshots = []
+    for snapshot in gcp_compute_state.get("snapshots", {}).values():
+        if str(snapshot.get("project") or project) != project:
+            continue
+        snapshots.append(_gcp_compute_snapshot_view(snapshot))
+    snapshots.sort(key=lambda item: item.get("name", ""))
+    return {"kind": "compute#snapshotList", "items": snapshots}
+
+
+async def api_gcp_compute_create_snapshot(project: str, request: Request):
+    project = _gcp_project_name(project)
+    payload = {}
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    if not isinstance(payload, dict):
+        payload = {}
+    snapshot = _gcp_compute_snapshot_record(project, payload)
+    gcp_compute_state.setdefault("snapshots", {})[snapshot["name"]] = snapshot
+    _record_usage("gcp.compute.create_snapshot", {"project": project, "snapshot": snapshot["name"]})
+    return _gcp_compute_snapshot_view(snapshot)
+
+
+def api_gcp_compute_delete_snapshot(project: str, snapshot: str):
+    project = _gcp_project_name(project)
+    rec = gcp_compute_state.get("snapshots", {}).get(snapshot)
+    if not rec or str(rec.get("project") or project) != project:
+        raise HTTPException(404, detail="SnapshotNotFound")
+    del gcp_compute_state["snapshots"][snapshot]
+    _record_usage("gcp.compute.delete_snapshot", {"project": project, "snapshot": snapshot})
+    return {"kind": "compute#snapshot", "deleted": True, "name": snapshot}
+
+
+def api_gcp_compute_list_images(project: str):
+    project = _gcp_project_name(project)
+    images = []
+    for image in gcp_compute_state.get("images", {}).values():
+        if str(image.get("project") or project) != project:
+            continue
+        images.append(_gcp_compute_image_view(image))
+    images.sort(key=lambda item: item.get("name", ""))
+    return {"kind": "compute#imageList", "items": images}
+
+
+async def api_gcp_compute_create_image(project: str, request: Request):
+    project = _gcp_project_name(project)
+    payload = {}
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    if not isinstance(payload, dict):
+        payload = {}
+    image = _gcp_compute_image_record(project, payload)
+    gcp_compute_state.setdefault("images", {})[image["name"]] = image
+    _record_usage("gcp.compute.create_image", {"project": project, "image": image["name"]})
+    return _gcp_compute_image_view(image)
+
+
+def api_gcp_compute_delete_image(project: str, image_name: str):
+    project = _gcp_project_name(project)
+    rec = gcp_compute_state.get("images", {}).get(image_name)
+    if not rec or str(rec.get("project") or project) != project:
+        raise HTTPException(404, detail="ImageNotFound")
+    del gcp_compute_state["images"][image_name]
+    _record_usage("gcp.compute.delete_image", {"project": project, "image": image_name})
+    return {"kind": "compute#image", "deleted": True, "name": image_name}
+
+
 async def _instance_console_ws(websocket: WebSocket, instance: dict, instance_id: str, provider_name: str, empty_message: str) -> None:
     backend = str(instance.get("runtime_backend") or "").strip().lower()
     if backend == "multipass":
         _sync_multipass_instance(instance)
     elif backend == "lxd":
-        _sync_docker_instance(instance)
+        _sync_lxd_instance(instance)
 
     await websocket.accept()
-    if instance.get("state") != "running":
+    instance_state = str(instance.get("state") or instance.get("status") or "").strip().lower()
+    if instance_state != "running":
         await websocket.send_text(f"{empty_message}\n")
         await websocket.close()
         return
@@ -8709,6 +10173,25 @@ async def _instance_console_ws(websocket: WebSocket, instance: dict, instance_id
             pass
 
 
+def _gcp_compute_console_exec(project: str, zone: str, instance_ref: str, req: GCPComputeConsoleCommandRequest):
+    instance = _gcp_compute_find_instance(project, zone, instance_ref)
+    if not instance:
+        raise HTTPException(404, detail="NoSuchInstance")
+    backend = str(instance.get("runtime_backend") or "").strip().lower()
+    if backend == "multipass":
+        _sync_multipass_instance(instance)
+    elif backend == "lxd":
+        _sync_lxd_instance(instance)
+    if str(instance.get("state") or "").strip().lower() != "running" and str(instance.get("status") or "").strip().upper() != "RUNNING":
+        raise HTTPException(409, detail="InstanceNotRunning")
+    result = _console_execute(instance, req.command)
+    _record_usage(
+        "gcp.compute.console_command",
+        {"project": project, "zone": zone, "instance": str(instance.get("name") or instance_ref), "command": req.command, "exit_code": result["exit_code"]},
+    )
+    return {"message": "Console command executed", "instance_id": str(instance.get("instance_id") or instance_ref), **result}
+
+
 @app.websocket("/ws/ec2/instances/{instance_id}/console")
 async def ws_ec2_console(websocket: WebSocket, instance_id: str):
     instance = ec2_state["instances"].get(instance_id)
@@ -8726,6 +10209,11 @@ async def ws_gcp_compute_console(websocket: WebSocket, project: str, zone: str, 
         await websocket.close(code=1008)
         return
     await _instance_console_ws(websocket, instance, str(instance.get("instance_id", instance.get("name", ""))), "Compute Engine", "Compute Engine console is not active. Start the instance first.")
+
+
+@app.post("/api/gcp/compute/projects/{project}/zones/{zone}/instances/{instance}/console")
+def api_gcp_compute_console_exec(project: str, zone: str, instance: str, req: GCPComputeConsoleCommandRequest):
+    return _gcp_compute_console_exec(_gcp_project_name(project), zone, instance, req)
 
 
 @app.websocket("/ws/runtime-console/{instance_id}")
@@ -8762,7 +10250,7 @@ def _gcp_storage_object_record(bucket: str, name: str, payload: dict[str, Any] |
     if not isinstance(data, str):
         data = str(data)
     content_type = str(payload.get("contentType") or payload.get("content_type") or "application/octet-stream")
-    size = len(data.encode("utf-8"))
+    size = int(payload.get("size") or len(data.encode("utf-8")))
     return {
         "bucket": bucket,
         "name": name,
@@ -8777,6 +10265,91 @@ def _gcp_storage_object_record(bucket: str, name: str, payload: dict[str, Any] |
         "crc32c": payload.get("crc32c", ""),
         "etag": payload.get("etag", ""),
         "mediaLink": f"{_gcp_gcs_root()}/b/{bucket}/o/{name}?alt=media",
+    }
+
+
+def _gcp_storage_folder_record(project: str, bucket: str, payload: dict[str, Any] | None = None) -> dict:
+    payload = payload or {}
+    name = str(payload.get("name") or payload.get("folder") or "").strip()
+    if not name:
+        name = f"folder-{_id('fld')}"
+    prefix = str(payload.get("prefix") or name.rstrip("/") + "/").strip()
+    return {
+        "project": project,
+        "bucket": bucket,
+        "name": name,
+        "prefix": prefix,
+        "storageClass": str(payload.get("storageClass") or "STANDARD"),
+        "state": str(payload.get("state") or "READY"),
+        "labels": payload.get("labels", {}) if isinstance(payload.get("labels"), dict) else {},
+        "createTime": _now(),
+        "updateTime": _now(),
+    }
+
+
+def _gcp_storage_folder_view(folder: dict) -> dict:
+    project = str(folder.get("project") or "cloudlearn")
+    bucket = str(folder.get("bucket") or "")
+    name = str(folder.get("name") or "")
+    return {
+        "name": f"{_gcp_gcs_root()}/b/{bucket}/folders/{name}",
+        "bucket": bucket,
+        "prefix": folder.get("prefix", ""),
+        "storageClass": folder.get("storageClass", "STANDARD"),
+        "state": folder.get("state", "READY"),
+        "labels": folder.get("labels", {}),
+        "createTime": folder.get("createTime", _now()),
+        "updateTime": folder.get("updateTime", _now()),
+        "project": project,
+    }
+
+
+def _gcp_storage_transfer_record(project: str, payload: dict[str, Any] | None = None) -> dict:
+    payload = payload or {}
+    name = str(payload.get("name") or payload.get("transferJobName") or "").strip()
+    if not name:
+        name = f"transfer-{_id('xfr')}"
+    return {
+        "project": project,
+        "name": name,
+        "sourceBucket": str(payload.get("sourceBucket") or ""),
+        "sourcePrefix": str(payload.get("sourcePrefix") or ""),
+        "destinationBucket": str(payload.get("destinationBucket") or ""),
+        "destinationPrefix": str(payload.get("destinationPrefix") or ""),
+        "status": str(payload.get("status") or "ENABLED"),
+        "schedule": str(payload.get("schedule") or "manual"),
+        "description": str(payload.get("description") or ""),
+        "labels": payload.get("labels", {}) if isinstance(payload.get("labels"), dict) else {},
+        "createTime": _now(),
+        "updateTime": _now(),
+    }
+
+
+def _gcp_storage_transfer_view(transfer: dict) -> dict:
+    return {
+        "name": transfer.get("name", ""),
+        "sourceBucket": transfer.get("sourceBucket", ""),
+        "sourcePrefix": transfer.get("sourcePrefix", ""),
+        "destinationBucket": transfer.get("destinationBucket", ""),
+        "destinationPrefix": transfer.get("destinationPrefix", ""),
+        "status": transfer.get("status", "ENABLED"),
+        "schedule": transfer.get("schedule", "manual"),
+        "description": transfer.get("description", ""),
+        "labels": transfer.get("labels", {}),
+        "createTime": transfer.get("createTime", _now()),
+        "updateTime": transfer.get("updateTime", _now()),
+        "project": transfer.get("project", "cloudlearn"),
+    }
+
+
+def _gcp_storage_policy_view(bucket: str, policy: dict[str, Any] | None = None) -> dict:
+    policy = policy or {}
+    return {
+        "bucket": bucket,
+        "version": int(policy.get("version") or 1),
+        "etag": str(policy.get("etag") or ""),
+        "bindings": policy.get("bindings", []) if isinstance(policy.get("bindings"), list) else [],
+        "updateTime": policy.get("updateTime", _now()),
     }
 
 
@@ -8819,6 +10392,72 @@ def _gcp_sql_instance_record(project: str, payload: dict[str, Any]) -> dict:
     }
 
 
+def _gcp_sql_backup_record(project: str, instance: str, payload: dict[str, Any] | None = None) -> dict:
+    payload = payload or {}
+    name = str(payload.get("name") or payload.get("backupId") or "").strip()
+    if not name:
+        name = f"backup-{_id('bkp')}"
+    return {
+        "project": project,
+        "instance": instance,
+        "name": name,
+        "status": str(payload.get("status") or "SUCCESSFUL"),
+        "backupType": str(payload.get("backupType") or "AUTOMATED"),
+        "sizeGb": int(payload.get("sizeGb") or payload.get("size_gb") or 10),
+        "description": str(payload.get("description") or ""),
+        "createTime": _now(),
+        "updateTime": _now(),
+    }
+
+
+def _gcp_sql_backup_view(backup: dict) -> dict:
+    project = str(backup.get("project") or "cloudlearn")
+    instance = str(backup.get("instance") or "")
+    name = str(backup.get("name") or "")
+    return {
+        "kind": "sql#backupRun",
+        "id": _gcp_compute_numeric_id(f"{project}:{instance}:{name}"),
+        "name": name,
+        "instance": f"{_gcp_sql_root()}/projects/{project}/instances/{instance}",
+        "status": backup.get("status", "SUCCESSFUL"),
+        "backupType": backup.get("backupType", "AUTOMATED"),
+        "description": backup.get("description", ""),
+        "sizeGb": str(backup.get("sizeGb") or 10),
+        "enqueuedTime": backup.get("createTime", _now()),
+        "startTime": backup.get("createTime", _now()),
+        "endTime": backup.get("updateTime", _now()),
+    }
+
+
+def _gcp_sql_query_insight_record(project: str, instance: str, payload: dict[str, Any] | None = None) -> dict:
+    payload = payload or {}
+    query_id = str(payload.get("queryId") or payload.get("name") or "").strip()
+    if not query_id:
+        query_id = f"query-{_id('q')}"
+    return {
+        "project": project,
+        "instance": instance,
+        "queryId": query_id,
+        "queryText": str(payload.get("queryText") or payload.get("sql") or "SELECT 1"),
+        "meanLatencyMs": float(payload.get("meanLatencyMs") or payload.get("latencyMs") or 12.5),
+        "callCount": int(payload.get("callCount") or payload.get("count") or 1),
+        "lastSeen": _now(),
+        "recommendation": str(payload.get("recommendation") or "Consider adding an index for this query."),
+    }
+
+
+def _gcp_sql_query_insight_view(insight: dict) -> dict:
+    return {
+        "name": insight.get("queryId", ""),
+        "queryText": insight.get("queryText", ""),
+        "meanLatencyMs": insight.get("meanLatencyMs", 0),
+        "callCount": insight.get("callCount", 0),
+        "lastSeen": insight.get("lastSeen", _now()),
+        "recommendation": insight.get("recommendation", ""),
+        "instance": f"{_gcp_sql_root()}/projects/{insight.get('project') or 'cloudlearn'}/instances/{insight.get('instance') or ''}",
+    }
+
+
 def _gcp_pubsub_topic_record(project: str, topic_id: str, payload: dict[str, Any] | None = None) -> dict:
     payload = payload or {}
     return {
@@ -8848,6 +10487,39 @@ def _gcp_pubsub_subscription_record(project: str, sub_id: str, payload: dict[str
         "labels": payload.get("labels", {}) if isinstance(payload.get("labels"), dict) else {},
         "createTime": _now(),
         "updateTime": _now(),
+    }
+
+
+def _gcp_pubsub_schema_record(project: str, payload: dict[str, Any] | None = None) -> dict:
+    payload = payload or {}
+    name = str(payload.get("name") or payload.get("schemaId") or "").strip()
+    if not name:
+        name = f"schema-{_id('sch')}"
+    return {
+        "project": project,
+        "name": name,
+        "type": str(payload.get("type") or "AVRO"),
+        "definition": str(payload.get("definition") or payload.get("schema") or ""),
+        "revisionId": str(payload.get("revisionId") or "1"),
+        "state": str(payload.get("state") or "ACTIVE"),
+        "description": str(payload.get("description") or ""),
+        "createTime": _now(),
+        "updateTime": _now(),
+    }
+
+
+def _gcp_pubsub_schema_view(schema: dict) -> dict:
+    project = str(schema.get("project") or "cloudlearn")
+    name = str(schema.get("name") or "")
+    return {
+        "name": f"projects/{project}/schemas/{name}",
+        "type": schema.get("type", "AVRO"),
+        "definition": schema.get("definition", ""),
+        "revisionId": schema.get("revisionId", "1"),
+        "state": schema.get("state", "ACTIVE"),
+        "description": schema.get("description", ""),
+        "createTime": schema.get("createTime", _now()),
+        "updateTime": schema.get("updateTime", _now()),
     }
 
 
@@ -8906,6 +10578,45 @@ def _gcp_firestore_doc_record(fields: dict[str, Any] | None = None) -> dict:
         "fields": _gcp_firestore_normalize_fields(fields),
         "createTime": _now(),
         "updateTime": _now(),
+    }
+
+
+def _gcp_firestore_index_record(project: str, database: str, collection: str, payload: dict[str, Any] | None = None) -> dict:
+    payload = payload or {}
+    name = str(payload.get("name") or payload.get("indexId") or "").strip()
+    if not name:
+        name = f"index-{_id('idx')}"
+    fields = payload.get("fields") if isinstance(payload.get("fields"), list) else []
+    if not fields:
+        fields = [{"fieldPath": "__name__", "order": "ASCENDING"}]
+    return {
+        "project": project,
+        "database": database,
+        "collection": collection,
+        "name": name,
+        "fields": fields,
+        "queryScope": str(payload.get("queryScope") or "COLLECTION"),
+        "state": str(payload.get("state") or "READY"),
+        "description": str(payload.get("description") or ""),
+        "createTime": _now(),
+        "updateTime": _now(),
+    }
+
+
+def _gcp_firestore_index_view(index: dict) -> dict:
+    project = str(index.get("project") or "cloudlearn")
+    database = str(index.get("database") or "(default)")
+    collection = str(index.get("collection") or "")
+    name = str(index.get("name") or "")
+    return {
+        "name": f"projects/{project}/databases/{database}/collectionGroups/{collection}/indexes/{name}",
+        "collectionGroup": collection,
+        "queryScope": index.get("queryScope", "COLLECTION"),
+        "fields": index.get("fields", []),
+        "state": index.get("state", "READY"),
+        "description": index.get("description", ""),
+        "createTime": index.get("createTime", _now()),
+        "updateTime": index.get("updateTime", _now()),
     }
 
 
@@ -9081,7 +10792,9 @@ async def api_gcp_storage_create_object(bucket: str, request: Request):
         payload = {}
     if not isinstance(payload, dict):
         payload = {}
-    name = str(payload.get("name") or payload.get("object") or "").strip()
+    # Real GCS uploads pass the object name as the `?name=` query param (uploadType=media);
+    # accept that as well as a name in the JSON body.
+    name = str(payload.get("name") or payload.get("object") or request.query_params.get("name") or "").strip()
     if not name:
         raise HTTPException(400, detail="Object name is required")
     obj = _gcp_storage_object_record(bucket, name, payload)
@@ -9104,6 +10817,108 @@ def api_gcp_storage_delete_object(bucket: str, object_name: str):
     del gcp_storage_state["objects"][bucket][object_name]
     _record_usage("gcp.storage.delete_object", {"bucket": bucket, "object": object_name})
     return {"kind": "storage#empty", "deleted": True, "bucket": bucket, "object": object_name}
+
+
+def api_gcp_storage_list_folders(bucket: str):
+    bucket_rec = gcp_storage_state.get("buckets", {}).get(bucket)
+    if not bucket_rec:
+        raise HTTPException(404, detail="Bucket not found")
+    folders = []
+    for folder in gcp_storage_state.get("folders", {}).get(bucket, {}).values():
+        folders.append(_gcp_storage_folder_view(folder))
+    folders.sort(key=lambda item: item.get("name", ""))
+    return {"kind": "storage#folders", "items": folders}
+
+
+async def api_gcp_storage_create_folder(bucket: str, request: Request):
+    bucket_rec = gcp_storage_state.get("buckets", {}).get(bucket)
+    if not bucket_rec:
+        raise HTTPException(404, detail="Bucket not found")
+    payload = {}
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    if not isinstance(payload, dict):
+        payload = {}
+    folder = _gcp_storage_folder_record(str(bucket_rec.get("project") or "cloudlearn"), bucket, payload)
+    gcp_storage_state.setdefault("folders", {}).setdefault(bucket, {})[folder["name"]] = folder
+    _record_usage("gcp.storage.create_folder", {"bucket": bucket, "folder": folder["name"]})
+    return _gcp_storage_folder_view(folder)
+
+
+def api_gcp_storage_delete_folder(bucket: str, folder: str):
+    if folder not in gcp_storage_state.get("folders", {}).get(bucket, {}):
+        raise HTTPException(404, detail="Folder not found")
+    del gcp_storage_state["folders"][bucket][folder]
+    _record_usage("gcp.storage.delete_folder", {"bucket": bucket, "folder": folder})
+    return {"kind": "storage#folder", "deleted": True, "bucket": bucket, "folder": folder}
+
+
+def api_gcp_storage_list_transfers(project: str):
+    project = _gcp_project_name(project)
+    transfers = []
+    for transfer in gcp_storage_state.get("transfers", {}).values():
+        if str(transfer.get("project") or project) != project:
+            continue
+        transfers.append(_gcp_storage_transfer_view(transfer))
+    transfers.sort(key=lambda item: item.get("name", ""))
+    return {"kind": "storagetransfer#transferJobsList", "transferJobs": transfers}
+
+
+async def api_gcp_storage_create_transfer(project: str, request: Request):
+    project = _gcp_project_name(project)
+    payload = {}
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    if not isinstance(payload, dict):
+        payload = {}
+    transfer = _gcp_storage_transfer_record(project, payload)
+    gcp_storage_state.setdefault("transfers", {})[transfer["name"]] = transfer
+    _record_usage("gcp.storage.create_transfer", {"project": project, "transfer": transfer["name"]})
+    return _gcp_storage_transfer_view(transfer)
+
+
+def api_gcp_storage_delete_transfer(project: str, transfer_name: str):
+    project = _gcp_project_name(project)
+    rec = gcp_storage_state.get("transfers", {}).get(transfer_name)
+    if not rec or str(rec.get("project") or project) != project:
+        raise HTTPException(404, detail="TransferNotFound")
+    del gcp_storage_state["transfers"][transfer_name]
+    _record_usage("gcp.storage.delete_transfer", {"project": project, "transfer": transfer_name})
+    return {"kind": "storagetransfer#transferJob", "deleted": True, "name": transfer_name}
+
+
+def api_gcp_storage_get_policy(bucket: str):
+    bucket_rec = gcp_storage_state.get("buckets", {}).get(bucket)
+    if not bucket_rec:
+        raise HTTPException(404, detail="Bucket not found")
+    policy = gcp_storage_state.setdefault("policies", {}).setdefault(bucket, {"version": 1, "etag": "", "bindings": []})
+    return _gcp_storage_policy_view(bucket, policy)
+
+
+async def api_gcp_storage_set_policy(bucket: str, request: Request):
+    bucket_rec = gcp_storage_state.get("buckets", {}).get(bucket)
+    if not bucket_rec:
+        raise HTTPException(404, detail="Bucket not found")
+    payload = {}
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    if not isinstance(payload, dict):
+        payload = {}
+    policy = {
+        "version": int(payload.get("version") or 1),
+        "etag": str(payload.get("etag") or ""),
+        "bindings": payload.get("bindings", []) if isinstance(payload.get("bindings"), list) else [],
+        "updateTime": _now(),
+    }
+    gcp_storage_state.setdefault("policies", {})[bucket] = policy
+    _record_usage("gcp.storage.set_policy", {"bucket": bucket, "bindings": len(policy["bindings"])})
+    return _gcp_storage_policy_view(bucket, policy)
 
 
 def api_gcp_sql_list_instances(project: str, request: Request):
@@ -9167,6 +10982,78 @@ def api_gcp_sql_restart_instance(project: str, instance: str):
     return {"kind": "sql#operation", "operationType": "RESTART", "status": "DONE", "targetLink": f"{_gcp_sql_root()}/projects/{project}/instances/{instance}"}
 
 
+def api_gcp_sql_list_backups(project: str, instance: str = ""):
+    project = _gcp_project_name(project)
+    backups = []
+    for backup in gcp_sql_state.get("backups", {}).values():
+        if str(backup.get("project") or project) != project:
+            continue
+        if instance and str(backup.get("instance") or "") != instance:
+            continue
+        backups.append(_gcp_sql_backup_view(backup))
+    backups.sort(key=lambda item: item.get("name", ""))
+    return {"kind": "sql#backupRunsList", "items": backups}
+
+
+async def api_gcp_sql_create_backup(project: str, instance: str, request: Request):
+    project = _gcp_project_name(project)
+    rec = gcp_sql_state.get("instances", {}).get(instance)
+    if not rec or str(rec.get("project") or project) != project:
+        raise HTTPException(404, detail="Instance not found")
+    payload = {}
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    if not isinstance(payload, dict):
+        payload = {}
+    backup = _gcp_sql_backup_record(project, instance, payload)
+    gcp_sql_state.setdefault("backups", {})[backup["name"]] = backup
+    _record_usage("gcp.sql.create_backup", {"project": project, "instance": instance, "backup": backup["name"]})
+    return _gcp_sql_backup_view(backup)
+
+
+def api_gcp_sql_delete_backup(project: str, backup: str):
+    project = _gcp_project_name(project)
+    rec = gcp_sql_state.get("backups", {}).get(backup)
+    if not rec or str(rec.get("project") or project) != project:
+        raise HTTPException(404, detail="Backup not found")
+    del gcp_sql_state["backups"][backup]
+    _record_usage("gcp.sql.delete_backup", {"project": project, "backup": backup})
+    return {"kind": "sql#backupRun", "deleted": True, "name": backup}
+
+
+def api_gcp_sql_list_insights(project: str, instance: str = ""):
+    project = _gcp_project_name(project)
+    insights = []
+    for insight in gcp_sql_state.get("query_insights", {}).values():
+        if str(insight.get("project") or project) != project:
+            continue
+        if instance and str(insight.get("instance") or "") != instance:
+            continue
+        insights.append(_gcp_sql_query_insight_view(insight))
+    insights.sort(key=lambda item: item.get("meanLatencyMs", 0), reverse=True)
+    return {"kind": "sql#queryInsightsList", "items": insights}
+
+
+async def api_gcp_sql_create_insight(project: str, instance: str, request: Request):
+    project = _gcp_project_name(project)
+    rec = gcp_sql_state.get("instances", {}).get(instance)
+    if not rec or str(rec.get("project") or project) != project:
+        raise HTTPException(404, detail="Instance not found")
+    payload = {}
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    if not isinstance(payload, dict):
+        payload = {}
+    insight = _gcp_sql_query_insight_record(project, instance, payload)
+    gcp_sql_state.setdefault("query_insights", {})[insight["queryId"]] = insight
+    _record_usage("gcp.sql.create_insight", {"project": project, "instance": instance, "query": insight["queryId"]})
+    return _gcp_sql_query_insight_view(insight)
+
+
 def api_gcp_pubsub_list_topics(project: str):
     project = _gcp_project_name(project)
     topics = [_gcp_pubsub_topic_view(project, topic) for topic in gcp_pubsub_state.get("topics", {}).values() if str(topic.get("project") or project) == project]
@@ -9200,8 +11087,50 @@ async def api_gcp_pubsub_create_topic(project: str, request: Request):
     return _gcp_pubsub_topic_view(project, topic)
 
 
+async def api_gcp_pubsub_put_topic(project: str, topic: str, request: Request):
+    """Real GCP Pub/Sub creates topics via PUT /v1/projects/{p}/topics/{topic}
+    (name in the path). The legacy POST /topics handler takes it from the body."""
+    project = _gcp_project_name(project)
+    payload = {}
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    if not isinstance(payload, dict):
+        payload = {}
+    topic_id = str(topic or payload.get("name") or "").split("/")[-1].strip()
+    if not topic_id:
+        raise HTTPException(400, detail="Topic id is required")
+    rec = _gcp_pubsub_topic_record(project, topic_id, payload)
+    gcp_pubsub_state.setdefault("topics", {})[topic_id] = rec
+    _record_usage("gcp.pubsub.create_topic", {"project": project, "topic": topic_id})
+    return _gcp_pubsub_topic_view(project, rec)
+
+
+async def api_gcp_pubsub_put_subscription(project: str, subscription: str, request: Request):
+    """Real GCP Pub/Sub creates subscriptions via PUT .../subscriptions/{sub}."""
+    project = _gcp_project_name(project)
+    payload = {}
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    if not isinstance(payload, dict):
+        payload = {}
+    sub_id = str(subscription or payload.get("name") or "").split("/")[-1].strip()
+    if not sub_id:
+        raise HTTPException(400, detail="Subscription id is required")
+    rec = _gcp_pubsub_subscription_record(project, sub_id, payload)
+    if not rec.get("topic"):
+        raise HTTPException(400, detail="Topic is required")
+    gcp_pubsub_state.setdefault("subscriptions", {})[sub_id] = rec
+    _record_usage("gcp.pubsub.create_subscription", {"project": project, "subscription": sub_id})
+    return _gcp_pubsub_subscription_view(project, rec)
+
+
 def api_gcp_pubsub_get_topic(project: str, topic: str):
     project = _gcp_project_name(project)
+    topic = _strip_action_suffix(topic, ":publish")
     rec = gcp_pubsub_state.get("topics", {}).get(topic)
     if not rec or str(rec.get("project") or project) != project:
         raise HTTPException(404, detail="Topic not found")
@@ -9210,6 +11139,7 @@ def api_gcp_pubsub_get_topic(project: str, topic: str):
 
 async def api_gcp_pubsub_update_topic(project: str, topic: str, request: Request):
     project = _gcp_project_name(project)
+    topic = _strip_action_suffix(topic, ":publish")
     rec = gcp_pubsub_state.get("topics", {}).get(topic)
     if not rec or str(rec.get("project") or project) != project:
         raise HTTPException(404, detail="Topic not found")
@@ -9234,6 +11164,7 @@ async def api_gcp_pubsub_update_topic(project: str, topic: str, request: Request
 
 def api_gcp_pubsub_list_topic_messages(project: str, topic: str):
     project = _gcp_project_name(project)
+    topic = _strip_action_suffix(topic, ":publish")
     rec = gcp_pubsub_state.get("topics", {}).get(topic)
     if not rec or str(rec.get("project") or project) != project:
         raise HTTPException(404, detail="Topic not found")
@@ -9243,6 +11174,7 @@ def api_gcp_pubsub_list_topic_messages(project: str, topic: str):
 
 def api_gcp_pubsub_delete_topic(project: str, topic: str):
     project = _gcp_project_name(project)
+    topic = _strip_action_suffix(topic, ":publish")
     rec = gcp_pubsub_state.get("topics", {}).get(topic)
     if not rec or str(rec.get("project") or project) != project:
         raise HTTPException(404, detail="Topic not found")
@@ -9258,6 +11190,7 @@ def api_gcp_pubsub_delete_topic(project: str, topic: str):
 
 async def api_gcp_pubsub_publish(project: str, topic: str, request: Request):
     project = _gcp_project_name(project)
+    topic = _strip_action_suffix(topic, ":publish")
     rec = gcp_pubsub_state.get("topics", {}).get(topic)
     if not rec or str(rec.get("project") or project) != project:
         raise HTTPException(404, detail="Topic not found")
@@ -9323,6 +11256,7 @@ async def api_gcp_pubsub_create_subscription(project: str, request: Request, que
 
 def api_gcp_pubsub_get_subscription(project: str, subscription: str):
     project = _gcp_project_name(project)
+    subscription = _strip_action_suffix(subscription, ":purge", ":pull", ":acknowledge", ":modifyAckDeadline")
     rec = gcp_pubsub_state.get("subscriptions", {}).get(subscription)
     if not rec or str(rec.get("project") or project) != project:
         raise HTTPException(404, detail="Subscription not found")
@@ -9331,6 +11265,7 @@ def api_gcp_pubsub_get_subscription(project: str, subscription: str):
 
 def api_gcp_pubsub_list_subscription_messages(project: str, subscription: str):
     project = _gcp_project_name(project)
+    subscription = _strip_action_suffix(subscription, ":purge", ":pull", ":acknowledge", ":modifyAckDeadline")
     rec = gcp_pubsub_state.get("subscriptions", {}).get(subscription)
     if not rec or str(rec.get("project") or project) != project:
         raise HTTPException(404, detail="Subscription not found")
@@ -9340,6 +11275,7 @@ def api_gcp_pubsub_list_subscription_messages(project: str, subscription: str):
 
 def api_gcp_pubsub_purge_subscription(project: str, subscription: str):
     project = _gcp_project_name(project)
+    subscription = _strip_action_suffix(subscription, ":purge", ":pull", ":acknowledge", ":modifyAckDeadline")
     rec = gcp_pubsub_state.get("subscriptions", {}).get(subscription)
     if not rec or str(rec.get("project") or project) != project:
         raise HTTPException(404, detail="Subscription not found")
@@ -9349,6 +11285,7 @@ def api_gcp_pubsub_purge_subscription(project: str, subscription: str):
 
 def api_gcp_pubsub_delete_subscription(project: str, subscription: str):
     project = _gcp_project_name(project)
+    subscription = _strip_action_suffix(subscription, ":purge", ":pull", ":acknowledge", ":modifyAckDeadline")
     rec = gcp_pubsub_state.get("subscriptions", {}).get(subscription)
     if not rec or str(rec.get("project") or project) != project:
         raise HTTPException(404, detail="Subscription not found")
@@ -9360,6 +11297,7 @@ def api_gcp_pubsub_delete_subscription(project: str, subscription: str):
 
 async def api_gcp_pubsub_pull(project: str, subscription: str, request: Request):
     project = _gcp_project_name(project)
+    subscription = _strip_action_suffix(subscription, ":purge", ":pull", ":acknowledge", ":modifyAckDeadline")
     rec = gcp_pubsub_state.get("subscriptions", {}).get(subscription)
     if not rec or str(rec.get("project") or project) != project:
         raise HTTPException(404, detail="Subscription not found")
@@ -9386,6 +11324,7 @@ async def api_gcp_pubsub_pull(project: str, subscription: str, request: Request)
 
 async def api_gcp_pubsub_ack(project: str, subscription: str, request: Request, receipt_handle: str = ""):
     project = _gcp_project_name(project)
+    subscription = _strip_action_suffix(subscription, ":purge", ":pull", ":acknowledge", ":modifyAckDeadline")
     if subscription not in gcp_pubsub_state.get("subscriptions", {}):
         raise HTTPException(404, detail="Subscription not found")
     body = {}
@@ -9403,6 +11342,7 @@ async def api_gcp_pubsub_ack(project: str, subscription: str, request: Request, 
 
 async def api_gcp_pubsub_modify_ack_deadline(project: str, subscription: str, request: Request):
     project = _gcp_project_name(project)
+    subscription = _strip_action_suffix(subscription, ":purge", ":pull", ":acknowledge", ":modifyAckDeadline")
     if subscription not in gcp_pubsub_state.get("subscriptions", {}):
         raise HTTPException(404, detail="Subscription not found")
     payload = {}
@@ -9436,6 +11376,42 @@ def api_gcp_pubsub_list_topic_subscriptions(project: str, topic: str):
         subscriptions.append(f"projects/{project}/subscriptions/{sub.get('subscriptionId') or sub.get('name')}")
     subscriptions.sort()
     return {"subscriptions": subscriptions, "nextPageToken": ""}
+
+
+def api_gcp_pubsub_list_schemas(project: str):
+    project = _gcp_project_name(project)
+    schemas = []
+    for schema in gcp_pubsub_state.get("schemas", {}).values():
+        if str(schema.get("project") or project) != project:
+            continue
+        schemas.append(_gcp_pubsub_schema_view(schema))
+    schemas.sort(key=lambda item: item.get("name", ""))
+    return {"schemas": schemas, "nextPageToken": "", "kind": "pubsub#schemaList"}
+
+
+async def api_gcp_pubsub_create_schema(project: str, request: Request):
+    project = _gcp_project_name(project)
+    payload = {}
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    if not isinstance(payload, dict):
+        payload = {}
+    schema = _gcp_pubsub_schema_record(project, payload)
+    gcp_pubsub_state.setdefault("schemas", {})[schema["name"]] = schema
+    _record_usage("gcp.pubsub.create_schema", {"project": project, "schema": schema["name"]})
+    return _gcp_pubsub_schema_view(schema)
+
+
+def api_gcp_pubsub_delete_schema(project: str, schema: str):
+    project = _gcp_project_name(project)
+    rec = gcp_pubsub_state.get("schemas", {}).get(schema)
+    if not rec or str(rec.get("project") or project) != project:
+        raise HTTPException(404, detail="SchemaNotFound")
+    del gcp_pubsub_state["schemas"][schema]
+    _record_usage("gcp.pubsub.delete_schema", {"project": project, "schema": schema})
+    return {"kind": "pubsub#schema", "deleted": True, "name": schema}
 
 
 def api_gcp_firestore_list_root_documents(project: str, database: str):
@@ -9539,7 +11515,57 @@ async def api_gcp_firestore_run_query(project: str, database: str, request: Requ
             field_name = str(field.get("fieldPath") or "")
             field_value = _gcp_firestore_plain_value(field_filter.get("value")) if field_name else None
     results = _gcp_firestore_engine().run_query(project, database, collection_id, field_name=field_name, field_value=field_value, limit=limit)
+    if collection_id and field_name:
+        index_key = f"{project}:{database}:{collection_id}:{field_name}:{query.get('orderBy', 'ASCENDING')}"
+        gcp_firestore_state.setdefault("indexes", {}).setdefault(index_key, _gcp_firestore_index_record(project, database, collection_id, {
+            "name": index_key.split(":")[-1],
+            "fields": [{"fieldPath": field_name, "order": str(query.get("orderBy") or "ASCENDING")}],
+            "queryScope": "COLLECTION",
+            "description": f"Auto-generated from query on {collection_id}.{field_name}",
+        }))
     return results
+
+
+def api_gcp_firestore_list_indexes(project: str, database: str, collection: str = ""):
+    project = _gcp_project_name(project)
+    database = str(database or "(default)")
+    indexes = []
+    for index in gcp_firestore_state.get("indexes", {}).values():
+        if str(index.get("project") or project) != project or str(index.get("database") or database) != database:
+            continue
+        if collection and str(index.get("collection") or "") != collection:
+            continue
+        indexes.append(_gcp_firestore_index_view(index))
+    indexes.sort(key=lambda item: item.get("name", ""))
+    return {"indexes": indexes, "kind": "firestore#indexList"}
+
+
+async def api_gcp_firestore_create_index(project: str, database: str, collection: str, request: Request):
+    project = _gcp_project_name(project)
+    database = str(database or "(default)")
+    payload = {}
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    if not isinstance(payload, dict):
+        payload = {}
+    index = _gcp_firestore_index_record(project, database, collection, payload)
+    gcp_firestore_state.setdefault("indexes", {})[f"{project}:{database}:{collection}:{index['name']}"] = index
+    _record_usage("gcp.firestore.create_index", {"project": project, "database": database, "collection": collection, "index": index["name"]})
+    return _gcp_firestore_index_view(index)
+
+
+def api_gcp_firestore_delete_index(project: str, database: str, collection: str, index_name: str):
+    project = _gcp_project_name(project)
+    database = str(database or "(default)")
+    key = f"{project}:{database}:{collection}:{index_name}"
+    rec = gcp_firestore_state.get("indexes", {}).get(key)
+    if not rec:
+        raise HTTPException(404, detail="Index not found")
+    del gcp_firestore_state["indexes"][key]
+    _record_usage("gcp.firestore.delete_index", {"project": project, "database": database, "collection": collection, "index": index_name})
+    return {"kind": "firestore#index", "deleted": True, "name": index_name}
 
 
 def api_gcp_functions_list(project: str, location: str = "us-central1"):
@@ -9671,6 +11697,7 @@ def api_gcp_functions_list_invocations(project: str, location: str, function: st
 def api_gcp_functions_get_policy(project: str, location: str, function: str):
     project = _gcp_project_name(project)
     location = _gcp_location_name(location)
+    function = _strip_action_suffix(function, ":getIamPolicy", ":setIamPolicy", ":call")
     fn = gcp_functions_state.get("functions", {}).get(function)
     if not fn or str(fn.get("project") or project) != project or str(fn.get("location") or location) != location:
         raise HTTPException(404, detail="Function not found")
@@ -9681,6 +11708,7 @@ def api_gcp_functions_get_policy(project: str, location: str, function: str):
 async def api_gcp_functions_set_policy(project: str, location: str, function: str, request: Request):
     project = _gcp_project_name(project)
     location = _gcp_location_name(location)
+    function = _strip_action_suffix(function, ":getIamPolicy", ":setIamPolicy", ":call")
     fn = gcp_functions_state.get("functions", {}).get(function)
     if not fn or str(fn.get("project") or project) != project or str(fn.get("location") or location) != location:
         raise HTTPException(404, detail="Function not found")
@@ -9700,6 +11728,7 @@ async def api_gcp_functions_set_policy(project: str, location: str, function: st
 def api_gcp_functions_get(project: str, location: str, function: str):
     project = _gcp_project_name(project)
     location = _gcp_location_name(location)
+    function = _strip_action_suffix(function, ":getIamPolicy", ":setIamPolicy", ":call")
     fn = gcp_functions_state.get("functions", {}).get(function)
     if not fn or str(fn.get("project") or project) != project or str(fn.get("location") or location) != location:
         raise HTTPException(404, detail="Function not found")
@@ -9709,6 +11738,7 @@ def api_gcp_functions_get(project: str, location: str, function: str):
 def api_gcp_functions_delete(project: str, location: str, function: str):
     project = _gcp_project_name(project)
     location = _gcp_location_name(location)
+    function = _strip_action_suffix(function, ":getIamPolicy", ":setIamPolicy", ":call")
     fn = gcp_functions_state.get("functions", {}).get(function)
     if not fn or str(fn.get("project") or project) != project or str(fn.get("location") or location) != location:
         raise HTTPException(404, detail="Function not found")
@@ -9720,6 +11750,7 @@ def api_gcp_functions_delete(project: str, location: str, function: str):
 async def api_gcp_functions_call(project: str, location: str, function: str, request: Request):
     project = _gcp_project_name(project)
     location = _gcp_location_name(location)
+    function = _strip_action_suffix(function, ":getIamPolicy", ":setIamPolicy", ":call")
     fn = gcp_functions_state.get("functions", {}).get(function)
     if not fn or str(fn.get("project") or project) != project or str(fn.get("location") or location) != location:
         raise HTTPException(404, detail="Function not found")
@@ -10124,6 +12155,14 @@ async def api_gcp_vpc_create_firewall(project: str, request: Request):
 
 def _gcp_project_name(project: str | None) -> str:
     return str(project or "cloudlearn").strip() or "cloudlearn"
+
+
+def _strip_action_suffix(value: str, *suffixes: str) -> str:
+    text = str(value or "")
+    for suffix in suffixes:
+        if suffix and text.endswith(suffix):
+            return text[: -len(suffix)]
+    return text
 
 
 def _gcp_location_name(location: str | None, default: str = "us-central1") -> str:
@@ -11765,16 +13804,16 @@ def _rds_runtime_mysql_init_sql(db: dict) -> str:
 
 
 def _rds_runtime_pull_image(image: str) -> None:
-    if not _docker_available():
+    if not _lxd_available():
         raise HTTPException(503, detail="LXDUnavailable")
     # LXD caches images automatically on launch; a separate pull is unnecessary.
-    completed = _docker_run(["image", "info", image], timeout=30)
+    completed = _lxd_run(["image", "info", image], timeout=30)
     if completed.returncode == 0:
         return
 
 
 def _rds_runtime_ensure_container(db: dict) -> str:
-    if not _docker_available():
+    if not _lxd_available():
         raise HTTPException(503, detail="LXDUnavailable")
 
     db_id = db["db_instance_identifier"]
@@ -11797,18 +13836,18 @@ def _rds_runtime_ensure_container(db: dict) -> str:
     db["endpoint_url"] = f"127.0.0.1:{host_port}"
 
     ref = db.get("container_id") or container_name
-    if _docker_container_exists(ref):
+    if _lxd_container_exists(ref):
         if not db.get("container_id"):
             db["container_id"] = ref
         return ref
 
     launch_args = ["launch", image, container_name]
-    completed = _docker_run_checked(launch_args, timeout=300)
+    completed = _lxd_run_checked(launch_args, timeout=300)
     db["container_id"] = container_name
     db["container_status"] = "created"
 
     proxy_name = f"{container_name}-proxy"
-    _docker_run_checked([
+    _lxd_run_checked([
         "config",
         "device",
         "add",
@@ -11828,7 +13867,7 @@ def _rds_runtime_ensure_container(db: dict) -> str:
             f"su - postgres -c \"psql -c \\\"CREATE USER {db_user} WITH PASSWORD '{db_pass}';\\\"\" && "
             f"su - postgres -c \"createdb {db_id} -O {db_user}\""
         )
-        _docker_run_checked(["exec", container_name, "--", "/bin/sh", "-lc", init_command], timeout=1800)
+        _lxd_run_checked(["exec", container_name, "--", "/bin/sh", "-lc", init_command], timeout=1800)
     else:
         init_command = (
             "apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y mariadb-server && "
@@ -11837,17 +13876,17 @@ def _rds_runtime_ensure_container(db: dict) -> str:
             f"CREATE USER IF NOT EXISTS '{db.get('master_username') or 'dbadmin'}'@'%' IDENTIFIED BY '{db.get('master_user_password') or 'Password123!'}'; "
             f"GRANT ALL PRIVILEGES ON `{db_id}`.* TO '{db.get('master_username') or 'dbadmin'}'@'%'; FLUSH PRIVILEGES;\""
         )
-        _docker_run_checked(["exec", container_name, "--", "/bin/sh", "-lc", init_command], timeout=1800)
+        _lxd_run_checked(["exec", container_name, "--", "/bin/sh", "-lc", init_command], timeout=1800)
 
     return db["container_id"]
 
 
 def _rds_runtime_start(db: dict) -> dict:
-    if not _docker_available():
+    if not _lxd_available():
         raise HTTPException(503, detail="LXDUnavailable")
     ref = _rds_runtime_ensure_container(db)
-    if _docker_status(ref) != "running":
-        _docker_run_checked(["start", ref], timeout=300)
+    if _lxd_status(ref) != "running":
+        _lxd_run_checked(["start", ref], timeout=300)
     db["db_instance_status"] = "available"
     db["container_status"] = "running"
     db["latest_restorable_time"] = _now()
@@ -11856,13 +13895,13 @@ def _rds_runtime_start(db: dict) -> dict:
 
 
 def _rds_runtime_stop(db: dict) -> dict:
-    if not _docker_available():
+    if not _lxd_available():
         raise HTTPException(503, detail="LXDUnavailable")
     ref = db.get("container_id") or db.get("container_name")
     if not ref:
         raise HTTPException(409, detail="DBInstanceContainerMissing")
-    if _docker_status(ref) == "running":
-        _docker_run_checked(["stop", ref], timeout=300)
+    if _lxd_status(ref) == "running":
+        _lxd_run_checked(["stop", ref], timeout=300)
     db["db_instance_status"] = "stopped"
     db["container_status"] = "exited"
     db["updated"] = _now()
@@ -11870,15 +13909,15 @@ def _rds_runtime_stop(db: dict) -> dict:
 
 
 def _rds_runtime_reboot(db: dict) -> dict:
-    if not _docker_available():
+    if not _lxd_available():
         raise HTTPException(503, detail="LXDUnavailable")
     ref = db.get("container_id") or db.get("container_name")
     if not ref:
         raise HTTPException(409, detail="DBInstanceContainerMissing")
-    if _docker_status(ref) != "running":
+    if _lxd_status(ref) != "running":
         raise HTTPException(409, detail="DBInstanceNotRunning")
     db["db_instance_status"] = "rebooting"
-    _docker_run_checked(["restart", ref], timeout=300)
+    _lxd_run_checked(["restart", ref], timeout=300)
     db["db_instance_status"] = "available"
     db["container_status"] = "running"
     db["latest_restorable_time"] = _now()
@@ -11887,13 +13926,16 @@ def _rds_runtime_reboot(db: dict) -> dict:
 
 
 def _rds_runtime_delete(db: dict) -> None:
-    if not _docker_available():
-        raise HTTPException(503, detail="LXDUnavailable")
+    # Only tear down a real container when one was actually provisioned (LXD backend
+    # present, e.g. inside the appliance VM). Simulated records have nothing to remove.
+    if str(db.get("runtime_backend") or "").lower() != "lxd" or not _lxd_available():
+        db["container_status"] = "removed"
+        return
     ref = db.get("container_id") or db.get("container_name")
-    if ref and _docker_container_exists(ref):
-        _docker_run(["rm", "-f", ref], timeout=300)
+    if ref and _lxd_container_exists(ref):
+        _lxd_run(["rm", "-f", ref], timeout=300)
     volume_name = _rds_runtime_data_volume(db["db_instance_identifier"])
-    _docker_run(["volume", "rm", "-f", volume_name], timeout=300)
+    _lxd_run(["volume", "rm", "-f", volume_name], timeout=300)
     db["container_status"] = "removed"
 
 
@@ -12119,9 +14161,10 @@ def _rds_prepare_db_instance(payload: RDSDatabaseRequest, source_snapshot: dict 
         payload.master_username = source_snapshot.get("master_username", payload.master_username)
         vpc_id = source_snapshot.get("vpc_id", vpc_id)
     endpoint_address = f"{db_id}.rds.local"
-    if not _docker_available():
-        raise HTTPException(503, detail="LXDUnavailable")
-    runtime_backend = "lxd"
+    # Data-plane backing: provision a real DB container when LXD is available
+    # (e.g. inside the appliance VM); otherwise degrade to a simulated control-plane
+    # record so the API/lifecycle stays conformant for SDK/Terraform clients.
+    runtime_backend = "lxd" if _lxd_available() else "simulated"
     resolved_engine_version = _rds_resolve_engine_version(payload.engine, payload.engine_version)
     runtime_image = _rds_runtime_image(payload.engine, resolved_engine_version)
     db = {
@@ -12167,7 +14210,7 @@ def _rds_prepare_db_instance(payload: RDSDatabaseRequest, source_snapshot: dict 
     if runtime_backend == "lxd":
         _rds_runtime_ensure_container(db)
         db["db_instance_status"] = "available"
-        db["container_status"] = "running" if _docker_status(db.get("container_id") or db.get("container_name")) == "running" else "created"
+        db["container_status"] = "running" if _lxd_status(db.get("container_id") or db.get("container_name")) == "running" else "created"
     rds_state["db_instances"][db_id] = db
     _rds_emit_event("CreateDBInstance", {"db_instance_identifier": db_id, "engine": db["engine"], "vpc_id": vpc_id})
     return db
@@ -13220,7 +15263,105 @@ def _sqs_query_tag_untag_list_tags(action: str, params: dict[str, Any]) -> Respo
     return _sqs_xml_result("UntagQueue", "")
 
 
+def _sqs_json(payload: dict, status: int = 200) -> Response:
+    return Response(content=json.dumps(payload), status_code=status, media_type="application/x-amz-json-1.0")
+
+
+def _sqs_json_error(code: str, message: str, status: int = 400) -> Response:
+    return _sqs_json({"__type": code, "message": message}, status)
+
+
+async def _sqs_json_dispatch(request: Request, action: str) -> Response:
+    """Modern boto3/SDK SQS uses the AWS-JSON protocol (X-Amz-Target). Reuse the
+    SQS store operations and serialize JSON responses so unmodified clients work."""
+    try:
+        raw = await request.body()
+        body = json.loads(raw.decode("utf-8") or "{}") if raw else {}
+    except Exception:
+        body = {}
+    if not isinstance(body, dict):
+        body = {}
+
+    def queue_url(q: dict) -> str:
+        return q.get("queue_url") or _sqs_queue_url(q["queue_name"])
+
+    try:
+        if action == "CreateQueue":
+            name = str(body.get("QueueName", "")).strip()
+            if not name:
+                return _sqs_json_error("com.amazonaws.sqs#MissingParameter", "QueueName is required.")
+            attrs = body.get("Attributes") or {}
+            req = SQSQueueCreateRequest(
+                queue_name=name,
+                fifo_queue=str(attrs.get("FifoQueue", "")).lower() == "true" or name.endswith(".fifo"),
+                content_based_deduplication=str(attrs.get("ContentBasedDeduplication", "")).lower() == "true",
+                visibility_timeout=int(attrs.get("VisibilityTimeout", 30) or 30),
+                receive_wait_time_seconds=int(attrs.get("ReceiveMessageWaitTimeSeconds", 0) or 0),
+                message_retention_period=int(attrs.get("MessageRetentionPeriod", 345600) or 345600),
+                max_message_size=int(attrs.get("MaximumMessageSize", 262144) or 262144),
+                delay_seconds=int(attrs.get("DelaySeconds", 0) or 0),
+                redrive_policy={},
+                tags=body.get("tags") or {},
+            )
+            return _sqs_json({"QueueUrl": queue_url(_sqs_create_queue_record(req))})
+        if action == "GetQueueUrl":
+            queue = _sqs_find_queue(str(body.get("QueueName", "")).strip())
+            if not queue:
+                return _sqs_json_error("com.amazonaws.sqs#QueueDoesNotExist", "The specified queue does not exist.")
+            return _sqs_json({"QueueUrl": queue_url(queue)})
+        if action == "ListQueues":
+            prefix = str(body.get("QueueNamePrefix", "")).strip()
+            urls = [queue_url(q) for q in _sqs_list_queues() if not prefix or q.get("queue_name", "").startswith(prefix)]
+            return _sqs_json({"QueueUrls": urls})
+        if action == "DeleteQueue":
+            queue = _sqs_queue_from_name_or_url(str(body.get("QueueUrl", "")).strip())
+            if queue:
+                _sqs_state().get("queues", {}).pop(queue["queue_name"], None)
+            return _sqs_json({})
+        queue = _sqs_queue_from_name_or_url(str(body.get("QueueUrl", "")).strip())
+        if not queue:
+            return _sqs_json_error("com.amazonaws.sqs#QueueDoesNotExist", "The specified queue does not exist.")
+        if action == "SendMessage":
+            msg = _sqs_enqueue_message(queue, str(body.get("MessageBody", "")), {}, {},
+                                       group_id=str(body.get("MessageGroupId", "")),
+                                       dedup_id=str(body.get("MessageDeduplicationId", "")), source="SendMessage")
+            resp = {"MessageId": msg["message_id"], "MD5OfMessageBody": msg["md5_of_body"]}
+            if msg.get("sequence_number"):
+                resp["SequenceNumber"] = msg["sequence_number"]
+            return _sqs_json(resp)
+        if action == "ReceiveMessage":
+            maxn = max(1, min(int(body.get("MaxNumberOfMessages", 1) or 1), 10))
+            deliveries = _sqs_extract_messages_for_delivery(queue, maxn)
+            msgs = [{"MessageId": m.get("message_id", ""), "ReceiptHandle": m.get("receipt_handle", ""),
+                     "MD5OfBody": m.get("md5_of_body", ""), "Body": m.get("body", "")} for m in deliveries]
+            return _sqs_json({"Messages": msgs})
+        if action == "DeleteMessage":
+            _sqs_delete_message(queue, str(body.get("ReceiptHandle", "")))
+            return _sqs_json({})
+        if action == "PurgeQueue":
+            _sqs_purge_queue(queue)
+            return _sqs_json({})
+        if action == "ChangeMessageVisibility":
+            _sqs_change_message_visibility(queue, str(body.get("ReceiptHandle", "")), int(body.get("VisibilityTimeout", 30) or 30))
+            return _sqs_json({})
+        if action == "GetQueueAttributes":
+            attrs = _sqs_queue_attributes(queue)
+            names = body.get("AttributeNames") or ["All"]
+            selected = attrs if "All" in names else {k: v for k, v in attrs.items() if k in names}
+            return _sqs_json({"Attributes": {k: str(v) for k, v in selected.items()}})
+        if action == "SetQueueAttributes":
+            _sqs_update_queue_attributes(queue, body.get("Attributes") or {})
+            return _sqs_json({})
+    except HTTPException as exc:
+        code = str(exc.detail).split(":", 1)[0].strip() or "InvalidParameterValue"
+        return _sqs_json_error(f"com.amazonaws.sqs#{code}", str(exc.detail), exc.status_code if exc.status_code >= 400 else 400)
+    return _sqs_json_error("com.amazonaws.sqs#InvalidAction", f"The action '{action}' is not implemented.")
+
+
 async def api_sqs_query(request: Request):
+    target = request.headers.get("x-amz-target", "") or ""
+    if target:
+        return await _sqs_json_dispatch(request, target.split(".")[-1].strip())
     params = await _ec2_query_params(request)
     action = str(params.get("Action", "")).strip()
     if not action:
@@ -13808,122 +15949,10 @@ def _ddb_error_response(code: str, message: str, status: int = 400) -> Response:
     return _ddb_json_response({"__type": code, "message": message}, status=status)
 
 
+@app.api_route("/api/dynamodb/aws", methods=["POST"], include_in_schema=False)
+@app.api_route("/dynamodb", methods=["POST"], include_in_schema=False)
 async def api_dynamodb_aws(request: Request):
-    target = request.headers.get("x-amz-target", "")
-    action = target.rsplit(".", 1)[-1] if target else ""
-    if not action:
-        return _ddb_error_response("MissingAction", "The request must include X-Amz-Target.", 400)
-    try:
-        payload = await request.json()
-    except Exception:
-        payload = {}
-    payload = payload if isinstance(payload, dict) else {}
-
-    def table_name_from_payload() -> str:
-        return str(payload.get("TableName") or payload.get("table_name") or "").strip()
-
-    if action == "ListTables":
-        return _ddb_json_response(_ddb_list_tables_response())
-    if action == "CreateTable":
-        table = _ddb_create_table_record(payload)
-        return _ddb_json_response({"TableDescription": _ddb_table_view(table, include_items=False)})
-    if action == "DescribeTable":
-        table = _ddb_find_table(table_name_from_payload())
-        if not table:
-            return _ddb_error_response("ResourceNotFoundException", f"Table {table_name_from_payload()} not found.", 404)
-        return _ddb_json_response({"Table": _ddb_table_view(table, include_items=True)})
-    if action == "DeleteTable":
-        name = table_name_from_payload()
-        _ddb_delete_table_record(name)
-        return _ddb_json_response({"TableDescription": {"TableName": name, "TableStatus": "DELETED"}})
-    if action == "PutItem":
-        table = _ddb_find_table(table_name_from_payload())
-        if not table:
-            return _ddb_error_response("ResourceNotFoundException", "Table not found.", 404)
-        old = _ddb_put_item_record(table, payload)
-        return _ddb_json_response({"Attributes": _ddb_native_item_to_json(copy.deepcopy(old.get("item", {}))) if old and payload.get("ReturnValues", "NONE").upper() in {"ALL_OLD", "UPDATED_OLD"} else {}})
-    if action == "GetItem":
-        table = _ddb_find_table(table_name_from_payload())
-        if not table:
-            return _ddb_error_response("ResourceNotFoundException", "Table not found.", 404)
-        record = _ddb_get_item_record(table, payload)
-        return _ddb_json_response({"Item": _ddb_native_item_to_json(record.get("item", {}))} if record else {})
-    if action == "DeleteItem":
-        table = _ddb_find_table(table_name_from_payload())
-        if not table:
-            return _ddb_error_response("ResourceNotFoundException", "Table not found.", 404)
-        removed = _ddb_delete_item_record(table, payload)
-        return _ddb_json_response({"Attributes": _ddb_native_item_to_json(removed.get("item", {}))} if removed else {})
-    if action == "UpdateItem":
-        table = _ddb_find_table(table_name_from_payload())
-        if not table:
-            return _ddb_error_response("ResourceNotFoundException", "Table not found.", 404)
-        updated = _ddb_update_item_record(table, payload)
-        return _ddb_json_response({"Attributes": _ddb_native_item_to_json(updated.get("item", {}))})
-    if action == "Query":
-        table = _ddb_find_table(table_name_from_payload())
-        if not table:
-            return _ddb_error_response("ResourceNotFoundException", "Table not found.", 404)
-        matched, scanned = _ddb_query_filter(table, payload)
-        return _ddb_json_response({"Items": [_ddb_native_item_to_json(rec.get("item", {})) for rec in matched], "Count": len(matched), "ScannedCount": scanned})
-    if action == "Scan":
-        table = _ddb_find_table(table_name_from_payload())
-        if not table:
-            return _ddb_error_response("ResourceNotFoundException", "Table not found.", 404)
-        matched, scanned = _ddb_scan_filter(table, payload)
-        return _ddb_json_response({"Items": [_ddb_native_item_to_json(rec.get("item", {})) for rec in matched], "Count": len(matched), "ScannedCount": scanned})
-    if action == "BatchGetItem":
-        responses = {}
-        request_items = payload.get("RequestItems") or {}
-        for tname, req in request_items.items():
-            table = _ddb_find_table(str(tname))
-            if not table:
-                continue
-            keys = req.get("Keys") or []
-            rows = []
-            for key in keys:
-                record = _ddb_get_item_record(table, {"key": key})
-                if record:
-                    rows.append(_ddb_native_item_to_json(record.get("item", {})))
-            responses[tname] = rows
-        return _ddb_json_response({"Responses": responses})
-    if action == "BatchWriteItem":
-        request_items = payload.get("RequestItems") or {}
-        for tname, ops in request_items.items():
-            table = _ddb_find_table(str(tname))
-            if not table:
-                continue
-            for op in ops or []:
-                if "PutRequest" in op:
-                    _ddb_put_item_record(table, {"item": op["PutRequest"].get("Item", {})})
-                elif "DeleteRequest" in op:
-                    _ddb_delete_item_record(table, {"key": op["DeleteRequest"].get("Key", {})})
-        return _ddb_json_response({})
-    if action == "TagResource":
-        table = _ddb_find_table(table_name_from_payload())
-        if not table:
-            return _ddb_error_response("ResourceNotFoundException", "Table not found.", 404)
-        tags = payload.get("Tags") or payload.get("tags") or {}
-        if isinstance(tags, list):
-            tags = {str(tag.get("Key", "")): str(tag.get("Value", "")) for tag in tags if isinstance(tag, dict)}
-        _ddb_set_tags(table, tags if isinstance(tags, dict) else {})
-        return _ddb_json_response({})
-    if action == "UntagResource":
-        table = _ddb_find_table(table_name_from_payload())
-        if not table:
-            return _ddb_error_response("ResourceNotFoundException", "Table not found.", 404)
-        keys = payload.get("TagKeys") or payload.get("tag_keys") or []
-        tags = _ddb_tag_map(table)
-        for key in keys:
-            tags.pop(str(key), None)
-        _ddb_set_tags(table, tags)
-        return _ddb_json_response({})
-    if action == "ListTagsOfResource":
-        table = _ddb_find_table(table_name_from_payload())
-        if not table:
-            return _ddb_error_response("ResourceNotFoundException", "Table not found.", 404)
-        return _ddb_json_response({"Tags": [{"Key": k, "Value": v} for k, v in _ddb_tags_view(table).items()]})
-    return _ddb_error_response("UnknownOperationException", f"The action {action} is not implemented.", 400)
+    return await provider_aws_services._ddb_api_aws(request)
 
 
 def api_dynamodb_list_tables():
@@ -14504,6 +16533,220 @@ app.mount("/assets", StaticFiles(directory=STATIC_DIR), name="assets")
 async def serve_ui(path: str = "") -> Response:
     with open(_UI_HTML, "rb") as f:
         return Response(content=f.read(), media_type="text/html", headers={"Cache-Control": "no-store, max-age=0"})
+
+
+# ── AWS query-protocol root dispatch (real SDK / CLI entrypoint) ──────────────
+# Real AWS SDKs and the CLI send query-protocol (IAM/EC2/SQS/RDS/STS) and JSON
+# (DynamoDB) requests to the endpoint root `/`, selecting the target service via
+# the SigV4 credential scope (".../<service>/aws4_request") rather than the URL
+# path. This dispatcher routes those root requests to the already-implemented
+# service handlers so unmodified real clients work against the simulator.
+
+IAM_XML_NS = "https://iam.amazonaws.com/doc/2010-05-08/"
+STS_XML_NS = "https://sts.amazonaws.com/doc/2011-06-15/"
+_AWS_CRED_SCOPE_RE = re.compile(r"Credential=[^/]*/[^/]*/[^/]*/([A-Za-z0-9_-]+)/aws4_request")
+
+
+def _aws_query_target_service(request: Request) -> str:
+    auth = request.headers.get("authorization", "") or ""
+    match = _AWS_CRED_SCOPE_RE.search(auth)
+    if match:
+        return match.group(1).strip().lower()
+    target = request.headers.get("x-amz-target", "") or ""
+    if "dynamodb" in target.lower():
+        return "dynamodb"
+    return ""
+
+
+def _iam_request_id() -> str:
+    return uuid.uuid4().hex
+
+
+def _iam_envelope(action: str, result_inner: str | None = None, status: int = 200) -> Response:
+    result = f"<{action}Result>{result_inner}</{action}Result>" if result_inner is not None else ""
+    body = (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        f'<{action}Response xmlns="{IAM_XML_NS}">{result}'
+        f"<ResponseMetadata><RequestId>{_iam_request_id()}</RequestId></ResponseMetadata>"
+        f"</{action}Response>"
+    )
+    return _xml_response(body, status)
+
+
+def _iam_query_error(code: str, message: str, status: int = 400) -> Response:
+    body = (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        f'<ErrorResponse xmlns="{IAM_XML_NS}"><Error><Type>Sender</Type>'
+        f"<Code>{xml_escape(code)}</Code><Message>{xml_escape(message)}</Message></Error>"
+        f"<RequestId>{_iam_request_id()}</RequestId></ErrorResponse>"
+    )
+    return _xml_response(body, status)
+
+
+def _iam_user_fields(user: dict) -> str:
+    name = user.get("user_name", "")
+    return (
+        f"<Path>{xml_escape(user.get('path', '/') or '/')}</Path>"
+        f"<UserName>{xml_escape(name)}</UserName>"
+        f"<UserId>{xml_escape(user.get('user_id', ''))}</UserId>"
+        f"<Arn>{xml_escape(_iam_user_arn(name))}</Arn>"
+        f"<CreateDate>{xml_escape(user.get('created', _now()))}</CreateDate>"
+    )
+
+
+def _iam_role_fields(role: dict) -> str:
+    from urllib.parse import quote as _urlquote
+
+    name = role.get("role_name", "")
+    doc = role.get("assume_role_policy_document", "") or ""
+    if isinstance(doc, (dict, list)):
+        doc = json.dumps(doc)
+    return (
+        f"<Path>{xml_escape(role.get('path', '/') or '/')}</Path>"
+        f"<RoleName>{xml_escape(name)}</RoleName>"
+        f"<RoleId>{xml_escape(role.get('role_id', ''))}</RoleId>"
+        f"<Arn>{xml_escape(_iam_role_arn(name))}</Arn>"
+        f"<CreateDate>{xml_escape(role.get('created', _now()))}</CreateDate>"
+        f"<AssumeRolePolicyDocument>{xml_escape(_urlquote(str(doc)))}</AssumeRolePolicyDocument>"
+    )
+
+
+def _iam_policy_arn(name: str) -> str:
+    return f"arn:aws:iam::{AWS_ACCOUNT_ID}:policy/{name}"
+
+
+def _iam_policy_fields(policy: dict) -> str:
+    name = policy.get("policy_name", "")
+    return (
+        f"<PolicyName>{xml_escape(name)}</PolicyName>"
+        f"<PolicyId>{xml_escape(policy.get('policy_id', ''))}</PolicyId>"
+        f"<Arn>{xml_escape(_iam_policy_arn(name))}</Arn>"
+        f"<DefaultVersionId>v1</DefaultVersionId>"
+        f"<CreateDate>{xml_escape(policy.get('created', _now()))}</CreateDate>"
+    )
+
+
+def _ns(**kwargs):
+    obj = type("Req", (), {})()
+    for key, value in kwargs.items():
+        setattr(obj, key, value)
+    return obj
+
+
+async def api_iam_query(request: Request) -> Response:
+    params = await _ec2_query_params(request)
+    action = str(params.get("Action", "")).strip()
+    try:
+        if action == "ListUsers":
+            members = "".join(f"<member>{_iam_user_fields(u)}</member>" for u in iam_state["users"].values())
+            return _iam_envelope("ListUsers", f"<IsTruncated>false</IsTruncated><Users>{members}</Users>")
+        if action == "CreateUser":
+            user = provider_aws_iam.api_iam_create_user(_ns(user_name=params.get("UserName", ""), path=params.get("Path", "/") or "/"))
+            return _iam_envelope("CreateUser", f"<User>{_iam_user_fields(user)}</User>")
+        if action == "GetUser":
+            user = _iam_find_user(params.get("UserName", ""))
+            if not user:
+                return _iam_query_error("NoSuchEntity", f"The user with name {params.get('UserName', '')} cannot be found.", 404)
+            return _iam_envelope("GetUser", f"<User>{_iam_user_fields(user)}</User>")
+        if action == "DeleteUser":
+            provider_aws_iam.api_iam_delete_user(params.get("UserName", ""))
+            return _iam_envelope("DeleteUser")
+        if action == "ListRoles":
+            members = "".join(f"<member>{_iam_role_fields(r)}</member>" for r in iam_state["roles"].values())
+            return _iam_envelope("ListRoles", f"<IsTruncated>false</IsTruncated><Roles>{members}</Roles>")
+        if action == "CreateRole":
+            role = provider_aws_iam.api_iam_create_role(_ns(role_name=params.get("RoleName", ""), path=params.get("Path", "/") or "/", assume_role_policy_document=params.get("AssumeRolePolicyDocument", ""), description=params.get("Description", "")))
+            return _iam_envelope("CreateRole", f"<Role>{_iam_role_fields(role)}</Role>")
+        if action == "GetRole":
+            target = next((r for r in iam_state["roles"].values() if params.get("RoleName", "") in {r.get("role_name", ""), r.get("role_id", "")}), None)
+            if not target:
+                return _iam_query_error("NoSuchEntity", f"The role with name {params.get('RoleName', '')} cannot be found.", 404)
+            return _iam_envelope("GetRole", f"<Role>{_iam_role_fields(target)}</Role>")
+        if action == "DeleteRole":
+            provider_aws_iam.api_iam_delete_role(params.get("RoleName", ""))
+            return _iam_envelope("DeleteRole")
+        if action == "ListPolicies":
+            members = "".join(f"<member>{_iam_policy_fields(p)}</member>" for p in iam_state["policies"].values())
+            return _iam_envelope("ListPolicies", f"<IsTruncated>false</IsTruncated><Policies>{members}</Policies>")
+        if action == "CreatePolicy":
+            raw_doc = params.get("PolicyDocument", "")
+            try:
+                doc = json.loads(raw_doc) if raw_doc else {}
+            except Exception:
+                doc = raw_doc
+            policy = provider_aws_iam.api_iam_create_policy(_ns(policy_name=params.get("PolicyName", ""), document=doc))
+            return _iam_envelope("CreatePolicy", f"<Policy>{_iam_policy_fields(policy)}</Policy>")
+        if action == "DeletePolicy":
+            name = params.get("PolicyArn", "").rsplit("/", 1)[-1]
+            target = next((pid for pid, p in iam_state["policies"].items() if p.get("policy_name") == name or pid == name), None)
+            if target:
+                provider_aws_iam.api_iam_delete_policy(target)
+            return _iam_envelope("DeletePolicy")
+    except HTTPException as exc:
+        detail = str(exc.detail)
+        code = detail.split(":", 1)[0].strip() or "ValidationError"
+        return _iam_query_error(code, detail, exc.status_code if exc.status_code >= 400 else 400)
+    if not action:
+        return _iam_query_error("MissingAction", "The request must contain the parameter Action.")
+    return _iam_query_error("InvalidAction", f"The action '{action}' is not implemented by the simulator.")
+
+
+async def api_sts_query(request: Request) -> Response:
+    params = await _ec2_query_params(request)
+    action = str(params.get("Action", "")).strip()
+    if action == "GetCallerIdentity":
+        body = (
+            '<?xml version="1.0" encoding="UTF-8"?>'
+            f'<GetCallerIdentityResponse xmlns="{STS_XML_NS}"><GetCallerIdentityResult>'
+            f"<Arn>{_iam_root_principal()}</Arn><UserId>AIDACLOUDLEARNSIMULATOR</UserId>"
+            f"<Account>{AWS_ACCOUNT_ID}</Account></GetCallerIdentityResult>"
+            f"<ResponseMetadata><RequestId>{_iam_request_id()}</RequestId></ResponseMetadata>"
+            "</GetCallerIdentityResponse>"
+        )
+        return _xml_response(body)
+    return _xml_response(
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        f'<ErrorResponse xmlns="{STS_XML_NS}"><Error><Type>Sender</Type><Code>InvalidAction</Code>'
+        f"<Message>Unsupported STS action '{xml_escape(action)}'.</Message></Error>"
+        f"<RequestId>{_iam_request_id()}</RequestId></ErrorResponse>",
+        400,
+    )
+
+
+_EC2_VPC_ACTIONS = {
+    "CreateVpc", "DescribeVpcs", "DeleteVpc",
+    "CreateSubnet", "DescribeSubnets", "DeleteSubnet",
+    "CreateSecurityGroup", "AuthorizeSecurityGroupIngress", "AuthorizeSecurityGroupEgress",
+    "CreateRouteTable", "DescribeRouteTables", "DeleteRouteTable",
+    "CreateRoute", "AssociateRouteTable", "DisassociateRouteTable",
+    "CreateInternetGateway", "DescribeInternetGateways", "AttachInternetGateway",
+}
+
+
+@app.post("/")
+async def aws_query_root(request: Request) -> Response:
+    """Root dispatch for real AWS SDK/CLI query + JSON protocol requests."""
+    service = _aws_query_target_service(request)
+    if service == "ec2":
+        # VPC/networking actions sign under the ec2 service scope but are served
+        # by the dedicated VPC query handler.
+        params = await _ec2_query_params(request)
+        if str(params.get("Action", "")).strip() in _EC2_VPC_ACTIONS:
+            return await api_vpc_query(request)
+        return await api_ec2_query(request)
+    if service == "sqs":
+        return await api_sqs_query(request)
+    if service == "rds":
+        return await api_rds_query(request)
+    if service == "dynamodb":
+        return await api_dynamodb_aws(request)
+    if service == "iam":
+        return await api_iam_query(request)
+    if service == "sts":
+        return await api_sts_query(request)
+    params = await _ec2_query_params(request)
+    action = str(params.get("Action", "")).strip()
+    return _error_xml("InvalidAction", f"Root dispatch could not route service={service or 'unknown'!r} action={action or 'unknown'!r}.", "/", 400)
 
 
 # ── S3 REST API — root level ─────────────────────────────────────────────────

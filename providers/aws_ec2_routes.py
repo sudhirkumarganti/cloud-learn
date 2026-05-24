@@ -15,16 +15,8 @@ def register(app, h) -> None:
         return _server().api_ec2_amis()
 
     @app.get("/api/ec2/runtime")
-    def api_ec2_runtime():
-        return _server().api_ec2_runtime()
-
-    @app.get("/api/ec2/runtime/docker")
-    def api_ec2_runtime_docker():
-        return _server().api_ec2_runtime_docker()
-
-    @app.post("/api/ec2/runtime/docker/bootstrap")
-    def api_ec2_runtime_docker_bootstrap():
-        return _server().api_ec2_runtime_docker_bootstrap()
+    def api_ec2_runtime(request: Request):
+        return _server().api_ec2_runtime(request.headers.get("x-cloudlearn-host-os", ""))
 
     @app.get("/api/ec2/runtime/lxd")
     def api_ec2_runtime_lxd():
@@ -60,7 +52,11 @@ def register(app, h) -> None:
         if not isinstance(payload, dict):
             payload = {}
         model = _server().EC2InstanceRequest(**payload)
-        return _server().api_ec2_create_instance(model, auto_start=auto_start)
+        return _server().api_ec2_create_instance(
+            model,
+            auto_start=auto_start,
+            host_os_hint=request.headers.get("x-cloudlearn-host-os", ""),
+        )
 
     @app.post("/api/ec2/instances/{instance_id}/start")
     def api_ec2_start_instance(instance_id: str):
@@ -105,11 +101,3 @@ def register(app, h) -> None:
             payload = {}
         model = _server().EC2ConsoleCommandRequest(**payload)
         return _server().api_ec2_console_exec(instance_id, model)
-
-    @app.get("/api/ec2/sample-apps")
-    def api_ec2_sample_apps():
-        return _server().api_ec2_sample_apps()
-
-    @app.post("/api/ec2/instances/{instance_id}/sample-apps/{app_id}/deploy")
-    def api_ec2_deploy_sample_app(instance_id: str, app_id: str):
-        return _server().api_ec2_deploy_sample_app(instance_id, app_id)

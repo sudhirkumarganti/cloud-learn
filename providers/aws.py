@@ -27,9 +27,13 @@ def tool_response(tool: str) -> dict:
             "help": [
                 "aws s3 ls --endpoint-url http://127.0.0.1:9000",
                 "aws ec2 describe-instances --endpoint-url http://127.0.0.1:9000",
+                "aws iam list-users --endpoint-url http://127.0.0.1:9000",
+                "aws sqs list-queues --endpoint-url http://127.0.0.1:9000",
+                "aws dynamodb list-tables --endpoint-url http://127.0.0.1:9000",
                 "aws lambda list-functions --endpoint-url http://127.0.0.1:9000",
+                "aws apigateway get-rest-apis --endpoint-url http://127.0.0.1:9000",
             ],
-            "notes": "This simulator accepts AWS-style request/response shapes locally.",
+            "notes": "This simulator accepts AWS-style request/response shapes locally across S3, IAM, EC2, Lambda, VPC, RDS, SQS, DynamoDB, and API Gateway.",
             "provider_surface": provider_info.get("surface", {}),
         }
     if tool == "sdk/java":

@@ -25,8 +25,8 @@ AWS_SERVICE_CAPABILITIES: list[dict] = [
         "id": "ec2",
         "name": "EC2",
         "status": "integrated",
-        "summary": "Instances, runtime bootstrap, console access, sample apps, and AWS query aliases are available.",
-        "routes": ["/api/ec2/amis", "/api/ec2/runtime", "/api/ec2/instances", "/api/ec2/instances/{instance_id}/console", "/api/ec2/sample-apps"],
+        "summary": "Instances, runtime bootstrap, and console access are available.",
+        "routes": ["/api/ec2/amis", "/api/ec2/runtime", "/api/ec2/instances", "/api/ec2/instances/{instance_id}/console"],
     },
     {
         "id": "lambda",

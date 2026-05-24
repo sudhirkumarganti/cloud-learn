@@ -1,88 +1,500 @@
 #!/usr/bin/env bash
+if [ -z "${BASH_VERSION:-}" ]; then
+  if command -v bash >/dev/null 2>&1; then
+    exec bash "$0" "$@"
+  fi
+  printf '%s\n' 'bash is required to run cloud-learn' >&2
+  exit 1
+fi
+
 set -euo pipefail
 
 SCRIPT_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="${CLOUD_LEARN_HOME:-$(cd "${SCRIPT_PATH}/.." && pwd)}"
 PROJECT_NAME="${CLOUD_LEARN_PROJECT_NAME:-cloud-learn}"
-COMPOSE_FILE="${CLOUD_LEARN_COMPOSE_FILE:-${ROOT_DIR}/docker-compose.yml}"
+RUNTIME_CONTEXT="${CLOUD_LEARN_RUNTIME_CONTEXT:-outer}"
+COMPOSE_FILE="${CLOUD_LEARN_COMPOSE_FILE:-${ROOT_DIR}/docker-compose.appliance.yml}"
 PARENT_OS="${CLOUD_LEARN_PARENT_OS:-$(uname -s)}"
-RUNTIME_BRIDGE_HOST="${CLOUD_LEARN_RUNTIME_BRIDGE_HOST:-127.0.0.1}"
-RUNTIME_BRIDGE_PORT="${CLOUD_LEARN_RUNTIME_BRIDGE_PORT:-9171}"
-RUNTIME_BRIDGE_URL="${CLOUD_LEARN_RUNTIME_BRIDGE_URL:-http://host.docker.internal:${RUNTIME_BRIDGE_PORT}}"
+DISTRIBUTION_MODE="appliance"
+APPLIANCE_NAME="${CLOUD_LEARN_APPLIANCE_NAME:-cloudlearn-appliance}"
+APPLIANCE_DIR="${CLOUD_LEARN_APPLIANCE_DIR:-${ROOT_DIR}/.cloudlearn-appliance}"
+APPLIANCE_IMAGE="${CLOUD_LEARN_APPLIANCE_IMAGE:-24.04}"
+APPLIANCE_CPUS="${CLOUD_LEARN_APPLIANCE_CPUS:-4}"
+APPLIANCE_MEMORY="${CLOUD_LEARN_APPLIANCE_MEMORY:-8G}"
+APPLIANCE_DISK="${CLOUD_LEARN_APPLIANCE_DISK:-32G}"
+APPLIANCE_WORKSPACE="${CLOUD_LEARN_APPLIANCE_WORKSPACE:-/workspace/cloud-learn}"
+HOST_SIZING_FILE_NAME="host-sizing-report.json"
 
 case "$PARENT_OS" in
   Darwin) PARENT_OS="darwin" ;;
   Linux) PARENT_OS="linux" ;;
   MINGW*|MSYS*|CYGWIN*|Windows_NT) PARENT_OS="windows" ;;
 esac
-export CLOUDLEARN_PARENT_OS="$PARENT_OS"
-export CLOUDLEARN_RUNTIME_BRIDGE_URL="$RUNTIME_BRIDGE_URL"
+case "$RUNTIME_CONTEXT" in
+  outer|inner) ;;
+  *) RUNTIME_CONTEXT="outer" ;;
+esac
+export CLOUDLEARN_DISTRIBUTION_MODE="$DISTRIBUTION_MODE"
+export CLOUDLEARN_RUNTIME_CONTEXT="$RUNTIME_CONTEXT"
 
 usage() {
   cat <<'EOF'
 cloud-learn - local cloud simulator launcher
 
 Usage:
-  cloud-learn up [--detach]
-  cloud-learn dev up [--detach]
-  cloud-learn dev down
-  cloud-learn dev restart
-  cloud-learn dev logs [service]
-  cloud-learn dev status
-  cloud-learn dev build
+  cloud-learn up
   cloud-learn down
+  cloud-learn stop
+  cloud-learn force-stop
+  cloud-learn kill
   cloud-learn restart
-  cloud-learn logs [service]
   cloud-learn status
-  cloud-learn build
   cloud-learn doctor
   cloud-learn help
 
 Environment:
-  CLOUD_LEARN_HOME         Root directory containing docker-compose.yml
+  CLOUD_LEARN_HOME         Root directory containing CloudLearn sources
   CLOUD_LEARN_COMPOSE_FILE Alternate compose file path
   CLOUD_LEARN_PROJECT_NAME Compose project name (default: cloud-learn)
-  CLOUDLEARN_PARENT_OS     Parent host OS forwarded into the app container
-  CLOUDLEARN_RUNTIME_BRIDGE_URL Host runtime bridge URL forwarded into the app container
+  CLOUD_LEARN_RUNTIME_CONTEXT outer=manage appliance VM, inner=start stack in VM
+  CLOUD_LEARN_APPLIANCE_NAME Multipass appliance VM name (default: cloudlearn-appliance)
+  CLOUD_LEARN_APPLIANCE_DIR Appliance bootstrap directory
+  CLOUD_LEARN_APPLIANCE_IMAGE Multipass image tag for the appliance VM
+  CLOUD_LEARN_APPLIANCE_CPUS Multipass CPU count for the appliance VM
+  CLOUD_LEARN_APPLIANCE_MEMORY Multipass memory size for the appliance VM
+  CLOUD_LEARN_APPLIANCE_DISK Multipass disk size for the appliance VM
+  CLOUD_LEARN_APPLIANCE_WORKSPACE Workspace path mounted into the appliance VM
 
 Default mode:
-  Local compose build for development. No Docker Hub images are required.
-  The launcher will try to install Docker Compose automatically on supported hosts.
-  Host OS is forwarded as CLOUDLEARN_PARENT_OS so the UI can filter AMIs correctly.
-  A local runtime bridge is started on the host and forwarded as CLOUDLEARN_RUNTIME_BRIDGE_URL.
+  The launcher starts a single Multipass VM appliance and then starts the
+  full CloudLearn stack inside that VM.
 EOF
 }
 
-runtime_bridge_health() {
-  if command -v curl >/dev/null 2>&1; then
-    curl -fsS "http://${RUNTIME_BRIDGE_HOST}:${RUNTIME_BRIDGE_PORT}/health" >/dev/null 2>&1
-    return $?
+write_appliance_manifest() {
+  mkdir -p "$APPLIANCE_DIR"
+  if ! command -v python3 >/dev/null 2>&1; then
+    printf '%s\n' 'python3 is required to write the appliance manifest' >&2
+    return 1
+  fi
+  python3 - "$APPLIANCE_DIR/appliance-bootstrap.json" "$APPLIANCE_NAME" "$APPLIANCE_IMAGE" "$APPLIANCE_CPUS" "$APPLIANCE_MEMORY" "$APPLIANCE_DISK" "$APPLIANCE_WORKSPACE" "$PARENT_OS" "$DISTRIBUTION_MODE" <<'PY'
+import json
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+path, name, image, cpus, memory, disk, workspace, host_os, distribution_mode = sys.argv[1:10]
+payload = {
+    "name": name,
+    "image": image,
+    "cpus": int(cpus),
+    "memory": memory,
+    "disk": disk,
+    "workspace": workspace,
+    "host_os": host_os,
+    "distribution_mode": distribution_mode,
+    "created_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z"),
+}
+Path(path).write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+PY
+}
+
+appliance_ssh_identity_public_key() {
+  local private_key="${HOME}/.ssh/cloudlearn_multipass_ed25519"
+  local public_key="${private_key}.pub"
+  if [ ! -f "$private_key" ] || [ ! -f "$public_key" ]; then
+    mkdir -p "$(dirname "$private_key")"
+    if ! ssh-keygen -t ed25519 -N "" -f "$private_key" -C "cloudlearn" >/dev/null 2>&1; then
+      return 1
+    fi
+  fi
+  if [ -f "$public_key" ]; then
+    cat "$public_key"
+  fi
+}
+
+write_appliance_host_sizing() {
+  mkdir -p "$APPLIANCE_DIR"
+  if ! command -v python3 >/dev/null 2>&1; then
+    printf '%s\n' 'python3 is required to write the host sizing manifest' >&2
+    return 1
+  fi
+  python3 - "$APPLIANCE_DIR/$HOST_SIZING_FILE_NAME" "$ROOT_DIR" "$PARENT_OS" <<'PY'
+import json
+import os
+import platform
+import shutil
+import socket
+import subprocess
+import sys
+from pathlib import Path
+from datetime import datetime, timezone
+
+path, root_dir, host_os = sys.argv[1:4]
+host_os = (host_os or platform.system()).strip().lower()
+
+def gib(value):
+    return round(float(value or 0) / (1024 ** 3), 1)
+
+def memory_bytes():
+    try:
+        if host_os == "darwin":
+            return int(subprocess.check_output(["sysctl", "-n", "hw.memsize"], text=True).strip())
+        if host_os == "linux":
+            with open("/proc/meminfo", "r", encoding="utf-8") as fh:
+                for line in fh:
+                    if line.startswith("MemTotal:"):
+                        parts = line.split()
+                        if len(parts) >= 2:
+                            return int(parts[1]) * 1024
+            try:
+                return int(os.sysconf("SC_PAGE_SIZE")) * int(os.sysconf("SC_PHYS_PAGES"))
+            except Exception:
+                return 0
+    except Exception:
+        return 0
+    return 0
+
+def recommend(cpu_count, memory_gib, disk_total_gib, disk_free_gib):
+    if memory_gib <= 4:
+        appliance_memory = 2
+        appliance_disk = 24
+    elif memory_gib <= 8:
+        appliance_memory = 4
+        appliance_disk = 32
+    elif memory_gib <= 16:
+        appliance_memory = 8
+        appliance_disk = 32
+    elif memory_gib <= 32:
+        appliance_memory = 12
+        appliance_disk = 48
+    elif memory_gib <= 64:
+        appliance_memory = 16
+        appliance_disk = 64
+    else:
+        appliance_memory = min(24, max(16, int(round(memory_gib * 0.25))))
+        appliance_disk = min(96, max(64, int(round(disk_total_gib * 0.12)) if disk_total_gib else 64))
+    appliance_cpu = max(1, min(max(cpu_count - 1, 1), int(round(appliance_memory / 2)) or 1))
+    appliance_disk = int(min(max(appliance_disk, 24), max(24, int(round(disk_free_gib * 0.25)) or appliance_disk)))
+    reserve = 1.5 if memory_gib <= 8 else 2.0 if memory_gib <= 16 else 2.5 if memory_gib <= 32 else 3.0
+    available = max(0.0, float(appliance_memory) - reserve)
+    return {
+        "appliance": {
+            "vcpus": appliance_cpu,
+            "memory_gib": appliance_memory,
+            "disk_gib": appliance_disk,
+        },
+        "lxd_budget": {
+            "platform_reserve_gib": reserve,
+            "small_instances": int(available // 0.5),
+            "medium_instances": int(available // 1.0),
+            "heavy_instances": int(available // 2.0),
+        },
+    }
+
+cpu_count = os.cpu_count() or 1
+disk_usage = shutil.disk_usage(root_dir)
+mem_bytes = memory_bytes()
+mem_gib = gib(mem_bytes)
+disk_total_gib = gib(disk_usage.total)
+disk_free_gib = gib(disk_usage.free)
+network_interfaces = []
+try:
+    network_interfaces = [name for _, name in socket.if_nameindex() if str(name).strip()]
+except Exception:
+    network_interfaces = []
+
+payload = {
+    "source": "launcher",
+    "host_os": host_os,
+    "cpu_count": int(cpu_count),
+    "memory_bytes": int(mem_bytes),
+    "memory_gib": mem_gib,
+    "disk_total_bytes": int(disk_usage.total),
+    "disk_used_bytes": int(disk_usage.used),
+    "disk_free_bytes": int(disk_usage.free),
+    "disk_total_gib": disk_total_gib,
+    "disk_free_gib": disk_free_gib,
+    "network_interfaces": network_interfaces,
+    "network_interface_count": len(network_interfaces),
+    "recommended": recommend(int(cpu_count), mem_gib, disk_total_gib, disk_free_gib),
+    "warnings": [
+        "This host is small for a full appliance. Keep the VM at minimum size and avoid heavy sandboxes."
+    ] if int(cpu_count) < 4 or mem_gib < 8 else [],
+    "checked_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z"),
+}
+Path(path).write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+PY
+}
+
+appliance_sync_host_sizing_into_vm() {
+  local compose
+  compose="$(appliance_multipass_cmd)"
+  local source_path="${APPLIANCE_WORKSPACE}/.cloudlearn-appliance/${HOST_SIZING_FILE_NAME}"
+  progress "==> Appliance: syncing host sizing into VM-local storage"
+  "$compose" exec "$APPLIANCE_NAME" -- /bin/bash -lc "sudo mkdir -p /var/lib/cloudlearn && sudo install -m 644 '$source_path' /var/lib/cloudlearn/${HOST_SIZING_FILE_NAME}"
+}
+
+write_appliance_cloud_init() {
+  mkdir -p "$APPLIANCE_DIR"
+  local public_key
+  public_key="$(appliance_ssh_identity_public_key 2>/dev/null || true)"
+  cat > "$APPLIANCE_DIR/cloud-init.yaml" <<EOF
+#cloud-config
+package_update: true
+package_upgrade: true
+$(if [ -n "$public_key" ]; then printf 'ssh_authorized_keys:\n  - %s\n' "$public_key"; fi)
+packages:
+  - python3
+  - python3-pip
+  - curl
+  - ca-certificates
+  - docker.io
+  - docker-compose-v2
+runcmd:
+  - [ bash, -lc, "systemctl enable --now docker" ]
+  - [ bash, -lc, "usermod -aG docker ubuntu || true" ]
+  - [ bash, -lc, "update-alternatives --set docker-compose /usr/libexec/docker/cli-plugins/docker-compose || true" ]
+  - [ bash, -lc, "snap install lxd || true" ]
+  - [ bash, -lc, "usermod -aG lxd ubuntu || true" ]
+  - [ bash, -lc, "cat >/tmp/cloudlearn-lxd-preseed.yaml <<'EOF'\nconfig: {}\nnetworks:\n- name: lxdbr0\n  type: bridge\n  config:\n    ipv4.address: auto\n    ipv4.nat: \"true\"\n    ipv6.address: auto\n    ipv6.nat: \"true\"\nstorage_pools:\n- name: default\n  driver: dir\nprofiles:\n- name: default\n  description: Default LXD profile\n  config: {}\n  devices:\n    root:\n      type: disk\n      pool: default\n      path: /\n    eth0:\n      type: nic\n      network: lxdbr0\n      name: eth0\nEOF\nlxd init --preseed < /tmp/cloudlearn-lxd-preseed.yaml || true" ]
+  - [ bash, -lc, "mkdir -p ${APPLIANCE_WORKSPACE}" ]
+  - [ bash, -lc, "sudo mkdir -p /var/lib/cloudlearn/deployments" ]
+EOF
+}
+
+progress() {
+  printf '%s\n' "$*" >&2
+}
+
+appliance_multipass_cmd() {
+  if command -v multipass >/dev/null 2>&1; then
+    printf 'multipass'
+    return 0
   fi
   return 1
 }
 
-start_runtime_bridge() {
-  if runtime_bridge_health; then
-    return 0
+appliance_multipass_json() {
+  local compose
+  compose="$(appliance_multipass_cmd)"
+  if command -v python3 >/dev/null 2>&1; then
+    python3 - "$compose" "$@" <<'PY'
+import subprocess
+import sys
+
+cmd = sys.argv[1:]
+try:
+    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=2)
+except subprocess.TimeoutExpired:
+    raise SystemExit(124)
+sys.stdout.write(proc.stdout)
+if proc.returncode != 0:
+    raise SystemExit(proc.returncode)
+PY
+    return $?
   fi
-  if ! command -v python3 >/dev/null 2>&1; then
-    printf '%s\n' 'python3 is required to start the local runtime bridge' >&2
-    return 1
-  fi
-  if [ ! -f "${ROOT_DIR}/core/runtime_bridge.py" ]; then
-    printf '%s\n' "runtime bridge script not found: ${ROOT_DIR}/core/runtime_bridge.py" >&2
-    return 1
-  fi
-  nohup python3 "${ROOT_DIR}/core/runtime_bridge.py" --host "${RUNTIME_BRIDGE_HOST}" --port "${RUNTIME_BRIDGE_PORT}" >/tmp/cloudlearn-runtime-bridge.log 2>&1 &
-  local waited=0
-  while [ "$waited" -lt 20 ]; do
-    if runtime_bridge_health; then
+  "$compose" "$@"
+}
+
+start_multipass_host() {
+  case "$PARENT_OS" in
+    darwin)
+      if command -v open >/dev/null 2>&1; then
+        open -gj -a Multipass >/dev/null 2>&1 || true
+      fi
+      ;;
+    linux)
+      if command -v systemctl >/dev/null 2>&1; then
+        if [ "$(id -u)" -eq 0 ]; then
+          systemctl start snap.multipass.multipassd >/dev/null 2>&1 || true
+        elif command -v sudo >/dev/null 2>&1; then
+          sudo systemctl start snap.multipass.multipassd >/dev/null 2>&1 || true
+        fi
+      fi
+      if command -v snap >/dev/null 2>&1; then
+        if [ "$(id -u)" -eq 0 ]; then
+          snap start multipass >/dev/null 2>&1 || true
+        elif command -v sudo >/dev/null 2>&1; then
+          sudo snap start multipass >/dev/null 2>&1 || true
+        fi
+      fi
+      ;;
+  esac
+}
+
+appliance_multipass_ready() {
+  local compose
+  compose="$(appliance_multipass_cmd)"
+  local max_wait="${CLOUD_LEARN_MULTIPASS_WAIT_SECONDS:-8}"
+  local start_epoch
+  start_epoch="$(date +%s)"
+  local deadline=$((start_epoch + max_wait))
+  while [ "$(date +%s)" -lt "$deadline" ]; do
+    progress "==> Multipass: probing daemon/socket"
+    if appliance_multipass_json list --format json >/dev/null 2>&1; then
       return 0
     fi
-    sleep 1
+    if [ "$(date +%s)" -eq "$start_epoch" ]; then
+      progress "==> Multipass: daemon/socket not reachable, attempting host auto-start"
+      start_multipass_host
+    fi
+    sleep 3
+    local elapsed
+    elapsed=$(( $(date +%s) - start_epoch ))
+    progress "==> Multipass: waiting for daemon/socket (${elapsed}s)"
+  done
+  return 1
+}
+
+appliance_instance_state() {
+  local payload
+  payload="$(appliance_multipass_json list --format json 2>/dev/null || true)"
+  python3 - "$APPLIANCE_NAME" "$payload" <<'PY'
+import json
+import sys
+
+name = sys.argv[1]
+raw = sys.argv[2] if len(sys.argv) > 2 else ""
+try:
+    payload = json.loads(raw) if raw else {}
+except Exception:
+    print("")
+    raise SystemExit(0)
+
+def walk(node):
+    if isinstance(node, dict):
+        node_name = str(node.get("name") or "").strip()
+        if node_name == name:
+            state = str(node.get("state") or node.get("status") or "").strip().lower()
+            print(state)
+            raise SystemExit(0)
+        for value in node.values():
+            walk(value)
+    elif isinstance(node, list):
+        for item in node:
+            walk(item)
+
+walk(payload)
+print("")
+PY
+}
+
+appliance_instance_exists() {
+  local payload
+  payload="$(appliance_multipass_json list --format json 2>/dev/null || true)"
+  python3 - "$APPLIANCE_NAME" "$payload" <<'PY'
+import json
+import sys
+
+name = sys.argv[1]
+raw = sys.argv[2] if len(sys.argv) > 2 else ""
+try:
+    payload = json.loads(raw) if raw else {}
+except Exception:
+    raise SystemExit(1)
+
+def walk(node):
+    if isinstance(node, dict):
+        node_name = str(node.get("name") or "").strip()
+        if node_name == name:
+            raise SystemExit(0)
+        for value in node.values():
+            walk(value)
+    elif isinstance(node, list):
+        for item in node:
+            walk(item)
+
+walk(payload)
+raise SystemExit(1)
+PY
+}
+
+appliance_launch_vm() {
+  local compose
+  compose="$(appliance_multipass_cmd)"
+  write_appliance_manifest
+  write_appliance_host_sizing
+  write_appliance_cloud_init
+  if ! appliance_multipass_ready; then
+    printf '%s\n' 'Multipass is installed, but the daemon/socket is not reachable. Open or restart Multipass on the host and retry.' >&2
+    return 1
+  fi
+  progress "==> Appliance: checking VM state"
+  local state
+  state="$(appliance_instance_state)"
+  if appliance_instance_exists; then
+    progress "==> Appliance: existing VM detected (${state:-unknown}), starting it if needed"
+    case "$state" in
+      running)
+        ;;
+      stopped|suspended)
+      progress "==> Appliance: starting Multipass VM ${APPLIANCE_NAME}"
+      "$compose" start "$APPLIANCE_NAME"
+        ;;
+      *)
+        progress "==> Appliance: VM state is uncertain, skipping start and continuing"
+        ;;
+    esac
+  else
+    progress "==> Appliance: launching Multipass VM ${APPLIANCE_NAME}"
+    "$compose" launch "$APPLIANCE_IMAGE" --name "$APPLIANCE_NAME" --cpus "$APPLIANCE_CPUS" --memory "$APPLIANCE_MEMORY" --disk "$APPLIANCE_DISK" --cloud-init "$APPLIANCE_DIR/cloud-init.yaml"
+  fi
+  progress "==> Appliance: mounting workspace into VM"
+  "$compose" mount "$ROOT_DIR" "$APPLIANCE_NAME:$APPLIANCE_WORKSPACE" >/dev/null 2>&1 || true
+  appliance_sync_host_sizing_into_vm
+  progress "==> Appliance: waiting for cloud-init"
+  "$compose" exec "$APPLIANCE_NAME" -- /bin/bash -lc "cloud-init status --wait >/dev/null 2>&1 || true" >/dev/null 2>&1 || true
+}
+
+appliance_exec_launcher() {
+  local compose
+  compose="$(appliance_multipass_cmd)"
+  progress "==> Appliance: starting inner CloudLearn stack"
+  "$compose" exec "$APPLIANCE_NAME" -- /bin/bash -lc "sudo mkdir -p /var/lib/cloudlearn/deployments && cd ${APPLIANCE_WORKSPACE} && CLOUD_LEARN_HOME=${APPLIANCE_WORKSPACE} CLOUD_LEARN_RUNTIME_CONTEXT=inner CLOUD_LEARN_DISTRIBUTION_MODE=appliance CLOUD_LEARN_COMPOSE_FILE=${APPLIANCE_WORKSPACE}/docker-compose.appliance.yml bash ./scripts/cloud-learn up --detach"
+}
+
+appliance_health_check() {
+  local compose
+  compose="$(appliance_multipass_cmd)"
+  local waited=0
+  while [ "$waited" -lt 60 ]; do
+    if [ $((waited % 10)) -eq 0 ]; then
+      progress "==> Appliance: waiting for simulator and CloudSim to become reachable (${waited}s)"
+    fi
+    if "$compose" exec "$APPLIANCE_NAME" -- /bin/bash -lc "curl -fsS http://127.0.0.1:9171/health >/dev/null && curl -fsS http://127.0.0.1:9000/healthz >/dev/null && curl -fsS http://127.0.0.1:9010/health >/dev/null" >/dev/null 2>&1; then
+      progress "==> Appliance: runtime bridge, simulator, and CloudSim are healthy"
+      return 0
+    fi
+    sleep 2
     waited=$((waited + 1))
   done
-  printf '%s\n' 'runtime bridge did not become ready in time' >&2
+  printf '%s\n' 'appliance health check failed: runtime bridge, simulator, or CloudSim is not reachable inside the VM' >&2
+  return 1
+}
+
+appliance_start_runtime_bridge() {
+  local compose
+  compose="$(appliance_multipass_cmd)"
+  local bridge_script="${APPLIANCE_WORKSPACE}/core/runtime_bridge.py"
+  progress "==> Appliance: starting VM-local runtime bridge"
+  "$compose" exec "$APPLIANCE_NAME" -- /bin/bash -lc "set -e; if curl -fsS http://127.0.0.1:9171/health >/dev/null 2>&1; then exit 0; fi; nohup python3 \"$bridge_script\" --host 0.0.0.0 --port 9171 >/tmp/cloudlearn-runtime-bridge.log 2>&1 & for i in \$(seq 1 30); do if curl -fsS http://127.0.0.1:9171/health >/dev/null 2>&1; then exit 0; fi; sleep 1; done; echo 'runtime bridge failed to start' >&2; exit 1"
+}
+
+wait_for_inner_compose() {
+  local waited=0
+  local max_wait="${CLOUD_LEARN_INNER_COMPOSE_WAIT_SECONDS:-180}"
+  while [ "$waited" -lt "$max_wait" ]; do
+    if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
+      return 0
+    fi
+    if command -v docker-compose >/dev/null 2>&1 && docker-compose version >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 2
+    waited=$((waited + 2))
+  done
+  printf '%s\n' 'docker compose is not available inside the appliance VM yet' >&2
   return 1
 }
 
@@ -151,78 +563,61 @@ install_compose() {
 }
 
 ensure_prereqs() {
-  local missing=0
-  local compose_ready=0
-
-  if ! command -v docker >/dev/null 2>&1; then
-    printf '%s\n' 'docker is not installed or not on PATH' >&2
-    missing=1
-  fi
-
-  if compose_cmd >/dev/null 2>&1; then
-    compose_ready=1
-  else
-    printf '%s\n' 'docker compose is not available; attempting automatic install...' >&2
-    if install_compose; then
-      if compose_cmd >/dev/null 2>&1; then
-        compose_ready=1
-      fi
-    fi
-    if [ "$compose_ready" -ne 1 ]; then
-      printf '%s\n' 'docker compose install failed or is still unavailable' >&2
+  if [ "$RUNTIME_CONTEXT" = "inner" ]; then
+    wait_for_inner_compose
+    local missing=0
+    if ! command -v docker >/dev/null 2>&1; then
+      printf '%s\n' 'docker is not installed or not on PATH' >&2
       missing=1
     fi
+    if ! compose_cmd >/dev/null 2>&1; then
+      printf '%s\n' 'docker compose is not available' >&2
+      missing=1
+    fi
+    if [ ! -f "$COMPOSE_FILE" ]; then
+      printf 'compose file not found: %s\n' "$COMPOSE_FILE" >&2
+      missing=1
+    fi
+    return "$missing"
   fi
 
-  if ! compose_backend_available; then
-    printf '%s\n' 'docker engine is not reachable; start Docker Desktop or the docker service' >&2
-    missing=1
+  if ! command -v multipass >/dev/null 2>&1; then
+    printf '%s\n' 'multipass is not installed or not on PATH' >&2
+    return 1
   fi
-
-  if [ ! -f "$COMPOSE_FILE" ]; then
-    printf 'compose file not found: %s\n' "$COMPOSE_FILE" >&2
-    missing=1
-  fi
-
-  return "$missing"
+  return 0
 }
 
 doctor() {
   printf 'cloud-learn root: %s\n' "$ROOT_DIR"
   printf 'compose file: %s\n' "$COMPOSE_FILE"
-  if command -v docker >/dev/null 2>&1; then
-    printf 'docker: available\n'
+  printf 'runtime context: %s\n' "$RUNTIME_CONTEXT"
+  if [ "$RUNTIME_CONTEXT" = "inner" ]; then
+    if command -v docker >/dev/null 2>&1; then
+      printf 'docker: available\n'
+    else
+      printf 'docker: missing\n'
+    fi
+    if compose_cmd >/dev/null 2>&1; then
+      printf 'compose: available\n'
+    else
+      printf 'compose: missing\n'
+    fi
+    if compose_backend_available; then
+      printf 'engine: reachable\n'
+    else
+      printf 'engine: unreachable\n'
+    fi
+    printf 'mode: appliance inner stack\n'
   else
-    printf 'docker: missing\n'
+    if command -v multipass >/dev/null 2>&1; then
+      printf 'multipass: available\n'
+    else
+      printf 'multipass: missing\n'
+    fi
+    printf 'mode: appliance launcher\n'
   fi
-  if compose_cmd >/dev/null 2>&1; then
-    printf 'compose: available\n'
-  else
-    printf 'compose: missing\n'
-  fi
-  if compose_backend_available; then
-    printf 'engine: reachable\n'
-  else
-    printf 'engine: unreachable\n'
-  fi
-  if command -v multipass >/dev/null 2>&1; then
-    printf 'multipass: available\n'
-  else
-    printf 'multipass: missing\n'
-  fi
-  if command -v lxc >/dev/null 2>&1; then
-    printf 'lxd: available\n'
-  else
-    printf 'lxd: missing\n'
-  fi
-  if runtime_bridge_health; then
-    printf 'runtime bridge: available\n'
-  else
-    printf 'runtime bridge: missing\n'
-  fi
-  printf 'runtime: sandboxed\n'
-  printf 'parent os: %s\n' "$CLOUDLEARN_PARENT_OS"
-  printf 'mode: local build via compose\n'
+  printf 'distribution mode: %s\n' "$CLOUDLEARN_DISTRIBUTION_MODE"
 }
 
 run_compose() {
@@ -255,12 +650,7 @@ cleanup_legacy_projects() {
   done
 }
 
-cmd="${1:-help}"
-if [ "$#" -gt 0 ]; then
-  shift
-fi
-
-run_dev() {
+inner_run() {
   local subcmd="${1:-help}"
   if [ "$#" -gt 0 ]; then
     shift
@@ -268,8 +658,6 @@ run_dev() {
   case "$subcmd" in
     up)
       ensure_prereqs
-      start_runtime_bridge
-      cleanup_legacy_projects
       run_compose up --build --force-recreate "$@"
       ;;
     down)
@@ -279,10 +667,6 @@ run_dev() {
     restart)
       ensure_prereqs
       run_compose restart "$@"
-      ;;
-    logs)
-      ensure_prereqs
-      run_compose logs -f "$@"
       ;;
     status|ps)
       ensure_prereqs
@@ -296,52 +680,75 @@ run_dev() {
       usage
       ;;
     *)
-      printf 'Unknown dev command: %s\n\n' "$subcmd" >&2
+      printf 'Unknown inner command: %s\n\n' "$subcmd" >&2
       usage >&2
       exit 2
       ;;
   esac
 }
 
-case "$cmd" in
-  dev)
-    run_dev "$@"
-    ;;
+outer_run() {
+  local subcmd="${1:-help}"
+  if [ "$#" -gt 0 ]; then
+    shift
+  fi
+  case "$subcmd" in
     up)
       ensure_prereqs
-      start_runtime_bridge
-      cleanup_legacy_projects
-      run_compose up --build --force-recreate "$@"
+      write_appliance_manifest
+      appliance_launch_vm
+      appliance_start_runtime_bridge
+      appliance_exec_launcher
+      appliance_health_check
       ;;
-  down)
-    ensure_prereqs
-    run_compose down "$@"
-    ;;
-  restart)
-    ensure_prereqs
-    run_compose restart "$@"
-    ;;
-  logs)
-    ensure_prereqs
-    run_compose logs -f "$@"
-    ;;
-  status|ps)
-    ensure_prereqs
-    run_compose ps "$@"
-    ;;
-  build)
-    ensure_prereqs
-    run_compose build "$@"
-    ;;
-  doctor)
-    doctor
-    ;;
-  help|-h|--help)
-    usage
-    ;;
-  *)
-    printf 'Unknown command: %s\n\n' "$cmd" >&2
-    usage >&2
-    exit 2
-    ;;
-esac
+    down|stop)
+      ensure_prereqs
+      if command -v multipass >/dev/null 2>&1; then
+        multipass stop "$APPLIANCE_NAME" >/dev/null 2>&1 || true
+      fi
+      ;;
+    force-stop|kill)
+      ensure_prereqs
+      if command -v multipass >/dev/null 2>&1; then
+        multipass stop --force "$APPLIANCE_NAME" >/dev/null 2>&1 || true
+      fi
+      ;;
+    restart)
+      ensure_prereqs
+      if command -v multipass >/dev/null 2>&1; then
+        multipass restart "$APPLIANCE_NAME" >/dev/null 2>&1 || true
+      fi
+      appliance_start_runtime_bridge
+      appliance_exec_launcher
+      appliance_health_check
+      ;;
+    status|ps)
+      ensure_prereqs
+      if command -v multipass >/dev/null 2>&1; then
+        multipass info "$APPLIANCE_NAME" || true
+      fi
+      ;;
+    doctor)
+      doctor
+      ;;
+    help|-h|--help)
+      usage
+      ;;
+    *)
+      printf 'Unknown command: %s\n\n' "$subcmd" >&2
+      usage >&2
+      exit 2
+      ;;
+  esac
+}
+
+cmd="${1:-help}"
+if [ "$#" -gt 0 ]; then
+  shift
+fi
+
+if [ "$RUNTIME_CONTEXT" = "inner" ]; then
+  inner_run "$cmd" "$@"
+else
+  outer_run "$cmd" "$@"
+fi

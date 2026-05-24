@@ -12,14 +12,24 @@ def _server():
     return server_module
 
 
+def _strip_action_suffix(value: str, *suffixes: str) -> str:
+    text = str(value or "")
+    for suffix in suffixes:
+        if suffix and text.endswith(suffix):
+            return text[: -len(suffix)]
+    return text
+
+
 def api_gcp_iam_get_policy(project: str):
     s = _server()
+    project = _strip_action_suffix(project, ":getIamPolicy", ":setIamPolicy", ":testIamPermissions")
     project = s._gcp_project_name(project)
     return s._gcp_iam_policy_view(project)
 
 
 async def api_gcp_iam_set_policy(project: str, request):
     s = _server()
+    project = _strip_action_suffix(project, ":getIamPolicy", ":setIamPolicy", ":testIamPermissions")
     project = s._gcp_project_name(project)
     payload = {}
     try:
@@ -34,6 +44,7 @@ async def api_gcp_iam_set_policy(project: str, request):
 
 async def api_gcp_iam_test_permissions(project: str, request):
     s = _server()
+    project = _strip_action_suffix(project, ":getIamPolicy", ":setIamPolicy", ":testIamPermissions")
     project = s._gcp_project_name(project)
     payload = {}
     try:

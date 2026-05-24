@@ -160,6 +160,92 @@ public final class CloudSimSpace {
         return payload;
     }
 
+    public synchronized Map<String, Object> persistedState() {
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("snapshot", snapshot());
+        payload.put("last_summary", new LinkedHashMap<>(lastSummary));
+        payload.put("events", new ArrayList<>(events));
+        payload.put("status", status);
+        payload.put("created_at", createdAt);
+        payload.put("updated_at", updatedAt);
+        return payload;
+    }
+
+    @SuppressWarnings("unchecked")
+    public synchronized void restoreState(Map<String, Object> payload) {
+        if (payload == null) {
+            return;
+        }
+        Map<String, Object> snapshot = payload.get("snapshot") instanceof Map
+                ? new LinkedHashMap<>((Map<String, Object>) payload.get("snapshot"))
+                : new LinkedHashMap<>();
+        if (snapshot.isEmpty()) {
+            snapshot.putAll(payload);
+        }
+        spec.clear();
+        spec.putAll(snapshot);
+        spec.putIfAbsent("space_id", spaceId);
+        status = stringValue(payload.getOrDefault("status", snapshot.getOrDefault("status", status)), status).toLowerCase(Locale.ROOT);
+        createdAt = stringValue(payload.getOrDefault("created_at", snapshot.getOrDefault("created_at", createdAt)), createdAt);
+        updatedAt = stringValue(payload.getOrDefault("updated_at", snapshot.getOrDefault("updated_at", updatedAt)), updatedAt);
+
+        lastSummary = new LinkedHashMap<>();
+        Object summary = payload.get("last_summary");
+        if (summary instanceof Map<?, ?> summaryMap) {
+            for (Map.Entry<?, ?> entry : summaryMap.entrySet()) {
+                if (entry.getKey() != null) {
+                    lastSummary.put(String.valueOf(entry.getKey()), entry.getValue());
+                }
+            }
+        } else {
+            Object cloudsim = snapshot.get("cloudsim");
+            if (cloudsim instanceof Map<?, ?> cloudsimMap) {
+                Object nestedSummary = cloudsimMap.get("summary");
+                if (nestedSummary instanceof Map<?, ?> nestedSummaryMap) {
+                    for (Map.Entry<?, ?> entry : nestedSummaryMap.entrySet()) {
+                        if (entry.getKey() != null) {
+                            lastSummary.put(String.valueOf(entry.getKey()), entry.getValue());
+                        }
+                    }
+                }
+            }
+        }
+
+        events.clear();
+        Object eventsPayload = payload.get("events");
+        if (eventsPayload instanceof List<?> list) {
+            for (Object item : list) {
+                if (item instanceof Map<?, ?> itemMap) {
+                    Map<String, Object> event = new LinkedHashMap<>();
+                    for (Map.Entry<?, ?> entry : itemMap.entrySet()) {
+                        if (entry.getKey() != null) {
+                            event.put(String.valueOf(entry.getKey()), entry.getValue());
+                        }
+                    }
+                    events.add(event);
+                }
+            }
+        } else {
+            Object cloudsim = snapshot.get("cloudsim");
+            if (cloudsim instanceof Map<?, ?> cloudsimMap) {
+                Object nestedEvents = cloudsimMap.get("events");
+                if (nestedEvents instanceof List<?> list) {
+                    for (Object item : list) {
+                        if (item instanceof Map<?, ?> itemMap) {
+                            Map<String, Object> event = new LinkedHashMap<>();
+                            for (Map.Entry<?, ?> entry : itemMap.entrySet()) {
+                                if (entry.getKey() != null) {
+                                    event.put(String.valueOf(entry.getKey()), entry.getValue());
+                                }
+                            }
+                            events.add(event);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     public synchronized Map<String, Object> eventsPayload() {
         return Map.of(
                 "space_id", spaceId,

@@ -1,0 +1,210 @@
+%PDF-1.4
+%‚„œ”
+1 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>
+endobj
+2 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold >>
+endobj
+3 0 obj
+<< /Length 3613 >>
+stream
+BT /F2 20 Tf 32 570 Td (CloudLearn UML Component Diagram) Tj ET
+BT /F1 10 Tf 32 550 Td (How the simulator, CloudSim, provider services, and host runtime bridge fit together) Tj ET
+q 0.70 0.74 0.80 rg 32 540 728 1.2 re f Q
+q 0.96 0.96 0.92 rg 0.27 0.34 0.42 RG 28 418 128 82 re B Q
+BT /F2 10 Tf 36 484 Td (<<component>> Browser) Tj ET
+BT /F1 8 Tf 36 470 Td (UI entrypoint) Tj ET
+BT /F1 8 Tf 36 460 Td (Shows AWS/GCP consoles) Tj ET
+BT /F1 8 Tf 36 450 Td (Opens WebSockets) Tj ET
+q 0.95 0.97 0.99 rg 0.27 0.34 0.42 RG 176 418 132 82 re B Q
+BT /F2 10 Tf 184 484 Td (<<component>> simulator) Tj ET
+BT /F1 8 Tf 184 470 Td (FastAPI app) Tj ET
+BT /F1 8 Tf 184 460 Td (static/index.html) Tj ET
+BT /F1 8 Tf 184 450 Td (server.py) Tj ET
+q 0.95 0.98 0.95 rg 0.27 0.34 0.42 RG 328 418 132 82 re B Q
+BT /F2 10 Tf 336 484 Td (<<component>> provider services) Tj ET
+BT /F1 8 Tf 336 470 Td (providers/aws_*) Tj ET
+BT /F1 8 Tf 336 460 Td (providers/gcp_*) Tj ET
+BT /F1 8 Tf 336 450 Td (Route modules) Tj ET
+q 0.98 0.95 0.95 rg 0.27 0.34 0.42 RG 480 418 132 82 re B Q
+BT /F2 10 Tf 488 484 Td (<<component>> CloudSim) Tj ET
+BT /F1 8 Tf 488 470 Td (Spaces) Tj ET
+BT /F1 8 Tf 488 460 Td (Resource graph) Tj ET
+BT /F1 8 Tf 488 450 Td (Events and summaries) Tj ET
+q 0.95 0.95 0.99 rg 0.27 0.34 0.42 RG 632 418 132 82 re B Q
+BT /F2 10 Tf 640 484 Td (<<component>> host bridge) Tj ET
+BT /F1 8 Tf 640 470 Td (core/runtime_bridge.py) Tj ET
+BT /F1 8 Tf 640 460 Td (Host API) Tj ET
+BT /F1 8 Tf 640 450 Td (Multipass / LXD) Tj ET
+q 0.99 0.97 0.93 rg 0.27 0.34 0.42 RG 328 252 132 82 re B Q
+BT /F2 10 Tf 336 318 Td (<<component>> host config) Tj ET
+BT /F1 8 Tf 336 304 Td (.cloudlearn-host.json) Tj ET
+BT /F1 8 Tf 336 294 Td (Host OS + bridge URL) Tj ET
+BT /F1 8 Tf 336 284 Td (Browser fallback) Tj ET
+q 0.94 0.98 0.97 rg 0.27 0.34 0.42 RG 176 252 132 82 re B Q
+BT /F2 10 Tf 184 318 Td (<<component>> EC2 runtime) Tj ET
+BT /F1 8 Tf 184 304 Td (Launch / stop / reboot) Tj ET
+BT /F1 8 Tf 184 294 Td (Console sessions) Tj ET
+BT /F1 8 Tf 184 284 Td (Sandbox state) Tj ET
+q 0.96 0.95 0.99 rg 0.27 0.34 0.42 RG 480 252 132 82 re B Q
+BT /F2 10 Tf 488 318 Td (<<component>> GCP services) Tj ET
+BT /F1 8 Tf 488 304 Td (Compute, Storage) Tj ET
+BT /F1 8 Tf 488 294 Td (SQL, Pub/Sub) Tj ET
+BT /F1 8 Tf 488 284 Td (Firestore, IAM) Tj ET
+q 0.99 0.96 0.94 rg 0.27 0.34 0.42 RG 632 252 132 82 re B Q
+BT /F2 10 Tf 640 318 Td (<<component>> AWS services) Tj ET
+BT /F1 8 Tf 640 304 Td (S3, IAM, VPC) Tj ET
+BT /F1 8 Tf 640 294 Td (RDS, Lambda) Tj ET
+BT /F1 8 Tf 640 284 Td (SQS, DynamoDB, API GW) Tj ET
+q 0.3 w 156 459 m 176 459 l S Q
+q 0.3 w 176 459 m 168 455 l S 176 459 m 168 463 l S Q
+q 0.3 w 308 459 m 328 459 l S Q
+q 0.3 w 328 459 m 320 455 l S 328 459 m 320 463 l S Q
+q 0.3 w 460 459 m 480 459 l S Q
+q 0.3 w 480 459 m 472 455 l S 480 459 m 472 463 l S Q
+q 0.3 w 612 459 m 632 459 l S Q
+q 0.3 w 632 459 m 624 455 l S 632 459 m 624 463 l S Q
+q 0.3 w 328 418 m 328 334 l S Q
+q 0.3 w 328 334 m 324 342 l S 328 334 m 332 342 l S Q
+q 0.3 w 176 418 m 176 334 l S Q
+q 0.3 w 176 334 m 172 342 l S 176 334 m 180 342 l S Q
+q 0.3 w 480 418 m 480 334 l S Q
+q 0.3 w 480 334 m 476 342 l S 480 334 m 484 342 l S Q
+q 0.3 w 632 418 m 632 334 l S Q
+q 0.3 w 632 334 m 628 342 l S 632 334 m 636 342 l S Q
+BT /F1 11 Tf 28 190 Td (The browser only talks to the simulator container. The simulator container talks to CloudSim for simulation state and to) Tj ET
+BT /F1 11 Tf 28 176 Td (the host bridge for real host-side runtime control.) Tj ET
+q 0.82 0.82 0.82 rg 32 20 728 0.8 re f Q
+BT /F1 9 Tf 32 8 Td (CloudLearn UML Component Diagram) Tj ET
+BT /F1 9 Tf 714 8 Td (Page 1) Tj ET
+endstream
+endobj
+4 0 obj
+<< /Type /Page /Parent 9 0 R /MediaBox [0 0 792 612] /Resources << /Font << /F1 1 0 R /F2 2 0 R >> >> /Contents 3 0 R >>
+endobj
+5 0 obj
+<< /Length 3082 >>
+stream
+BT /F2 20 Tf 32 570 Td (How Requests Move) Tj ET
+BT /F1 10 Tf 32 550 Td (The provider routes are thin; the shared backend does the heavy lifting and mirrors resource changes into CloudSim) Tj ET
+q 0.70 0.74 0.80 rg 32 540 728 1.2 re f Q
+q 0.96 0.96 0.92 rg 0.27 0.34 0.42 RG 28 420 126 70 re B Q
+BT /F2 10 Tf 36 474 Td (<<component>> AWS/GCP request) Tj ET
+BT /F1 8 Tf 36 460 Td (API, query, CLI, SDK) Tj ET
+q 0.95 0.97 0.99 rg 0.27 0.34 0.42 RG 170 420 126 70 re B Q
+BT /F2 10 Tf 178 474 Td (<<component>> API router) Tj ET
+BT /F1 8 Tf 178 460 Td (server.py) Tj ET
+BT /F1 8 Tf 178 450 Td (FastAPI routes) Tj ET
+q 0.95 0.98 0.95 rg 0.27 0.34 0.42 RG 312 420 126 70 re B Q
+BT /F2 10 Tf 320 474 Td (<<component>> provider module) Tj ET
+BT /F1 8 Tf 320 460 Td (Provider-specific handlers) Tj ET
+BT /F1 8 Tf 320 450 Td (Shared state adapters) Tj ET
+q 0.98 0.95 0.95 rg 0.27 0.34 0.42 RG 454 420 126 70 re B Q
+BT /F2 10 Tf 462 474 Td (<<component>> CloudSim sync) Tj ET
+BT /F1 8 Tf 462 460 Td (Upsert resource) Tj ET
+BT /F1 8 Tf 462 450 Td (Emit event) Tj ET
+BT /F1 8 Tf 462 440 Td (Update summary) Tj ET
+q 0.95 0.95 0.99 rg 0.27 0.34 0.42 RG 596 420 168 70 re B Q
+BT /F2 10 Tf 604 474 Td (<<component>> runtime decision) Tj ET
+BT /F1 8 Tf 604 460 Td (Host OS selection) Tj ET
+BT /F1 8 Tf 604 450 Td (Sandbox backend) Tj ET
+BT /F1 8 Tf 604 440 Td (Host bridge call) Tj ET
+q 0.95 0.98 0.97 rg 0.27 0.34 0.42 RG 312 230 126 78 re B Q
+BT /F2 10 Tf 320 292 Td (<<component>> instance state) Tj ET
+BT /F1 8 Tf 320 278 Td (pending) Tj ET
+BT /F1 8 Tf 320 268 Td (running) Tj ET
+BT /F1 8 Tf 320 258 Td (stopped) Tj ET
+BT /F1 8 Tf 320 248 Td (terminated) Tj ET
+q 0.97 0.96 0.99 rg 0.27 0.34 0.42 RG 454 230 126 78 re B Q
+BT /F2 10 Tf 462 292 Td (<<component>> console session) Tj ET
+BT /F1 8 Tf 462 278 Td (SSH / shell stream) Tj ET
+BT /F1 8 Tf 462 268 Td (WebSocket terminal) Tj ET
+q 0.99 0.97 0.94 rg 0.27 0.34 0.42 RG 596 230 168 78 re B Q
+BT /F2 10 Tf 604 292 Td (<<component>> resource graph) Tj ET
+BT /F1 8 Tf 604 278 Td (Per-space nodes) Tj ET
+BT /F1 8 Tf 604 268 Td (Provider separation) Tj ET
+BT /F1 8 Tf 604 258 Td (Topology view) Tj ET
+q 0.3 w 154 455 m 170 455 l S Q
+q 0.3 w 170 455 m 162 451 l S 170 455 m 162 459 l S Q
+q 0.3 w 296 455 m 312 455 l S Q
+q 0.3 w 312 455 m 304 451 l S 312 455 m 304 459 l S Q
+q 0.3 w 438 455 m 454 455 l S Q
+q 0.3 w 454 455 m 446 451 l S 454 455 m 446 459 l S Q
+q 0.3 w 580 455 m 596 455 l S Q
+q 0.3 w 596 455 m 588 451 l S 596 455 m 588 459 l S Q
+q 0.3 w 354 420 m 354 308 l S Q
+q 0.3 w 354 308 m 350 316 l S 354 308 m 358 316 l S Q
+q 0.3 w 497 420 m 497 308 l S Q
+q 0.3 w 497 308 m 493 316 l S 497 308 m 501 316 l S Q
+q 0.3 w 680 420 m 680 308 l S Q
+q 0.3 w 680 308 m 676 316 l S 680 308 m 684 316 l S Q
+BT /F1 11 Tf 28 186 Td (CloudSim never launches sandboxes itself. It records and reflects the resource lifecycle, while the host bridge owns the) Tj ET
+BT /F1 11 Tf 28 172 Td (actual runtime execution.) Tj ET
+q 0.82 0.82 0.82 rg 32 20 728 0.8 re f Q
+BT /F1 9 Tf 32 8 Td (CloudLearn UML Component Diagram) Tj ET
+BT /F1 9 Tf 714 8 Td (Page 2) Tj ET
+endstream
+endobj
+6 0 obj
+<< /Type /Page /Parent 9 0 R /MediaBox [0 0 792 612] /Resources << /Font << /F1 1 0 R /F2 2 0 R >> >> /Contents 5 0 R >>
+endobj
+7 0 obj
+<< /Length 2089 >>
+stream
+BT /F2 20 Tf 32 570 Td (Integration Responsibilities) Tj ET
+BT /F1 10 Tf 32 550 Td (This keeps each component focused and makes the system easier to reason about) Tj ET
+q 0.70 0.74 0.80 rg 32 540 728 1.2 re f Q
+BT /F2 14 Tf 28 484 Td (<<component>> simulator container) Tj ET
+BT /F1 11 Tf 28 464 Td (- Serve the browser UI and provider consoles.) Tj ET
+BT /F1 11 Tf 28 448 Td (- Expose AWS/GCP REST, query, and action routes.) Tj ET
+BT /F1 11 Tf 28 432 Td (- Maintain shared simulator state and per-space data.) Tj ET
+BT /F1 11 Tf 28 416 Td (- Forward resource updates into CloudSim.) Tj ET
+BT /F1 11 Tf 28 400 Td (- Open terminal sessions for running EC2 instances.) Tj ET
+BT /F2 14 Tf 280 484 Td (<<component>> CloudSim container) Tj ET
+BT /F1 11 Tf 280 464 Td (- Store active-space state and resource graph summaries.) Tj ET
+BT /F1 11 Tf 280 448 Td (- Track events, counts, and runtime bundle usage.) Tj ET
+BT /F1 11 Tf 280 432 Td (- Surface the local cloud backbone for the UI.) Tj ET
+BT /F1 11 Tf 280 416 Td (- Remain provider-neutral while reflecting provider resources.) Tj ET
+BT /F2 14 Tf 522 484 Td (<<component>> Host OS bridge) Tj ET
+BT /F1 11 Tf 522 464 Td (- Execute Multipass on macOS and Windows.) Tj ET
+BT /F1 11 Tf 522 448 Td (- Execute LXD on Linux.) Tj ET
+BT /F1 11 Tf 522 432 Td (- Provide bridge health and host status endpoints.) Tj ET
+BT /F1 11 Tf 522 416 Td (- Keep sandbox launch outside the container boundary.) Tj ET
+BT /F2 14 Tf 28 184 Td (Important contract) Tj ET
+BT /F1 11 Tf 28 164 Td (The user-facing browser only talks to the simulator container. The simulator container consumes host OS hints) Tj ET
+BT /F1 11 Tf 28 150 Td (from the launcher config file and uses the host runtime bridge to start the sandbox on the host machine.) Tj ET
+BT /F1 11 Tf 28 136 Td (CloudSim is the simulation backbone that receives resource updates and exposes the active-space graph back to) Tj ET
+BT /F1 11 Tf 28 122 Td (the UI.) Tj ET
+q 0.82 0.82 0.82 rg 32 20 728 0.8 re f Q
+BT /F1 9 Tf 32 8 Td (CloudLearn UML Component Diagram) Tj ET
+BT /F1 9 Tf 714 8 Td (Page 3) Tj ET
+endstream
+endobj
+8 0 obj
+<< /Type /Page /Parent 9 0 R /MediaBox [0 0 792 612] /Resources << /Font << /F1 1 0 R /F2 2 0 R >> >> /Contents 7 0 R >>
+endobj
+9 0 obj
+<< /Type /Pages /Kids [4 0 R 6 0 R 8 0 R] /Count 3 >>
+endobj
+10 0 obj
+<< /Type /Catalog /Pages 9 0 R >>
+endobj
+xref
+0 11
+0000000000 65535 f 
+0000000015 00000 n 
+0000000085 00000 n 
+0000000160 00000 n 
+0000003824 00000 n 
+0000003960 00000 n 
+0000007093 00000 n 
+0000007229 00000 n 
+0000009369 00000 n 
+0000009505 00000 n 
+0000009574 00000 n 
+trailer
+<< /Size 11 /Root 10 0 R >>
+startxref
+9624
+%%EOF

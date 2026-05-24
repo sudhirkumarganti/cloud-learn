@@ -7,6 +7,9 @@ services:
     environment:
       CLOUDLEARN_CLOUDSIM_HOST: 0.0.0.0
       CLOUDLEARN_CLOUDSIM_PORT: 9010
+      CLOUDLEARN_CLOUDSIM_STATE_FILE: /data/cloudsim_state.json
+    volumes:
+      - cloudsim-data:/data
     restart: unless-stopped
 
   simulator:
@@ -19,10 +22,17 @@ services:
       CLOUDLEARN_STATE_FILE: /data/cloudlearn_state.sqlite3
       CLOUDLEARN_LICENSE_SECRET: cloudlearn-dev-secret
       CLOUDLEARN_CLOUDSIM_URL: http://cloudsim:9010
+      CLOUDLEARN_DEPLOY_DIR: /var/lib/cloudlearn/deployments
+      CLOUDLEARN_HOST_CONFIG_FILE: /config/cloudlearn-host.json
+      CLOUDLEARN_HOST_SIZING_FILE: /config/cloudlearn-host-sizing.json
       CLOUDLEARN_PARENT_OS: ${CLOUDLEARN_PARENT_OS:-linux}
+      CLOUDLEARN_DISTRIBUTION_MODE: ${CLOUDLEARN_DISTRIBUTION_MODE:-developer}
       CLOUDLEARN_RUNTIME_BRIDGE_URL: ${CLOUDLEARN_RUNTIME_BRIDGE_URL:-http://host.docker.internal:9171}
     volumes:
       - cloudlearn-data:/data
+      - /var/lib/cloudlearn/deployments:/var/lib/cloudlearn/deployments
+      - ./.cloudlearn-host.json:/config/cloudlearn-host.json:ro
+      - ./.cloudlearn-appliance/host-sizing-report.json:/config/cloudlearn-host-sizing.json:ro
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; print(urllib.request.urlopen('http://127.0.0.1:9000/healthz').read().decode())"]
@@ -32,3 +42,4 @@ services:
 
 volumes:
   cloudlearn-data:
+  cloudsim-data:
