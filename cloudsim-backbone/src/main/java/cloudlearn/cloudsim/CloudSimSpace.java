@@ -11,6 +11,7 @@ import org.cloudsimplus.vms.VmSimple;
 
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
@@ -80,15 +81,81 @@ public final class CloudSimSpace {
         final int sqsCount = intValue(spec.get("sqs_count"));
         final int ddbCount = intValue(spec.get("dynamodb_count"));
 
-        final int vmCount = Math.max(1, runtimeCount + ec2Count + lambdaCount + rdsCount + sqsCount + ddbCount);
-        final int hostCount = Math.max(1, (vmCount + 1) / 2);
-        final int cloudletCount = Math.max(1, vmCount + runtimeCount + lambdaCount);
+        // Per-provider aggregate counts (Python pushes these via CloudSimBridge
+        // .sync_counts, pulled from THIS space's DB-derived inventory summary
+        // — space-isolated by construction; licensing relies on this isolation).
+        final int awsCountField = intValue(spec.get("aws_count"));
+        final int gcpCount = intValue(spec.get("gcp_count"));
+        final int azureCount = intValue(spec.get("azure_count"));
+        final int gcpFunctionsCount = intValue(spec.get("gcp_functions_count"));
+        final int azureFunctionappCount = intValue(spec.get("azure_functionapp_count"));
+        // Backward-compat: if aws_count not provided, derive from legacy fields.
+        final int awsCount = awsCountField > 0
+                ? awsCountField
+                : (ec2Count + lambdaCount + rdsCount + sqsCount + ddbCount);
+
+        // Heterogeneous VM shapes — every real instance type (t3.micro, m5.large,
+        // e2-medium, Standard_D8s_v5, …) becomes a CloudSim Plus Vm with the
+        // RIGHT mips/PE/RAM via the Python catalog. Falls back to uniform
+        // sizing when the bridge didn't send shapes (legacy clients).
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> vmShapes = spec.get("vm_shapes") instanceof List
+                ? (List<Map<String, Object>>) spec.get("vm_shapes")
+                : Collections.emptyList();
+
+        List<org.cloudsimplus.vms.Vm> heteroVms = new ArrayList<>();
+        int totalVcpus = 0;
+        long totalRamMb = 0L;
+        int maxVmPes = 1;
+        long maxVmRam = 1024L;
+        for (Map<String, Object> shape : vmShapes) {
+            int count = Math.max(1, intValue(shape.get("count")));
+            int vcpu = Math.max(1, intValue(shape.get("vcpu")));
+            long ramMb = Math.max(512L, longValue(shape.get("ram_mb"), 1024L));
+            int mips = Math.max(500, intValue(shape.get("mips_per_vcpu")));
+            maxVmPes = Math.max(maxVmPes, vcpu);
+            maxVmRam = Math.max(maxVmRam, ramMb);
+            for (int i = 0; i < count; i++) {
+                VmSimple vm = new VmSimple(mips, vcpu);
+                vm.setRam(ramMb).setBw(1000).setSize(10000);
+                heteroVms.add(vm);
+            }
+            totalVcpus += vcpu * count;
+            totalRamMb += ramMb * count;
+        }
+
+        // Legacy/uniform fill: any non-compute resources in the per-cloud counts
+        // (s3 buckets, dbs, queues, …) still contribute a small uniform VM so
+        // they're represented in the capacity sim. Subtract the compute VMs we
+        // already built from each provider's aggregate count.
+        int legacyVmCount = Math.max(0,
+                runtimeCount + awsCount + gcpCount + azureCount - heteroVms.size());
+        int vmCount = Math.max(1, heteroVms.size() + legacyVmCount);
+
+        // Hosts sized GENEROUSLY so VmAllocationPolicySimple's first-fit never
+        // wedges. PEs must fit the largest VM; RAM is over-provisioned per host
+        // and we add enough hosts that total capacity = ~2× the demand.
+        int hostPes = Math.max(8, Math.min(128, maxVmPes * 2));
+        long hostRam = Math.max(65536L, maxVmRam * 2 + 16384L);  // ≥64 GB or 2× largest
+        long demandRamMb = totalRamMb + (long) legacyVmCount * 2048L;
+        int hostCount = Math.max(1, Math.max(
+                (int) Math.ceil((double) (totalVcpus + legacyVmCount) * 2 / hostPes),
+                (int) Math.ceil((double) demandRamMb * 2 / hostRam)
+        ));
+        int cloudletCount = Math.max(1,
+                vmCount + runtimeCount + lambdaCount + gcpFunctionsCount + azureFunctionappCount);
 
         CloudSimPlus simulation = new CloudSimPlus();
+        // Safety: cap sim time so an unplaceable VM can't hang the engine.
+        simulation.terminateAt(60.0);
         DatacenterBrokerSimple broker = new DatacenterBrokerSimple(simulation);
-        List<org.cloudsimplus.hosts.Host> hosts = buildHosts(hostCount, vmCount);
+        List<org.cloudsimplus.hosts.Host> hosts = buildHosts(hostCount, hostPes, hostRam);
         new DatacenterSimple(simulation, hosts);
-        List<org.cloudsimplus.vms.Vm> vms = buildVms(vmCount);
+        // Compose VMs: heterogeneous compute VMs first, then uniform legacy fill.
+        List<org.cloudsimplus.vms.Vm> vms = new ArrayList<>(heteroVms);
+        if (legacyVmCount > 0) {
+            vms.addAll(buildVms(legacyVmCount));
+        }
         List<org.cloudsimplus.cloudlets.Cloudlet> cloudlets = buildCloudlets(cloudletCount);
 
         broker.submitVmList(vms);
@@ -114,6 +181,21 @@ public final class CloudSimSpace {
         summary.put("rds_count", rdsCount);
         summary.put("sqs_count", sqsCount);
         summary.put("dynamodb_count", ddbCount);
+        // Per-cloud aggregates that drove the sizing — surfaced so consumers
+        // (and licensing) can audit which cloud's resources contributed.
+        summary.put("aws_count", awsCount);
+        summary.put("gcp_count", gcpCount);
+        summary.put("azure_count", azureCount);
+        summary.put("gcp_functions_count", gcpFunctionsCount);
+        summary.put("azure_functionapp_count", azureFunctionappCount);
+        // Heterogeneous-VM facts: total CPU / RAM derived from REAL instance
+        // shapes (m5.large, e2-medium, Standard_D8s_v5, …). Plus the shape
+        // distribution echoed back so consumers can audit what was simulated.
+        summary.put("total_vcpus", totalVcpus + legacyVmCount);
+        summary.put("total_ram_mb", totalRamMb + (long) legacyVmCount * 1024L);
+        summary.put("vm_shapes", vmShapes);
+        summary.put("host_pes", hostPes);
+        summary.put("host_ram_mb", hostRam);
         summary.put("last_tick", Instant.now().toString());
         summary.put("updated_at", updatedAt);
         summary.put("created_at", createdAt);
@@ -254,18 +336,16 @@ public final class CloudSimSpace {
         );
     }
 
-    private List<org.cloudsimplus.hosts.Host> buildHosts(int hostCount, int vmCount) {
+    private List<org.cloudsimplus.hosts.Host> buildHosts(int hostCount, int hostPes, long hostRamMb) {
         List<org.cloudsimplus.hosts.Host> hosts = new ArrayList<>();
-        long ram = 8192L + (vmCount * 256L);
         long bw = 100000L;
-        long storage = 100000L;
-        int peCount = Math.max(2, Math.min(8, Math.max(1, vmCount)));
+        long storage = 1_000_000L;  // 1 TB local storage
         for (int i = 0; i < hostCount; i++) {
             List<org.cloudsimplus.resources.Pe> pes = new ArrayList<>();
-            for (int j = 0; j < peCount; j++) {
+            for (int j = 0; j < hostPes; j++) {
                 pes.add(new PeSimple(10000));
             }
-            hosts.add(new HostSimple(ram, bw, storage, pes));
+            hosts.add(new HostSimple(hostRamMb, bw, storage, pes));
         }
         return hosts;
     }
@@ -310,6 +390,17 @@ public final class CloudSimSpace {
             return Integer.parseInt(String.valueOf(value));
         } catch (Exception e) {
             return 0;
+        }
+    }
+
+    private static long longValue(Object value, long fallback) {
+        if (value instanceof Number number) {
+            return number.longValue();
+        }
+        try {
+            return Long.parseLong(String.valueOf(value));
+        } catch (Exception e) {
+            return fallback;
         }
     }
 }

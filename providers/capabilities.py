@@ -140,10 +140,39 @@ GCP_SERVICE_CAPABILITIES: list[dict] = [
 ]
 
 
+def _azure_cap(cid, name, ns, typ, summary, extra_routes=None):
+    base = f"/subscriptions/{{subscriptionId}}/resourceGroups/{{resourceGroupName}}/providers/{ns}/{typ}"
+    return {"id": cid, "name": name, "status": "integrated", "summary": summary,
+            "routes": [base, base + "/{resourceName}"] + (extra_routes or [])}
+
+
+AZURE_SERVICE_CAPABILITIES: list[dict] = [
+    _azure_cap("vm", "Virtual Machines", "Microsoft.Compute", "virtualMachines",
+               "VM CRUD via ARM with Azure-AsyncOperation (LRO) polling."),
+    _azure_cap("storage", "Blob Storage", "Microsoft.Storage", "storageAccounts",
+               "Storage account CRUD + real Blob data plane (containers/blobs) under /azure-data/blob.",
+               ["/azure-data/blob/{account}/{container}/{blob}"]),
+    _azure_cap("sql", "Azure SQL", "Microsoft.Sql", "servers",
+               "SQL server/database CRUD; each database is backed by a real Postgres database."),
+    _azure_cap("servicebus", "Service Bus", "Microsoft.ServiceBus", "namespaces",
+               "Namespace/queue/topic CRUD + REST send/receive broker under /azure-data/servicebus."),
+    _azure_cap("cosmos", "Cosmos DB", "Microsoft.DocumentDB", "databaseAccounts",
+               "Account CRUD + sim-native Cosmos SQL REST (dbs/colls/docs) under /azure-data/cosmos."),
+    _azure_cap("functionapp", "Functions", "Microsoft.Web", "sites",
+               "Function app (site) CRUD via ARM."),
+    _azure_cap("apim", "API Management", "Microsoft.ApiManagement", "service",
+               "API Management service CRUD via ARM (LRO)."),
+    _azure_cap("vnet", "Virtual Network", "Microsoft.Network", "virtualNetworks",
+               "VNet + subnet CRUD via ARM."),
+    _azure_cap("rbac", "Entra ID / RBAC", "Microsoft.Authorization", "roleAssignments",
+               "Role assignment CRUD (synchronous)."),
+]
+
+
 SERVICE_CAPABILITIES = {
     "aws": AWS_SERVICE_CAPABILITIES,
     "gcp": GCP_SERVICE_CAPABILITIES,
-    "azure": [],
+    "azure": AZURE_SERVICE_CAPABILITIES,
     "other": [],
 }
 

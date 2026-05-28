@@ -689,7 +689,11 @@ class FirestoreEngine:
                 "spaces": {},
                 "active_space_id": "",
                 "settings": {
-                    "max_spaces": 6,
+                    # Kernel-level global cap is now vestigial — per-tenant
+                    # quota is enforced at the API layer (api_create_space).
+                    # Default 100 means "effectively unbounded for normal use"
+                    # while still protecting against pathological loops.
+                    "max_spaces": 100,
                     "default_provider": "aws",
                     "default_region": "us-east-1",
                     "max_memory_mb": 8192,
@@ -700,7 +704,11 @@ class FirestoreEngine:
         spaces_state.setdefault("spaces", {})
         spaces_state.setdefault("active_space_id", "")
         settings = spaces_state.setdefault("settings", {})
-        settings.setdefault("max_spaces", 6)
+        settings.setdefault("max_spaces", 100)
+        # Migrate persisted state from the old hard-coded 6 → 100.
+        # Users with explicitly-tuned values (anything ≠ 6) keep theirs.
+        if settings.get("max_spaces") == 6:
+            settings["max_spaces"] = 100
         settings.setdefault("default_provider", "aws")
         settings.setdefault("default_region", "us-east-1")
         settings.setdefault("max_memory_mb", 8192)
@@ -967,6 +975,20 @@ for _kernel_method_name in (
 
 
 class CloudSimBridge:
+    """Sole touchpoint to the CloudSim Plus discrete-event engine (the Java
+    `cloudsim-backbone` service / local jar). This is the boundary between the
+    two layers:
+
+      * INVENTORY layer (internal DB, authoritative) — owned by the Python side
+        (`_cloudsim_collect_resources` → space["resources"]). Never crosses here.
+      * CAPACITY layer (CloudSim Plus, derived) — owned by the engine, reached
+        ONLY through this adapter, and stored under space["cloudsim"].
+
+    The engine receives per-space *counts*, never resource records, and its
+    output must never be written back into the DB-authoritative state
+    (`service_states`/`resources`). All engine I/O goes through `_request`.
+    """
+
     def __init__(self, kernel: SimulationKernel, repo_root: Path):
         self.kernel = kernel
         self.repo_root = Path(repo_root)
@@ -1163,6 +1185,93 @@ class CloudSimBridge:
         if space_id:
             return self._request("POST", f"/spaces/{urllib.parse.quote(space_id, safe='')}/reconcile", {})
         return self._request("GET", "/summary")
+
+    def _aggregate_vm_shapes(self, space: dict) -> list[dict]:
+        """Walk this space's compute VMs and map each real instance type to a
+        CloudSim Plus shape via core.instance_catalog. Returns a deduplicated
+        list of {name, family, vcpu, ram_mb, mips_per_vcpu, count} so the
+        engine can build heterogeneous VMs reflecting REAL AWS/GCP/Azure SKUs
+        (m5.large vs t3.micro vs Standard_D8s_v5 vs e2-medium, etc.)."""
+        from core import instance_catalog as cat
+
+        service_states = space.get("service_states") if isinstance(space.get("service_states"), dict) else {}
+        agg: dict[tuple, dict] = {}
+
+        def add(shape: dict) -> None:
+            key = (shape["name"], shape["vcpu"], shape["ram_mb"], shape["mips_per_vcpu"])
+            entry = agg.get(key)
+            if entry is None:
+                agg[key] = {**shape, "count": 1}
+            else:
+                entry["count"] += 1
+
+        # AWS EC2
+        ec2 = service_states.get("ec2") or {}
+        for inst in (ec2.get("instances") or {}).values():
+            if isinstance(inst, dict):
+                add(cat.lookup_aws(str(inst.get("instance_type") or "")))
+        # GCP Compute
+        gcp_compute = service_states.get("gcp_compute") or {}
+        for inst in (gcp_compute.get("instances") or {}).values():
+            if isinstance(inst, dict):
+                mt = inst.get("machine_type") or inst.get("machineType") or ""
+                add(cat.lookup_gcp(str(mt)))
+        # Azure ARM — only Microsoft.Compute/virtualMachines records.
+        azure = service_states.get("azure_arm") or {}
+        for rec in (azure.get("resources") or {}).values():
+            if not isinstance(rec, dict):
+                continue
+            if str(rec.get("_type", "")).lower() != "microsoft.compute/virtualmachines":
+                continue
+            props = rec.get("properties") if isinstance(rec.get("properties"), dict) else {}
+            hw = (props.get("hardwareProfile") or {}) if isinstance(props.get("hardwareProfile"), dict) else {}
+            add(cat.lookup_azure(str(hw.get("vmSize") or "")))
+        return list(agg.values())
+
+    def sync_counts(self, space_id: str) -> dict:
+        """Push per-space DB-derived counts to the engine so it re-simulates
+        with current inventory. Reads ONLY the targeted space's inventory
+        summary (`space["resources"]["summary"]`) — per-space isolation is
+        enforced here so licensing/quota checks downstream stay clean.
+
+        The engine's `apply()` merges the payload into the space's spec and the
+        upsert path triggers a reconcile, so a single POST does it."""
+        if not space_id or not self.ensure_running():
+            return {}
+        spaces = self.kernel.state.get("spaces", {}).get("spaces", {})
+        space = spaces.get(space_id) if isinstance(spaces, dict) else None
+        if not isinstance(space, dict):
+            return {}
+        resources = space.get("resources") if isinstance(space.get("resources"), dict) else {}
+        inv = (resources or {}).get("summary") or {}
+        rc = inv.get("resource_counts") or {}
+        # Per-cloud aggregates — derived ONLY from this space's inventory.
+        aws_total = sum(int(v) for k, v in rc.items() if str(k).startswith("aws.")) if isinstance(rc, dict) else 0
+        gcp_total = sum(int(v) for k, v in rc.items() if str(k).startswith("gcp.")) if isinstance(rc, dict) else 0
+        azure_total = int(inv.get("azure_count", 0) or 0)
+        # Heterogeneous VM shapes — each real instance type (t3.micro, m5.large,
+        # e2-medium, Standard_D8s_v5, …) becomes a CloudSim Plus Vm with the
+        # right MIPS/PE/RAM. Engine falls back to uniform sizing when empty.
+        vm_shapes = self._aggregate_vm_shapes(space)
+        payload = {
+            "space_id": space_id,
+            "runtime_count": int(inv.get("runtime_count", 0) or 0),
+            "ec2_count": int(inv.get("ec2_count", 0) or 0),
+            "lambda_count": int(inv.get("lambda_count", 0) or 0),
+            "rds_count": int(inv.get("rds_count", 0) or 0),
+            "sqs_count": int(inv.get("sqs_count", 0) or 0),
+            "dynamodb_count": int(inv.get("dynamodb_count", 0) or 0),
+            "aws_count": aws_total,
+            "gcp_count": gcp_total,
+            "azure_count": azure_total,
+            "gcp_functions_count": int(inv.get("gcp_functions_count", 0) or 0),
+            "azure_functionapp_count": int(rc.get("azure.functionapp.sites", 0) or 0) if isinstance(rc, dict) else 0,
+            "vm_shapes": vm_shapes,
+        }
+        try:
+            return self._request("POST", "/spaces", payload)
+        except Exception:
+            return {}
 
     def current(self) -> dict:
         if not self.ensure_running():
@@ -1745,9 +1854,32 @@ class CloudLearnPlatform:
         try:
             remote = self.cloudsim.switch_space(space_id)
             if isinstance(remote, dict):
-                self.kernel.state.setdefault("spaces", {}).setdefault("spaces", {})[space_id] = remote.get("space", space)
-                self.persist()
-                return self.kernel.state["spaces"]["spaces"][space_id]
+                remote_space = remote.get("space")
+                if isinstance(remote_space, dict):
+                    # CloudSim is a *derived* view; the internal DB is
+                    # authoritative for resource state (CLAUDE: "Internal DB is
+                    # authoritative, CloudSim derived"). Merge the backbone's
+                    # cloudsim-derived fields onto the local space, but never let
+                    # it clobber locally-owned resource state — service_states is
+                    # where every provider's resources live (s3/ec2/gcp_*/azure_arm).
+                    spaces_map = self.kernel.state.setdefault("spaces", {}).setdefault("spaces", {})
+                    local = spaces_map.get(space_id)
+                    if not isinstance(local, dict):
+                        local = space
+                    local_service_states = local.get("service_states")
+                    merged = {**local, **remote_space}
+                    if isinstance(local_service_states, dict):
+                        merged["service_states"] = local_service_states
+                    spaces_map[space_id] = merged
+                    self.persist()
+                    # Push the NEW active space's counts to the engine so capacity
+                    # immediately reflects what THIS space contains (per-space
+                    # isolation — engine never sees other spaces' resources).
+                    try:
+                        self.cloudsim.sync_counts(space_id)
+                    except Exception:
+                        pass
+                    return merged
         except Exception:
             pass
         return space
@@ -1895,6 +2027,16 @@ class CloudLearnPlatform:
             return {"summary": copy.deepcopy(cloudsim.get("summary", {}))}
 
     def cloudsim_reconcile(self) -> dict:
+        # Push the active space's current per-cloud counts to the engine FIRST so
+        # the reconcile re-simulates with fresh inventory (scoped to that space —
+        # licensing depends on this isolation). Best-effort; never breaks reconcile.
+        try:
+            spaces_state = self.kernel.state.get("spaces", {})
+            active_id = spaces_state.get("active_space_id", "")
+            if active_id:
+                self.cloudsim.sync_counts(active_id)
+        except Exception:
+            pass
         try:
             payload = self.cloudsim.reconcile()
             if isinstance(payload, dict):

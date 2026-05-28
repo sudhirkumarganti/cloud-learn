@@ -3,3 +3,5 @@ uvicorn[standard]>=0.29.0
 python-multipart>=0.0.9
 psycopg2-binary>=2.9.9
 PyMySQL>=1.1.0
+google-cloud-pubsub>=2.21.0
+google-cloud-firestore>=2.16.0

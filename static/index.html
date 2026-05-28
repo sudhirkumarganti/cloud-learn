@@ -914,6 +914,28 @@
     .gcp-table.gcp-table-storage-buckets th:last-child,.gcp-table.gcp-table-storage-buckets td:last-child{width:130px;text-align:center}
     .gcp-table.gcp-table-storage-buckets td.gcp-row-actions{text-align:center}
     .gcp-table.gcp-table-storage-buckets .gcp-row-actions-inner{justify-content:center}
+    /* Storage IAM & access: Edit + Delete pair — keep the action cell to its
+       column width (override the generic 480px min-width) so Delete stays inside. */
+    .gcp-table.gcp-table-storage-iam td.gcp-row-actions{min-width:0;text-align:left;overflow:visible}
+    .gcp-table.gcp-table-storage-iam .gcp-row-actions-inner{justify-content:flex-start}
+    /* Cloud SQL instances: 7 cols + a 4-button action group (Start/Stop/Restart/
+       Delete). Give the table a min-width and a wide Actions column so the
+       buttons stay inside the grid border instead of spilling out. */
+    .gcp-table.gcp-table-cloudsql-instances{min-width:1380px}
+    .gcp-table.gcp-table-cloudsql-instances th,.gcp-table.gcp-table-cloudsql-instances td{padding-left:10px;padding-right:10px}
+    .gcp-table.gcp-table-cloudsql-instances th:first-child,.gcp-table.gcp-table-cloudsql-instances td:first-child{width:250px;padding-right:6px}
+    .gcp-table.gcp-table-cloudsql-instances th:nth-child(2),.gcp-table.gcp-table-cloudsql-instances td:nth-child(2){width:120px}
+    .gcp-table.gcp-table-cloudsql-instances th:nth-child(3),.gcp-table.gcp-table-cloudsql-instances td:nth-child(3){width:160px}
+    .gcp-table.gcp-table-cloudsql-instances th:nth-child(4),.gcp-table.gcp-table-cloudsql-instances td:nth-child(4){width:140px}
+    .gcp-table.gcp-table-cloudsql-instances th:nth-child(5),.gcp-table.gcp-table-cloudsql-instances td:nth-child(5){width:140px}
+    .gcp-table.gcp-table-cloudsql-instances th:nth-child(6),.gcp-table.gcp-table-cloudsql-instances td:nth-child(6){width:170px}
+    .gcp-table.gcp-table-cloudsql-instances th:last-child,.gcp-table.gcp-table-cloudsql-instances td:last-child{width:400px}
+    .gcp-table.gcp-table-cloudsql-instances td.gcp-row-actions{text-align:left;min-width:400px}
+    .gcp-table.gcp-table-cloudsql-instances .gcp-row-actions-inner{justify-content:flex-start}
+    /* keep the destructive Delete visibly red in every action row (the compact
+       gcp-row-actions styling otherwise forces all buttons to the blue outline) */
+    .gcp-row-actions-inner .btn.btn-d{background:#d93025 !important;border-color:#d93025 !important;color:#fff !important}
+    .gcp-row-actions-inner .btn.btn-d:hover{background:#c5221f !important;border-color:#c5221f !important}
     .gcp-table.gcp-table-gcp-resource th,.gcp-table.gcp-table-gcp-resource td{padding-left:14px;padding-right:14px}
     .gcp-table.gcp-table-gcp-resource th:first-child,.gcp-table.gcp-table-gcp-resource td:first-child{width:24%}
     .gcp-table.gcp-table-gcp-resource th:last-child,.gcp-table.gcp-table-gcp-resource td:last-child{width:13%;text-align:center}
@@ -1261,7 +1283,11 @@ const { useState, useEffect, useRef, useCallback, useMemo } = React;
 async function api(method, path, body, isForm, extraHeaders = {}) {
   const opts = { method, cache: 'no-store' };
   const principal = window.localStorage.getItem('cloudlearn.principal') || 'root';
+  // Tenant isolation: every request carries the active tenant header so the
+  // server-side proxy + tenant guards scope reads/writes to this tenant only.
+  const tenant = window.localStorage.getItem('cloudlearn.tenant') || '';
   opts.headers = {'X-CloudLearn-Principal': principal};
+  if (tenant) opts.headers['X-CloudLearn-Tenant'] = tenant;
   if (extraHeaders && typeof extraHeaders === 'object') {
     opts.headers = {...opts.headers, ...extraHeaders};
   }
@@ -1421,6 +1447,30 @@ const CLOUDSIM_GCP_SERVICE_LABELS = {
   iam: 'IAM',
 };
 
+const CLOUDSIM_AZURE_SERVICE_LABELS = {
+  vm: 'Virtual Machines',
+  storage: 'Blob Storage',
+  sql: 'Azure SQL',
+  servicebus: 'Service Bus',
+  cosmos: 'Cosmos DB',
+  functionapp: 'Functions',
+  apim: 'API Management',
+  vnet: 'Virtual Network',
+  rbac: 'Entra ID / RBAC',
+};
+
+const CLOUDSIM_AZURE_SERVICE_ICONS = {
+  vm: 'computer',
+  storage: 'storage',
+  sql: 'database',
+  servicebus: 'queue',
+  cosmos: 'hub',
+  functionapp: 'bolt',
+  apim: 'api',
+  vnet: 'lan',
+  rbac: 'admin_panel_settings',
+};
+
 const CLOUDSIM_GCP_KIND_URLS = {
   api: 'apigateway',
   bucket: 'storage',
@@ -1534,7 +1584,7 @@ function displayCloudSimLabel(provider, value, fallback = 'Resource') {
   const raw = String(value || '').toLowerCase();
   if (!raw) return fallback;
   const providerKey = String(provider || 'other').toLowerCase();
-  const providerLabels = providerKey === 'aws' ? CLOUDSIM_AWS_SERVICE_LABELS : providerKey === 'gcp' ? CLOUDSIM_GCP_SERVICE_LABELS : {};
+  const providerLabels = providerKey === 'aws' ? CLOUDSIM_AWS_SERVICE_LABELS : providerKey === 'gcp' ? CLOUDSIM_GCP_SERVICE_LABELS : providerKey === 'azure' ? CLOUDSIM_AZURE_SERVICE_LABELS : {};
   if (providerLabels[raw]) return providerLabels[raw];
   if (CLOUDSIM_KIND_LABELS[raw]) return CLOUDSIM_KIND_LABELS[raw];
   return titleCaseWords(raw);
@@ -1576,6 +1626,9 @@ function cloudSimResourceIconName(provider, service, kind) {
   }
   if (providerKey === 'aws') {
     return CLOUDSIM_AWS_KIND_ICONS[kindKey] || serviceKey || 'dashboard';
+  }
+  if (providerKey === 'azure') {
+    return CLOUDSIM_AZURE_SERVICE_ICONS[serviceKey] || 'cloud';
   }
   return 'cloud';
 }
@@ -2344,6 +2397,7 @@ const GCPPubSub = {
   listTopics: (project) => api('GET', `/v1/projects/${encodeURIComponent(project)}/topics`),
   createTopic: (project, payload) => api('POST', `/v1/projects/${encodeURIComponent(project)}/topics`, payload),
   getTopic: (project, name) => api('GET', `/v1/projects/${encodeURIComponent(project)}/topics/${encodeURIComponent(name)}`),
+  updateTopic: (project, name, payload) => api('PATCH', `/v1/projects/${encodeURIComponent(project)}/topics/${encodeURIComponent(name)}`, payload),
   deleteTopic: (project, name) => api('DELETE', `/v1/projects/${encodeURIComponent(project)}/topics/${encodeURIComponent(name)}`),
   publish: (project, name, payload) => api('POST', `/v1/projects/${encodeURIComponent(project)}/topics/${encodeURIComponent(name)}:publish`, payload),
   topicSubscriptions: (project, name) => api('GET', `/v1/projects/${encodeURIComponent(project)}/topics/${encodeURIComponent(name)}/subscriptions`),
@@ -2651,6 +2705,7 @@ function AwsConsoleShell({activeView, onOpen, children}) {
         </div>
         <div className="hdr-right">
           <span className="hdr-sim">SIMULATOR</span>
+          <button className="hdr-pill" title="AWS API docs (Swagger)" onClick={() => window.open('/docs/aws', '_blank', 'noopener')}><span className="material-symbols-outlined">api</span>API</button>
           <button className="hdr-ico" title="Notifications"><span className="material-symbols-outlined">notifications</span></button>
           <button className="hdr-ico" title="Settings"><span className="material-symbols-outlined">settings</span></button>
           <span className="hdr-divider"></span>
@@ -3091,6 +3146,7 @@ function GcpTopBar({ project = 'My Project', onMenu }) {
         <span className="gcp-top-kbd">/</span>
       </div>
       <div className="gcp-top-right">
+        <button className="gcp-top-ico" title="GCP API docs (Swagger)" onClick={() => window.open('/docs/gcp', '_blank', 'noopener')} style={{width:'auto',padding:'0 12px',gap:6,fontWeight:600,color:'#1a73e8'}}><span className="material-symbols-outlined">api</span>API</button>
         <button className="gcp-top-ico" title="Activate Cloud Shell"><span className="material-symbols-outlined">terminal</span></button>
         <button className="gcp-top-ico" title="Notifications"><span className="material-symbols-outlined">notifications</span></button>
         <button className="gcp-top-ico" title="Support"><span className="material-symbols-outlined">help</span></button>
@@ -3411,6 +3467,29 @@ const gcpDialogRootNode = document.createElement('div');
 gcpDialogRootNode.id = 'gcp-dialog-root';
 document.body.appendChild(gcpDialogRootNode);
 const gcpDialogRoot = ReactDOM.createRoot(gcpDialogRootNode);
+
+// Always-visible Swagger/API-docs launcher — appended directly to <body> so it
+// shows on EVERY view regardless of which header renders. Opens the locally
+// bundled Swagger UI (/docs) in a new tab.
+(function mountApiDocsButton() {
+  if (document.getElementById('cl-api-fab')) return;
+  const btn = document.createElement('button');
+  btn.id = 'cl-api-fab';
+  btn.type = 'button';
+  btn.title = 'Open the API reference (Swagger)';
+  btn.innerHTML = '<span class="material-symbols-outlined" style="font-size:18px;vertical-align:middle;margin-right:6px">api</span>API';
+  btn.style.cssText = [
+    'position:fixed', 'top:10px', 'right:14px', 'z-index:2147483647',
+    'display:inline-flex', 'align-items:center', 'background:#1a73e8', 'color:#fff',
+    'border:none', 'border-radius:6px', 'padding:7px 14px', 'font-size:13px',
+    'font-weight:600', 'cursor:pointer', 'box-shadow:0 2px 8px rgba(0,0,0,.25)',
+    'font-family:Roboto,Arial,sans-serif',
+  ].join(';');
+  btn.onmouseenter = () => { btn.style.background = '#1761c9'; };
+  btn.onmouseleave = () => { btn.style.background = '#1a73e8'; };
+  btn.onclick = () => window.open('/docs', '_blank', 'noopener');
+  document.body.appendChild(btn);
+})();
 let gcpDialogState = null;
 let gcpDialogResolve = null;
 
@@ -4950,6 +5029,7 @@ function DashboardView({onOpen, onBack, notify, onExportTerraform}) {
         </div>
         <div className="hdr-right">
           <span className="hdr-sim">SIMULATOR</span>
+          <button className="hdr-pill" title="AWS API docs (Swagger)" onClick={() => window.open('/docs/aws', '_blank', 'noopener')}><span className="material-symbols-outlined">api</span>API</button>
           <button className="hdr-ico" title="Notifications"><span className="material-symbols-outlined">notifications</span></button>
           <button className="hdr-ico" title="Settings"><span className="material-symbols-outlined">settings</span></button>
           <span className="hdr-divider"></span>
@@ -5543,6 +5623,15 @@ const seedSimulationSpaces = () => ([
     created_at: new Date().toISOString(),
   },
   {
+    id: 'space-azure-dev',
+    name: 'azure-dev',
+    provider_id: 'azure',
+    status: 'active',
+    region: 'eastus',
+    description: 'Azure simulation space for ARM-native services (VMs, Storage, SQL, Cosmos, Functions, APIM, Service Bus, VNet).',
+    created_at: new Date().toISOString(),
+  },
+  {
     id: 'space-aws-lab',
     name: 'aws-lab',
     provider_id: 'aws',
@@ -5616,12 +5705,20 @@ function SimulationSpacesView({providers, spaces, providerFilter, onBack, onFilt
 
   const createSpace = async () => {
     const provider = providerFilter || 'aws';
+    const defaults = provider === 'azure'
+      ? {name: 'azure-lab-01', region: 'eastus',
+         description: 'Azure simulation space for provider-native ARM service workflows.'}
+      : provider === 'gcp'
+      ? {name: 'gcp-lab-01', region: 'us-central1',
+         description: 'GCP simulation space for provider-native service workflows.'}
+      : {name: 'aws-lab-01', region: 'us-east-1',
+         description: 'AWS simulation space for provider-native service workflows.'};
     const form = await openGcpInputDialog({
       title: 'Create space',
       description: `Create a new ${provider.toUpperCase()} simulation space.`,
       submitLabel: 'Create space',
       fields: [
-        {name: 'name', label: 'Space name', defaultValue: provider === 'gcp' ? 'gcp-lab-01' : 'aws-lab-01', required: true, placeholder: provider === 'gcp' ? 'gcp-lab-01' : 'aws-lab-01'},
+        {name: 'name', label: 'Space name', defaultValue: defaults.name, required: true, placeholder: defaults.name},
       ],
     });
     const name = String(form?.name || '').trim();
@@ -5631,10 +5728,8 @@ function SimulationSpacesView({providers, spaces, providerFilter, onBack, onFilt
       name: name.trim(),
       provider_id: provider,
       status: 'active',
-      region: provider === 'gcp' ? 'us-central1' : 'us-east-1',
-      description: provider === 'gcp'
-        ? 'GCP simulation space for provider-native service workflows.'
-        : 'AWS simulation space for provider-native service workflows.',
+      region: defaults.region,
+      description: defaults.description,
       created_at: new Date().toISOString(),
     };
     onCreate(next);
@@ -5924,6 +6019,209 @@ function GCPListShell({
   );
 }
 
+function TenantBar({notify}) {
+  // Tenant = the licensing/isolation boundary above Space. Active tenant is
+  // stored in localStorage and sent as X-CloudLearn-Tenant on every api() call;
+  // server filters spaces / blocks cross-tenant access by it.
+  const [tenants, setTenants] = useState([]);
+  const [activeTid, setActiveTid] = useState(window.localStorage.getItem('cloudlearn.tenant') || '');
+  const [creating, setCreating] = useState(false);
+  const [newName, setNewName] = useState('');
+  const [newMax, setNewMax] = useState(6);
+
+  const load = async () => {
+    try {
+      const d = await api('GET', '/api/tenants');
+      setTenants(d.tenants || []);
+      const cur = window.localStorage.getItem('cloudlearn.tenant') || d.active_tenant_id || d.default_tenant_id || 'default';
+      setActiveTid(cur);
+      if (!window.localStorage.getItem('cloudlearn.tenant')) {
+        window.localStorage.setItem('cloudlearn.tenant', cur);
+      }
+    } catch (e) { /* tenant API missing? — skip */ }
+  };
+  useEffect(() => { load(); }, []);
+
+  const switchTo = async (tid) => {
+    try {
+      await api('POST', `/api/tenants/${tid}/switch`);
+      window.localStorage.setItem('cloudlearn.tenant', tid);
+      window.localStorage.removeItem('cloudlearn.active.space');  // foreign-tenant active space is cleared server-side
+      setActiveTid(tid);
+      notify && notify(`Switched to tenant '${tid}'.`, 'success');
+      window.location.reload();
+    } catch (e) { notify && notify('Tenant switch failed: '+e.message, 'error'); }
+  };
+  const create = async () => {
+    const name = (newName || '').trim();
+    if (!name) { notify && notify('Tenant name required.', 'error'); return; }
+    try {
+      const d = await api('POST', '/api/tenants', {name, max_spaces: Math.max(1, parseInt(newMax,10)||6)});
+      setCreating(false); setNewName(''); setNewMax(6);
+      await switchTo(d.tenant.tenant_id);
+    } catch (e) { notify && notify('Create tenant failed: '+e.message, 'error'); }
+  };
+  const active = tenants.find(t => t.tenant_id === activeTid) || null;
+
+  return (
+    <div style={{background:'#fff',border:'1px solid #d8dde6',borderRadius:8,padding:'10px 14px',
+                 marginBottom:14,display:'flex',alignItems:'center',gap:12,flexWrap:'wrap'}}>
+      <div style={{display:'flex',alignItems:'center',gap:8}}>
+        <span style={{background:'#1b4f9c',color:'#fff',borderRadius:4,padding:'2px 8px',fontSize:11,fontWeight:700,letterSpacing:'.4px'}}>TENANT</span>
+        <strong style={{fontSize:14}}>{active ? active.name : activeTid || '—'}</strong>
+        {active && (
+          <span style={{fontSize:12,color:'#5f6368'}}>
+            {active.usage ? `${active.usage.spaces_count}/${active.usage.max_spaces} spaces` : ''}
+            {active.license_tier ? ` · ${active.license_tier}` : ''}
+          </span>
+        )}
+      </div>
+      <select value={activeTid} onChange={e => switchTo(e.target.value)}
+              style={{padding:'5px 8px',fontSize:13,border:'1px solid #c8ced8',borderRadius:4,background:'#fff'}}>
+        {tenants.map(t => (
+          <option key={t.tenant_id} value={t.tenant_id}>{t.name} ({t.tenant_id})</option>
+        ))}
+      </select>
+      {!creating ? (
+        <button onClick={()=>setCreating(true)} className="btn btn-s">+ New tenant</button>
+      ) : (
+        <div style={{display:'flex',alignItems:'center',gap:6}}>
+          <input placeholder="Tenant name" value={newName} onChange={e=>setNewName(e.target.value)}
+                 style={{padding:'4px 8px',fontSize:13,border:'1px solid #c8ced8',borderRadius:4}} />
+          <input type="number" min="1" max="100" value={newMax} onChange={e=>setNewMax(e.target.value)} title="max spaces"
+                 style={{width:60,padding:'4px 6px',fontSize:13,border:'1px solid #c8ced8',borderRadius:4}} />
+          <button onClick={create} className="btn btn-p btn-s">Create</button>
+          <button onClick={()=>setCreating(false)} className="btn btn-s">Cancel</button>
+        </div>
+      )}
+      <HostBudgetChip />
+      <span style={{marginLeft:'auto',fontSize:11,color:'#878e96'}}>
+        Tenant 1:N Spaces · Space 1:1 Provider
+      </span>
+    </div>
+  );
+}
+
+// HostBudgetChip — host-level container budget (CPU + RAM) at a glance.
+// "Sim budget: 2/4 CPU · 1.2/3.5 GB" with a colored bar that turns red when
+// > 90% used. Refetches every 10s so the meter follows new launches/deletes.
+function HostBudgetChip() {
+  const [b, setB] = useState(null);
+  const load = async () => {
+    try { setB(await api('GET', '/api/runtime/budget')); } catch (e) { /* hide */ }
+  };
+  useEffect(() => { load(); const t = setInterval(load, 10000); return () => clearInterval(t); }, []);
+  if (!b) return null;
+  const fmtMb = mb => (mb < 1024 ? `${mb} MB` : `${(mb/1024).toFixed(mb<10240?1:0)} GB`);
+  const cpuPct = b.budget.cpu ? Math.round(100 * b.used.cpu / b.budget.cpu) : 0;
+  const memPct = b.budget.memory_mb ? Math.round(100 * b.used.memory_mb / b.budget.memory_mb) : 0;
+  const max = Math.max(cpuPct, memPct);
+  const tone = max >= 90 ? '#a4262c' : max >= 70 ? '#a76a00' : '#1b6e3c';
+  return (
+    <div title={`Simulator budget: ${b.budget_pct}% of host (clamp ${b.clamp[0]}-${b.clamp[1]}%). Host: ${b.host.cpu} CPU, ${fmtMb(b.host.memory_mb)}.`}
+         style={{display:'flex',alignItems:'center',gap:8,padding:'3px 10px',background:'#f3f7fb',border:'1px solid #d8dde6',borderRadius:6,fontSize:12}}>
+      <span style={{background:'#374151',color:'#fff',padding:'1px 6px',borderRadius:3,fontSize:10,fontWeight:700,letterSpacing:'.3px'}}>SIM BUDGET</span>
+      <span style={{color: tone, fontWeight:600}}>
+        {b.used.cpu}/{b.budget.cpu} CPU · {fmtMb(b.used.memory_mb)}/{fmtMb(b.budget.memory_mb)}
+      </span>
+      <span style={{color:'#5f6368'}}>({max}%)</span>
+    </div>
+  );
+}
+
+// InstanceTypeSelect — dropdown populated from /api/instances/catalog?provider=X.
+// Single source-of-truth: every provider console renders only its own SKUs.
+// Falls back to a free-text input if the catalog API is unavailable (offline /
+// older server). Options are grouped by family (burstable / general / compute
+// / memory / storage / gpu) with vCPU + RAM annotation so users know what
+// they're picking.
+function InstanceTypeSelect({provider, value, onChange, className = 'fi', allowCustom = true}) {
+  const [items, setItems] = useState(null);   // null = loading; [] = empty/failed
+  const [err, setErr] = useState('');
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      try {
+        const d = await api('GET', `/api/instances/catalog?provider=${encodeURIComponent(provider)}`);
+        if (alive) setItems(Array.isArray(d?.instances) ? d.instances : []);
+      } catch (e) {
+        if (alive) { setItems([]); setErr(String(e.message || e)); }
+      }
+    })();
+    return () => { alive = false; };
+  }, [provider]);
+  if (items === null) {
+    return <input className={className} value={value || ''} disabled placeholder="Loading instance types…" />;
+  }
+  if (!items.length) {
+    return <input className={className} value={value || ''} onChange={e => onChange(e.target.value)}
+                  placeholder={err ? `catalog unavailable (${err.slice(0,30)})` : 'Type instance name'} />;
+  }
+  const byFamily = items.reduce((acc, it) => {
+    const f = it.family || 'other';
+    (acc[f] = acc[f] || []).push(it);
+    return acc;
+  }, {});
+  // Preserve the family-ordering the API returned (already sorted there).
+  const families = Array.from(new Set(items.map(it => it.family || 'other')));
+  const valueInList = items.some(it => it.name === value);
+  return (
+    <div style={{display:'flex',gap:6,alignItems:'center'}}>
+      <select className={className} value={valueInList ? value : (allowCustom ? '__custom__' : (items[0]?.name || ''))}
+              onChange={e => onChange(e.target.value === '__custom__' ? value : e.target.value)}>
+        {families.map(f => (
+          <optgroup key={f} label={f.toUpperCase()}>
+            {byFamily[f].map(it => (
+              <option key={it.name} value={it.name}>
+                {it.name} — {it.vcpu} vCPU · {(it.ram_mb/1024).toFixed(it.ram_mb < 1024 ? 1 : 0)} GB
+              </option>
+            ))}
+          </optgroup>
+        ))}
+        {allowCustom && <option value="__custom__">— custom (type below) —</option>}
+      </select>
+      {(!valueInList && allowCustom) && (
+        <input className={className} style={{maxWidth:160}} value={value || ''}
+               onChange={e => onChange(e.target.value)} placeholder="custom type" />
+      )}
+    </div>
+  );
+}
+
+// runtimeSizingRows — formats the {requested_vcpu/ram_mb, cpu, memory_mb,
+// tier, host_cpu_cap, host_mem_cap_mb} block onto detail-row tuples that drop
+// into any [['Label', 'value'], ...] grid. When the host clamped the choice
+// (provisioned < requested) we add a ⚠ row so the user SEES the gap — picking
+// m5.8xlarge on a 4-CPU laptop must not silently look like 32 vCPU got handed
+// to LXD.
+function runtimeSizingRows(sizing) {
+  if (!sizing || typeof sizing !== 'object') return [];
+  const reqCpu = Number(sizing.requested_vcpu || 0);
+  const reqMemMb = Number(sizing.requested_ram_mb || 0);
+  const gotCpu = Number(sizing.cpu || 0);
+  const gotMemMb = Number(sizing.memory_mb || 0);
+  const tier = String(sizing.tier || '—');
+  const capCpu = sizing.host_cpu_cap;
+  const capMemMb = sizing.host_mem_cap_mb;
+  if (!reqCpu || !gotCpu) return [];
+  const fmtGB = (mb) => (mb < 1024 ? `${mb} MB` : `${(mb / 1024).toFixed(mb < 10240 ? 1 : 0)} GB`);
+  const clamped = (gotCpu < reqCpu) || (gotMemMb < reqMemMb);
+  const rows = [
+    ['Sizing — requested',   `${reqCpu} vCPU · ${fmtGB(reqMemMb)}  (chosen instance type)`],
+    ['Sizing — provisioned', `${gotCpu} CPU · ${fmtGB(gotMemMb)}  (${tier} tier${clamped ? ', host-capped' : ''})`],
+  ];
+  if (capCpu != null && capMemMb != null) {
+    rows.push(['Sizing — host caps', `≤ ${capCpu} CPU · ${fmtGB(capMemMb)} per container`]);
+  }
+  if (clamped) {
+    rows.push(['⚠ Host-clamped',
+      `Your host can't provide the full ${reqCpu} vCPU / ${fmtGB(reqMemMb)}. ` +
+      `The container is sized to the host budget (${gotCpu} CPU / ${fmtGB(gotMemMb)}). ` +
+      `The chosen size still drives metadata + capacity simulation.`]);
+  }
+  return rows;
+}
+
 function ProvidersView({providers, onOpenSpaces, notify}) {
   const cards = (providers && providers.length ? providers : [
     {
@@ -5945,10 +6243,10 @@ function ProvidersView({providers, onOpenSpaces, notify}) {
     {
       provider_id: 'azure',
       display_name: 'Azure',
-      description: 'Reserved provider surface for future Azure simulator packs.',
+      description: 'Azure portal-style console + ARM REST API, az CLI / Java / Go.',
       surface: {theme: {accent:'#0078d4', accent_dark:'#005a9e', panel:'#fff', border:'#d7e6f7', canvas:'#f5f9ff'}},
-      implemented_services: [],
-      tooling: [],
+      implemented_services: ['Virtual Machines','Blob Storage','SQL Database','Service Bus','Cosmos DB','Functions','API Management','Virtual Network','Entra ID / RBAC'],
+      tooling: [{label:'az CLI', status:'partial'}, {label:'ARM REST API', status:'integrated'}, {label:'Azure Java SDK', status:'partial'}, {label:'Azure Go SDK', status:'partial'}],
     },
     {
       provider_id: 'other',
@@ -5973,12 +6271,16 @@ function ProvidersView({providers, onOpenSpaces, notify}) {
   const openProvider = (provider) => {
     if (provider.provider_id === 'aws') return onOpenSpaces('aws');
     if (provider.provider_id === 'gcp') return onOpenSpaces('gcp');
+    // Azure now follows the same Provider → Spaces → Console flow as AWS/GCP;
+    // the actual jump to /console/azure happens from the space-card Connect button.
+    if (provider.provider_id === 'azure') return onOpenSpaces('azure');
     notify(`${provider.display_name} surface is reserved for future simulator packs.`, 'info');
   };
 
   return (
     <div style={{minHeight:'100vh',background:'#f2f3f3'}}>
       <div style={{padding:'20px',maxWidth:1400,margin:'0 auto'}}>
+        <TenantBar notify={notify} />
         <div className="panel">
           <div className="ph">
             <div>
@@ -6012,7 +6314,7 @@ function ProvidersView({providers, onOpenSpaces, notify}) {
                 const accentDark = theme.accent_dark || accent;
                 const background = theme.canvas || '#fff';
                 const border = theme.border || '#eaeded';
-                const active = provider.provider_id === 'aws' || provider.provider_id === 'gcp';
+                const active = provider.provider_id === 'aws' || provider.provider_id === 'gcp' || provider.provider_id === 'azure';
                 return (
                   <div
                     key={provider.provider_id}
@@ -6867,7 +7169,8 @@ function LaunchInstanceModal({onClose, onDone, notify, defaults = {}}) {
             </div>
             <div className="fg">
               <label className="fl">Instance type</label>
-              <input className="fi" value={form.instance_type} onChange={e=>setForm(f=>({...f,instance_type:e.target.value}))} />
+              <InstanceTypeSelect provider="aws" value={form.instance_type}
+                onChange={v => setForm(f => ({...f, instance_type: v}))} />
             </div>
             <div className="fg">
               <label className="fl">Key pair</label>
@@ -7359,6 +7662,7 @@ function EC2View({notify}) {
     ['Instance ID', selectedSingle.instance_id],
     ['Instance state', selectedSingle.state],
     ['Instance type', selectedSingle.instance_type],
+    ...runtimeSizingRows(selectedSingle.runtime_sizing),
     ['AMI', selectedSingle.ami_name || selectedSingle.ami],
     ['Runtime image', selectedSingle.runtime_image || 'python:3.12-slim'],
     ['Runtime backend', selectedSingle.runtime_backend || 'unknown'],
@@ -7761,13 +8065,17 @@ Version=2016-11-15</pre>
                     ['Instance ID', selectedSingle.instance_id],
                     ['Instance state', selectedSingle.state],
                     ['Instance type', selectedSingle.instance_type],
+                    ...runtimeSizingRows(selectedSingle.runtime_sizing),
                     ['AMI', selectedSingle.ami_name || selectedSingle.ami],
                     ['Availability Zone', selectedSingle.az],
                     ['Launch time', fmtDate(selectedSingle.created)],
                     ['Key pair name', selectedSingle.key_pair || '—'],
                     ['Runtime backend', selectedSingle.runtime_backend || 'unknown'],
                   ].map(([k, v]) => (
-                    <dl className="ec2-kv" key={k}><dt>{k}</dt><dd>{String(v)}</dd></dl>
+                    <dl className="ec2-kv" key={k} style={String(k).startsWith('⚠') ? {borderColor:'#d13438'} : undefined}>
+                      <dt style={String(k).startsWith('⚠') ? {color:'#a4262c'} : undefined}>{k}</dt>
+                      <dd style={String(k).startsWith('⚠') ? {color:'#a4262c',fontWeight:600} : undefined}>{String(v)}</dd>
+                    </dl>
                   ))}
                   <dl className="ec2-kv"><dt>Endpoint</dt><dd className="ec2-mono">{selectedSingle.endpoint_url || '—'}</dd></dl>
                 </div>
@@ -13770,9 +14078,8 @@ function GCPComputeCreateModal({project, zone, onClose, onDone, notify}) {
               </div>
               <div className="fg">
                 <label className="fl">Machine type</label>
-                <select className="fi" value={form.machineType} onChange={e=>setForm(f=>({...f, machineType: e.target.value}))}>
-                  {gcpMachineTypes.map(v => <option key={v} value={v}>{v}</option>)}
-                </select>
+                <InstanceTypeSelect provider="gcp" value={form.machineType}
+                  onChange={v => setForm(f => ({...f, machineType: v}))} />
               </div>
             </div>
           </div>
@@ -14620,6 +14927,7 @@ function GCPComputeView({notify, onBack, onOpen}) {
                         ['Zone', selectedZoneName || zone],
                         ['Status', item.status || 'RUNNING'],
                         ['Machine type', item.machineType || 'e2-medium'],
+                        ...runtimeSizingRows(item.runtime_sizing),
                         ['Internal IP', selectedNetwork?.networkIP || '10.0.0.2'],
                         ['External IP', selectedAccess?.natIP || '127.0.0.1'],
                         ['Service account', item.serviceAccounts?.[0]?.email || 'default'],
@@ -14876,6 +15184,7 @@ function GCPComputeView({notify, onBack, onOpen}) {
                             ['Project', project],
                             ['Zone', gcpLastPath(selected.zone) || zone],
                             ['Machine type', gcpLastPath(selected.machineType) || 'e2-micro'],
+                            ...runtimeSizingRows(selected.runtime_sizing),
                             ['Status', String(selected.status || 'UNKNOWN').toLowerCase()],
                             ['Instance groups', (selected.instanceGroups || []).map(gcpLastPath).join(', ') || '—'],
                             ['Created', fmtDate(selected.creationTimestamp)],
@@ -15435,7 +15744,7 @@ function GCPStorageView({notify, onBack, onOpen}) {
       {label: 'Version', width: '120px'},
       {label: 'Bindings', width: '120px'},
       {label: 'Updated', width: '170px'},
-      {label: 'Actions', width: '128px'},
+      {label: 'Actions', width: '220px'},
     ];
   }, [resourceTab]);
   const bucketTabs = [
@@ -15815,7 +16124,7 @@ function GCPStorageView({notify, onBack, onOpen}) {
               <td>{fmtDate(item.updateTime)}</td>
               <td className="gcp-row-actions">
                 <div className="gcp-row-actions-inner">
-                  <button className="btn btn-d" onClick={async (e) => {
+                  <button className="btn gcp-btn-s" onClick={async (e) => {
                     e.stopPropagation();
                     try {
                       const bindings = await promptPolicyBindings(item.bindings || []);
@@ -15829,6 +16138,21 @@ function GCPStorageView({notify, onBack, onOpen}) {
                   }}>
                     <span className="material-symbols-outlined gcp-btn-icon" aria-hidden="true">edit</span>
                     <span>Edit</span>
+                  </button>
+                  <button className="btn btn-d" onClick={async (e) => {
+                    e.stopPropagation();
+                    if (!bucketName) return notify('Select a bucket first.', 'error');
+                    if (!(item.bindings || []).length) return notify('Policy already has no bindings.', 'info');
+                    try {
+                      await GCPStorage.setPolicy(bucketName, {version: item.version || 1, etag: item.etag || '', bindings: []});
+                      notify('Bucket policy bindings cleared', 'success');
+                      setResourceReload(v => v + 1);
+                    } catch (err) {
+                      notify(err.message, 'error');
+                    }
+                  }}>
+                    <span className="material-symbols-outlined gcp-btn-icon" aria-hidden="true">delete</span>
+                    <span>Delete</span>
                   </button>
                 </div>
               </td>
@@ -16345,6 +16669,15 @@ function GCPCloudSQLView({notify, onBack, onOpen}) {
 
   if (resourceTab === 'instances') {
     return (
+      <>
+      {showCreate && (
+        <GCPCloudSQLCreateModal
+          project={project}
+          onClose={() => setShowCreate(false)}
+          onDone={() => { setShowCreate(false); load(); }}
+          notify={notify}
+        />
+      )}
       <GCPListShell
         title="Cloud SQL / Instances"
         subtitle="One list, one selected instance details pane, and tabs for connectivity, security, and operations."
@@ -16367,6 +16700,7 @@ function GCPCloudSQLView({notify, onBack, onOpen}) {
             <button className="btn gcp-btn-s" onClick={() => setResourceTab('insights')}>Query insights</button>
           </div>
         )}
+        tableClassName="gcp-table-cloudsql-instances"
         tableHead={['Instance ID', 'Status', 'Database version', 'Tier', 'Location', 'Created', 'Actions']}
         renderRow={(item, selectedRow, select) => (
           <tr key={item.name} className={selectedRow ? 'active' : ''} onClick={select}>
@@ -16379,19 +16713,21 @@ function GCPCloudSQLView({notify, onBack, onOpen}) {
             <td>{item.settings?.tier || item.instanceType || 'db-f1-micro'}</td>
             <td>{item.region || region}</td>
             <td>{fmtDate(item.createTime || item.updateTime)}</td>
-            <td className="btn-grp">
-              <button className="btn gcp-btn-s" onClick={(e) => { e.stopPropagation(); updateState('start', item.name); }}>Start</button>
-              <button className="btn gcp-btn-s" onClick={(e) => { e.stopPropagation(); updateState('stop', item.name); }}>Stop</button>
-              <button className="btn gcp-btn-s" onClick={(e) => { e.stopPropagation(); updateState('restart', item.name); }}>Restart</button>
-              <button className="btn btn-d" onClick={async (e) => {
-                e.stopPropagation();
-                try {
-                  await GCPCloudSQL.deleteInstance(project, item.name);
-                  notify('Cloud SQL instance deleted', 'success');
-                  setSelectedId('');
-                  await load();
-                } catch (err) { notify(err.message, 'error'); }
-              }}>Delete</button>
+            <td className="gcp-row-actions">
+              <div className="gcp-row-actions-inner">
+                <button className="btn gcp-btn-s" onClick={(e) => { e.stopPropagation(); updateState('start', item.name); }}>Start</button>
+                <button className="btn gcp-btn-s" onClick={(e) => { e.stopPropagation(); updateState('stop', item.name); }}>Stop</button>
+                <button className="btn gcp-btn-s" onClick={(e) => { e.stopPropagation(); updateState('restart', item.name); }}>Restart</button>
+                <button className="btn btn-d" onClick={async (e) => {
+                  e.stopPropagation();
+                  try {
+                    await GCPCloudSQL.deleteInstance(project, item.name);
+                    notify('Cloud SQL instance deleted', 'success');
+                    setSelectedId('');
+                    await load();
+                  } catch (err) { notify(err.message, 'error'); }
+                }}>Delete</button>
+              </div>
             </td>
           </tr>
         )}
@@ -16494,6 +16830,7 @@ function GCPCloudSQLView({notify, onBack, onOpen}) {
           </>
         )}
       />
+      </>
     );
   }
 
@@ -16951,6 +17288,85 @@ function GCPPubSubView({notify, onBack, onOpen}) {
     GCPPubSub.topicSubscriptions(project, selectedName).then(data => setSubs(data.subscriptions || [])).catch(() => setSubs([]));
   }, [project, tab, selectedName]);
 
+  // Defined before the early returns below so the topics/subscriptions and
+  // schemas branches can wire onCreate/Delete/Publish/Pull (a const referenced
+  // before its definition is undefined at render → the Create button vanishes).
+  const createCurrent = async () => {
+    if (tab === 'topics') {
+      const form = await openGcpInputDialog({
+        title: 'Create topic',
+        description: 'Create a new Pub/Sub topic in the current project.',
+        submitLabel: 'Create topic',
+        fields: [{name: 'name', label: 'Topic name', defaultValue: 'demo-topic', required: true, placeholder: 'demo-topic'}],
+      });
+      const name = String(form?.name || '').trim();
+      if (!name) return;
+      try {
+        await GCPPubSub.createTopic(project, {name});
+        notify('Topic created', 'success');
+        await load();
+      } catch (e) { notify(e.message, 'error'); }
+    } else {
+      const form = await openGcpInputDialog({
+        title: 'Create subscription',
+        description: 'Create a new Pub/Sub subscription and attach it to a topic.',
+        submitLabel: 'Create subscription',
+        fields: [
+          {name: 'name', label: 'Subscription name', defaultValue: 'demo-sub', required: true, placeholder: 'demo-sub'},
+          {name: 'topic', label: 'Topic name', defaultValue: selectedName || 'demo-topic', required: true, placeholder: 'demo-topic'},
+        ],
+      });
+      const name = String(form?.name || '').trim();
+      const topic = String(form?.topic || '').trim();
+      if (!name || !topic) return;
+      try {
+        await GCPPubSub.createSubscription(project, {name, topic});
+        notify('Subscription created', 'success');
+        await load();
+      } catch (e) { notify(e.message, 'error'); }
+    }
+  };
+
+  const deleteCurrent = async (item) => {
+    if (!item) return;
+    try {
+      if (tab === 'topics') {
+        await GCPPubSub.deleteTopic(project, gcpLastPath(item.name));
+      } else {
+        await GCPPubSub.deleteSubscription(project, gcpLastPath(item.name));
+      }
+      notify(`${tab === 'topics' ? 'Topic' : 'Subscription'} deleted`, 'success');
+      setSelectedId('');
+      await load();
+    } catch (e) {
+      notify(e.message, 'error');
+    }
+  };
+
+  const publishToTopic = async () => {
+    if (tab !== 'topics' || !selected) return;
+    try {
+      await GCPPubSub.publish(project, selectedName, {messages:[{data: publishText}]});
+      notify('Message published', 'success');
+    } catch (e) { notify(e.message, 'error'); }
+  };
+
+  const pullMessages = async () => {
+    if (tab !== 'subscriptions' || !selected) return;
+    try {
+      await GCPPubSub.pull(project, selectedName, {maxMessages: Number(messageLimit) || 1});
+      notify('Messages pulled', 'success');
+    } catch (e) { notify(e.message, 'error'); }
+  };
+
+  const ackMessages = async () => {
+    if (tab !== 'subscriptions' || !selected) return;
+    try {
+      await GCPPubSub.acknowledge(project, selectedName, {ackIds: ['ack-1']});
+      notify('Acknowledged messages', 'success');
+    } catch (e) { notify(e.message, 'error'); }
+  };
+
   if (tab === 'topics' || tab === 'subscriptions') {
     const activeTitle = tab === 'topics' ? 'Topics' : 'Subscriptions';
     const activeItems = items;
@@ -16991,6 +17407,35 @@ function GCPPubSubView({notify, onBack, onOpen}) {
             <td>{tab === 'topics' ? (item.kmsKeyName || '—') : (gcpLastPath(item.topic) || '—')}</td>
             <td>{fmtDate(item.updateTime || item.createTime)}</td>
             <td className="btn-grp">
+              {tab === 'topics' && (
+                <button className="btn gcp-btn-s" onClick={async (e) => {
+                  e.stopPropagation();
+                  const form = await openGcpInputDialog({
+                    title: 'Edit topic',
+                    description: `Update labels, retention, and encryption for ${gcpLastPath(item.name)}.`,
+                    submitLabel: 'Save topic',
+                    fields: [
+                      {name: 'labels', label: 'Labels (key=value, comma-separated)', defaultValue: Object.entries(item.labels || {}).map(([k, v]) => `${k}=${v}`).join(', '), placeholder: 'env=prod, team=data'},
+                      {name: 'messageRetentionDuration', label: 'Message retention (e.g. 86400s)', defaultValue: item.messageRetentionDuration || '', placeholder: '86400s'},
+                      {name: 'kmsKeyName', label: 'KMS key name', defaultValue: item.kmsKeyName || ''},
+                    ],
+                  });
+                  if (!form) return;
+                  const labels = {};
+                  String(form.labels || '').split(',').map(s => s.trim()).filter(Boolean).forEach(pair => {
+                    const i = pair.indexOf('=');
+                    if (i > 0) labels[pair.slice(0, i).trim()] = pair.slice(i + 1).trim();
+                  });
+                  const payload = {labels};
+                  if (String(form.messageRetentionDuration || '').trim()) payload.messageRetentionDuration = String(form.messageRetentionDuration).trim();
+                  if (String(form.kmsKeyName || '').trim()) payload.kmsKeyName = String(form.kmsKeyName).trim();
+                  try {
+                    await GCPPubSub.updateTopic(project, gcpLastPath(item.name), payload);
+                    notify('Topic updated', 'success');
+                    await load();
+                  } catch (err) { notify(err.message, 'error'); }
+                }}>Edit</button>
+              )}
               {tab === 'subscriptions' && (
                 <button className="btn gcp-btn-s" onClick={async (e) => {
                   e.stopPropagation();
@@ -17155,81 +17600,6 @@ function GCPPubSubView({notify, onBack, onOpen}) {
     );
   }
 
-  const createCurrent = async () => {
-    if (tab === 'topics') {
-      const form = await openGcpInputDialog({
-        title: 'Create topic',
-        description: 'Create a new Pub/Sub topic in the current project.',
-        submitLabel: 'Create topic',
-        fields: [{name: 'name', label: 'Topic name', defaultValue: 'demo-topic', required: true, placeholder: 'demo-topic'}],
-      });
-      const name = String(form?.name || '').trim();
-      if (!name) return;
-      try {
-        await GCPPubSub.createTopic(project, {name});
-        notify('Topic created', 'success');
-        await load();
-      } catch (e) { notify(e.message, 'error'); }
-    } else {
-      const form = await openGcpInputDialog({
-        title: 'Create subscription',
-        description: 'Create a new Pub/Sub subscription and attach it to a topic.',
-        submitLabel: 'Create subscription',
-        fields: [
-          {name: 'name', label: 'Subscription name', defaultValue: 'demo-sub', required: true, placeholder: 'demo-sub'},
-          {name: 'topic', label: 'Topic name', defaultValue: selectedName || 'demo-topic', required: true, placeholder: 'demo-topic'},
-        ],
-      });
-      const name = String(form?.name || '').trim();
-      const topic = String(form?.topic || '').trim();
-      if (!name || !topic) return;
-      try {
-        await GCPPubSub.createSubscription(project, {name, topic});
-        notify('Subscription created', 'success');
-        await load();
-      } catch (e) { notify(e.message, 'error'); }
-    }
-  };
-
-  const deleteCurrent = async (item) => {
-    if (!item) return;
-    try {
-      if (tab === 'topics') {
-        await GCPPubSub.deleteTopic(project, gcpLastPath(item.name));
-      } else {
-        await GCPPubSub.deleteSubscription(project, gcpLastPath(item.name));
-      }
-      notify(`${tab === 'topics' ? 'Topic' : 'Subscription'} deleted`, 'success');
-      setSelectedId('');
-      await load();
-    } catch (e) {
-      notify(e.message, 'error');
-    }
-  };
-
-  const publishToTopic = async () => {
-    if (tab !== 'topics' || !selected) return;
-    try {
-      await GCPPubSub.publish(project, selectedName, {messages:[{data: publishText}]});
-      notify('Message published', 'success');
-    } catch (e) { notify(e.message, 'error'); }
-  };
-
-  const pullMessages = async () => {
-    if (tab !== 'subscriptions' || !selected) return;
-    try {
-      await GCPPubSub.pull(project, selectedName, {maxMessages: Number(messageLimit) || 1});
-      notify('Messages pulled', 'success');
-    } catch (e) { notify(e.message, 'error'); }
-  };
-
-  const ackMessages = async () => {
-    if (tab !== 'subscriptions' || !selected) return;
-    try {
-      await GCPPubSub.acknowledge(project, selectedName, {ackIds: ['ack-1']});
-      notify('Acknowledged messages', 'success');
-    } catch (e) { notify(e.message, 'error'); }
-  };
 
   return (
       <div className={`gcp-shell${sidebarCollapsed ? ' gcp-sidebar-collapsed' : ''}`}>
@@ -19189,6 +19559,55 @@ function GCPIAMView({notify, onBack, onOpen}) {
                 notify('Policy refreshed', 'success');
               } catch (e) { notify(e.message, 'error'); }
             }}>Refresh policy</button>
+            <button className="btn gcp-btn-s" onClick={async () => {
+              const form = await openGcpInputDialog({
+                title: 'Add role binding',
+                description: 'Grant a role to a member on this project IAM policy.',
+                submitLabel: 'Add binding',
+                fields: [
+                  {name: 'role', label: 'Role', defaultValue: 'roles/viewer', required: true, placeholder: 'roles/viewer'},
+                  {name: 'member', label: 'Member', defaultValue: 'user:alice@example.com', required: true, placeholder: 'user:..., serviceAccount:..., group:...'},
+                ],
+              });
+              if (!form) return;
+              const role = String(form.role || '').trim();
+              const member = String(form.member || '').trim();
+              if (!role || !member) return;
+              try {
+                const cur = await GCPIAM.getPolicy(project).catch(() => ({}));
+                const bindings = Array.isArray(cur.bindings) ? cur.bindings.map(b => ({...b, members: [...(b.members || [])]})) : [];
+                let b = bindings.find(x => x.role === role);
+                if (!b) { b = {role, members: []}; bindings.push(b); }
+                if (!b.members.includes(member)) b.members.push(member);
+                await GCPIAM.setPolicy(project, {version: cur.version || 1, etag: cur.etag || '', bindings});
+                setPolicy(await GCPIAM.getPolicy(project));
+                notify('Role binding added', 'success');
+              } catch (e) { notify(e.message, 'error'); }
+            }}>Add role binding</button>
+            <button className="btn gcp-btn-s" onClick={async () => {
+              const form = await openGcpInputDialog({
+                title: 'Remove role binding',
+                description: 'Remove a member from a role on this project IAM policy.',
+                submitLabel: 'Remove',
+                fields: [
+                  {name: 'role', label: 'Role', defaultValue: 'roles/viewer', required: true},
+                  {name: 'member', label: 'Member', defaultValue: '', required: true},
+                ],
+              });
+              if (!form) return;
+              const role = String(form.role || '').trim();
+              const member = String(form.member || '').trim();
+              if (!role || !member) return;
+              try {
+                const cur = await GCPIAM.getPolicy(project).catch(() => ({}));
+                const bindings = (Array.isArray(cur.bindings) ? cur.bindings : [])
+                  .map(b => ({...b, members: (b.members || []).filter(m => m !== member)}))
+                  .filter(b => b.role !== role || (b.members || []).length > 0);
+                await GCPIAM.setPolicy(project, {version: cur.version || 1, etag: cur.etag || '', bindings});
+                setPolicy(await GCPIAM.getPolicy(project));
+                notify('Role binding removed', 'success');
+              } catch (e) { notify(e.message, 'error'); }
+            }}>Remove binding</button>
           </div>
           <pre className="gcp-doc-code" style={{marginTop:10, whiteSpace:'pre-wrap'}}>{JSON.stringify(policy || {}, null, 2)}</pre>
           <div className="btn-grp" style={{marginTop:12}}>
@@ -19561,10 +19980,81 @@ function App() {
           onFilter={setSpaceProviderFilter}
           onCreate={(space) => setSpaces(prev => [space, ...prev])}
           onDelete={(spaceId) => setSpaces(prev => prev.filter(space => space.id !== spaceId))}
-          onConnect={(space) => {
+          onConnect={async (space) => {
             window.localStorage.setItem('cloudlearn.active.space', space.name);
             window.localStorage.setItem('cloudlearn.active.space.provider', space.provider_id);
-            if (space.provider_id === 'gcp') return open('gcp-console');
+            if (space.provider_id === 'aws') {
+              // Mirror Azure's Provider→Space→Console flow: ensure backend has
+              // an AWS-provider space + switch to it, then jump to /console/aws.
+              // The legacy 'space-legacy' is already provider=aws so this is
+              // usually a no-op; falls back to legacy on any error.
+              try {
+                const list = await fetch('/api/spaces').then(r => r.json()).catch(() => ({spaces:[]}));
+                let awsSpace = (list.spaces || []).find(s => (s.provider || '').toLowerCase() === 'aws');
+                if (!awsSpace) {
+                  const created = await fetch('/api/spaces', {
+                    method: 'POST', headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({name: space.name, provider: 'aws', tenant_id: 'default'}),
+                  }).then(r => r.json()).catch(() => null);
+                  awsSpace = created && created.space ? created.space : null;
+                }
+                if (awsSpace && awsSpace.space_id) {
+                  await fetch(`/api/spaces/${awsSpace.space_id}/switch`, {method: 'POST'}).catch(() => {});
+                }
+              } catch (_) { /* best-effort — still let the navigation happen */ }
+              window.location.href = '/console/aws';
+              return;
+            }
+            if (space.provider_id === 'azure') {
+              // The Azure console (/console/azure) is a standalone SPA that talks
+              // to the backend's CURRENT active space. AWS/GCP work without this
+              // because the legacy backend space is already provider=aws. For
+              // Azure we must (a) ensure an Azure-provider space exists on the
+              // backend, (b) switch active to it, then (c) navigate to the
+              // console. Otherwise the space-scoped state proxy rejects writes
+              // (provider mismatch → per-request scratch dict, nothing persists).
+              try {
+                const list = await fetch('/api/spaces').then(r => r.json()).catch(() => ({spaces:[]}));
+                let azureSpace = (list.spaces || []).find(s => (s.provider || '').toLowerCase() === 'azure');
+                if (!azureSpace) {
+                  const created = await fetch('/api/spaces', {
+                    method: 'POST', headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({name: space.name, provider: 'azure', tenant_id: 'default'}),
+                  }).then(r => r.json()).catch(() => null);
+                  azureSpace = created && created.space ? created.space : null;
+                }
+                if (azureSpace && azureSpace.space_id) {
+                  await fetch(`/api/spaces/${azureSpace.space_id}/switch`, {method: 'POST'}).catch(() => {});
+                }
+              } catch (_) { /* best-effort — still let the navigation happen */ }
+              window.location.href = '/console/azure';
+              return;
+            }
+            if (space.provider_id === 'gcp') {
+              // Mirror Azure/AWS Provider→Space→Console flow: ensure backend
+              // has a GCP-provider space + switch to it, then navigate to
+              // /console/gcp. Closes the scratch-dict trap identified in the
+              // cross-cloud parity audit (GCP API calls when active space is
+              // not provider=gcp silently write to a per-request scratch
+              // dict). requireGcpSpace inside the standalone console gates
+              // for the same reason.
+              try {
+                const list = await fetch('/api/spaces').then(r => r.json()).catch(() => ({spaces:[]}));
+                let gcpSpace = (list.spaces || []).find(s => (s.provider || '').toLowerCase() === 'gcp');
+                if (!gcpSpace) {
+                  const created = await fetch('/api/spaces', {
+                    method: 'POST', headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({name: space.name, provider: 'gcp', tenant_id: 'default'}),
+                  }).then(r => r.json()).catch(() => null);
+                  gcpSpace = created && created.space ? created.space : null;
+                }
+                if (gcpSpace && gcpSpace.space_id) {
+                  await fetch(`/api/spaces/${gcpSpace.space_id}/switch`, {method: 'POST'}).catch(() => {});
+                }
+              } catch (_) { /* best-effort — still navigate */ }
+              window.location.href = '/console/gcp';
+              return;
+            }
             return open('dashboard');
           }}
         />
@@ -19704,6 +20194,7 @@ function App() {
             <div className="hdr-logo">aws<span>☁</span></div>
             <div className="hdr-svc"><strong>CloudLearn Product Center</strong></div>
             <div className="hdr-right">
+              <button className="hdr-pill" title="API docs (Swagger)" onClick={() => window.open('/docs', '_blank', 'noopener')}><span className="material-symbols-outlined">api</span>API</button>
               <span className="badge">ADMIN</span>
               <span>local</span>
             </div>
@@ -19727,6 +20218,7 @@ function App() {
               />
             </div>
             <div className="hdr-right">
+              <button className="hdr-pill" title="API docs (Swagger)" onClick={() => window.open('/docs', '_blank', 'noopener')}><span className="material-symbols-outlined">api</span>API</button>
               <span className="badge">SIMULATOR</span>
               <span>us-east-1</span>
               <span style={{background:'#37475a',padding:'3px 10px',borderRadius:3,fontSize:12}}>root</span>

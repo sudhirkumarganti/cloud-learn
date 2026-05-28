@@ -43,6 +43,23 @@ services:
       - cloudlearn-gcs:/data
     restart: unless-stopped
 
+  # P1: official Google emulators — let real gRPC client libraries (Pub/Sub,
+  # Firestore) work by pointing PUBSUB_EMULATOR_HOST / FIRESTORE_EMULATOR_HOST
+  # at these; the simulator delegates its console/REST handlers to them too.
+  cloudlearn-pubsub:
+    image: gcr.io/google.com/cloudsdktool/google-cloud-cli:emulators
+    command: ["gcloud","beta","emulators","pubsub","start","--host-port=0.0.0.0:8085","--project=cloudlearn"]
+    ports:
+      - "8085:8085"
+    restart: unless-stopped
+
+  cloudlearn-firestore:
+    image: gcr.io/google.com/cloudsdktool/google-cloud-cli:emulators
+    command: ["gcloud","beta","emulators","firestore","start","--host-port=0.0.0.0:8080","--project=cloudlearn"]
+    ports:
+      - "8080:8080"
+    restart: unless-stopped
+
   simulator:
     build: .
     ports:
@@ -53,6 +70,8 @@ services:
       - cloudlearn-sql-postgres
       - cloudlearn-sql-mysql
       - cloudlearn-gcs
+      - cloudlearn-pubsub
+      - cloudlearn-firestore
     environment:
       CLOUDLEARN_STATE_FILE: /data/cloudlearn_state.sqlite3
       CLOUDLEARN_LICENSE_SECRET: cloudlearn-dev-secret
@@ -72,6 +91,11 @@ services:
       CLOUDLEARN_SQL_MYSQL_ADMIN_PASSWORD: cloudlearn
       # Real Cloud Storage data plane (P1b): object bytes live in fake-gcs-server.
       CLOUDLEARN_GCS_URL: http://cloudlearn-gcs:4443
+      # P1: official Pub/Sub + Firestore emulators back the gRPC data planes.
+      PUBSUB_EMULATOR_HOST: cloudlearn-pubsub:8085
+      FIRESTORE_EMULATOR_HOST: cloudlearn-firestore:8080
+      CLOUDLEARN_PUBSUB_EMULATOR_HOST: cloudlearn-pubsub:8085
+      CLOUDLEARN_FIRESTORE_EMULATOR_HOST: cloudlearn-firestore:8080
     volumes:
       - cloudlearn-data:/data
       - /var/lib/cloudlearn/deployments:/var/lib/cloudlearn/deployments

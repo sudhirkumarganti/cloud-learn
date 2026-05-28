@@ -19,6 +19,10 @@ _TARGET_OVERRIDES = {
     "api_gcp_iam_create_service_account": gcp_iam.api_gcp_iam_create_service_account,
     "api_gcp_iam_patch_service_account": gcp_iam.api_gcp_iam_patch_service_account,
     "api_gcp_iam_delete_service_account": gcp_iam.api_gcp_iam_delete_service_account,
+    "api_gcp_iam_create_service_account_key": gcp_iam.api_gcp_iam_create_service_account_key,
+    "api_gcp_iam_list_service_account_keys": gcp_iam.api_gcp_iam_list_service_account_keys,
+    "api_gcp_iam_get_service_account_key": gcp_iam.api_gcp_iam_get_service_account_key,
+    "api_gcp_iam_delete_service_account_key": gcp_iam.api_gcp_iam_delete_service_account_key,
     "api_gcp_iam_list_users": gcp_iam.api_gcp_iam_list_users,
     "api_gcp_iam_create_user": gcp_iam.api_gcp_iam_create_user,
     "api_gcp_iam_delete_user": gcp_iam.api_gcp_iam_delete_user,
@@ -154,12 +158,42 @@ def register(app, h) -> None:
     @app.get("/sql/v1beta4/projects/{project}/operations")
     @app.get("/api/gcp/sql/v1beta4/projects/{project}/operations")
     def api_gcp_sql_list_operations(project: str):
-        return {"kind": "sql#operationsList", "items": []}
+        s = _server()
+        recs = s.gcp_sql_state.get("operation_records")
+        ops = list(recs.values()) if isinstance(recs, dict) else []
+        return {"kind": "sql#operationsList", "items": ops}
+
+    @app.get("/sql/v1beta4/projects/{project}/operations/{operation}")
+    @app.get("/api/gcp/sql/v1beta4/projects/{project}/operations/{operation}")
+    def api_gcp_sql_get_operation(project: str, operation: str):
+        # LRO poll target. Sim ops complete synchronously, so always report DONE.
+        s = _server()
+        recs = s.gcp_sql_state.get("operation_records")
+        op = recs.get(operation) if isinstance(recs, dict) else None
+        if not op:
+            op = {
+                "kind": "sql#operation", "name": operation, "status": "DONE",
+                "operationType": "CREATE", "targetProject": project,
+                "selfLink": f"{s._gcp_sql_root()}/projects/{project}/operations/{operation}",
+            }
+        return op
 
     @app.get("/v1/projects/{project}/locations/{location}/operations")
     @app.get("/api/gcp/v1/projects/{project}/locations/{location}/operations")
     def api_gcp_functions_list_operations(project: str, location: str):
         return {"operations": []}
+
+    @app.get("/v1/operations/{operation}")
+    @app.get("/api/gcp/v1/operations/{operation}")
+    def api_gcp_functions_get_operation(operation: str):
+        # Cloud Functions LRO poll target (google.longrunning.Operation). Sim ops
+        # complete synchronously → always report done.
+        s = _server()
+        recs = s.gcp_functions_state.get("operation_records")
+        op = recs.get(operation) if isinstance(recs, dict) else None
+        if not op:
+            op = {"name": f"operations/{operation}", "done": True}
+        return op
 
     # API Gateway request routing: a call to a deployed gateway is routed to its
     # backend (a Cloud Function or upstream URL) and returns the real response.
@@ -211,6 +245,9 @@ def register(app, h) -> None:
         ("POST", "/api/gcp/storage/v1/b", "api_gcp_storage_create_bucket", "(request: Request)"),
         ("POST", "/api/gcp/s3/buckets", "api_gcp_storage_create_bucket", "(request: Request)"),
         ("GET", "/storage/v1/b/{bucket}", "api_gcp_storage_get_bucket", "(bucket: str)"),
+        ("PATCH", "/storage/v1/b/{bucket}", "api_gcp_storage_patch_bucket", "(bucket: str, request: Request)"),
+        ("PUT", "/storage/v1/b/{bucket}", "api_gcp_storage_patch_bucket", "(bucket: str, request: Request)"),
+        ("PATCH", "/api/gcp/storage/v1/b/{bucket}", "api_gcp_storage_patch_bucket", "(bucket: str, request: Request)"),
         ("GET", "/api/gcp/storage/v1/b/{bucket}", "api_gcp_storage_get_bucket", "(bucket: str)"),
         ("GET", "/api/gcp/s3/buckets/{bucket}", "api_gcp_storage_get_bucket", "(bucket: str)"),
         ("DELETE", "/storage/v1/b/{bucket}", "api_gcp_storage_delete_bucket", "(bucket: str)"),
@@ -224,6 +261,7 @@ def register(app, h) -> None:
         ("POST", "/api/gcp/storage/v1/b/{bucket}/o", "api_gcp_storage_create_object", "(bucket: str, request: Request)"),
         ("POST", "/api/gcp/s3/buckets/{bucket}/objects", "api_gcp_storage_create_object", "(bucket: str, request: Request)"),
         ("GET", "/storage/v1/b/{bucket}/o/{object_name:path}", "api_gcp_storage_get_object", "(bucket: str, object_name: str, request: Request)"),
+        ("GET", "/download/storage/v1/b/{bucket}/o/{object_name:path}", "api_gcp_storage_get_object", "(bucket: str, object_name: str, request: Request)"),
         ("GET", "/api/gcp/storage/v1/b/{bucket}/o/{object_name:path}", "api_gcp_storage_get_object", "(bucket: str, object_name: str, request: Request)"),
         ("GET", "/api/gcp/s3/buckets/{bucket}/objects/{object_name:path}", "api_gcp_storage_get_object", "(bucket: str, object_name: str, request: Request)"),
         ("DELETE", "/storage/v1/b/{bucket}/o/{object_name:path}", "api_gcp_storage_delete_object", "(bucket: str, object_name: str)"),
@@ -251,10 +289,21 @@ def register(app, h) -> None:
         ("POST", "/sql/v1beta4/projects/{project}/instances", "api_gcp_sql_create_instance", "(project: str, request: Request)"),
         ("POST", "/api/gcp/rds/databases", "api_gcp_sql_create_instance", "(project: str, request: Request)"),
         ("GET", "/sql/v1beta4/projects/{project}/instances/{instance}", "api_gcp_sql_get_instance", "(project: str, instance: str)"),
+        ("PATCH", "/sql/v1beta4/projects/{project}/instances/{instance}", "api_gcp_sql_patch_instance", "(project: str, instance: str, request: Request)"),
+        ("PUT", "/sql/v1beta4/projects/{project}/instances/{instance}", "api_gcp_sql_patch_instance", "(project: str, instance: str, request: Request)"),
+        ("PATCH", "/api/gcp/sql/v1beta4/projects/{project}/instances/{instance}", "api_gcp_sql_patch_instance", "(project: str, instance: str, request: Request)"),
         ("GET", "/api/gcp/rds/databases/{instance}", "api_gcp_sql_get_instance", "(project: str, instance: str)"),
         ("DELETE", "/sql/v1beta4/projects/{project}/instances/{instance}", "api_gcp_sql_delete_instance", "(project: str, instance: str)"),
         ("DELETE", "/api/gcp/rds/databases/{instance}", "api_gcp_sql_delete_instance", "(project: str, instance: str)"),
         ("POST", "/sql/v1beta4/projects/{project}/instances/{instance}/restart", "api_gcp_sql_restart_instance", "(project: str, instance: str)"),
+        ("GET", "/sql/v1beta4/projects/{project}/instances/{instance}/users", "api_gcp_sql_list_users", "(project: str, instance: str)"),
+        ("POST", "/sql/v1beta4/projects/{project}/instances/{instance}/users", "api_gcp_sql_create_user", "(project: str, instance: str, request: Request)"),
+        ("PUT", "/sql/v1beta4/projects/{project}/instances/{instance}/users", "api_gcp_sql_create_user", "(project: str, instance: str, request: Request)"),
+        ("DELETE", "/sql/v1beta4/projects/{project}/instances/{instance}/users", "api_gcp_sql_delete_user", "(project: str, instance: str, name: str = \"\", host: str = \"\")"),
+        ("GET", "/sql/v1beta4/projects/{project}/instances/{instance}/databases", "api_gcp_sql_list_databases", "(project: str, instance: str)"),
+        ("POST", "/sql/v1beta4/projects/{project}/instances/{instance}/databases", "api_gcp_sql_create_database", "(project: str, instance: str, request: Request)"),
+        ("GET", "/sql/v1beta4/projects/{project}/instances/{instance}/databases/{database}", "api_gcp_sql_get_database", "(project: str, instance: str, database: str)"),
+        ("DELETE", "/sql/v1beta4/projects/{project}/instances/{instance}/databases/{database}", "api_gcp_sql_delete_database", "(project: str, instance: str, database: str)"),
         ("POST", "/api/gcp/rds/databases/{instance}/reboot", "api_gcp_sql_restart_instance", "(project: str, instance: str)"),
         ("GET", "/sql/v1beta4/projects/{project}/instances/{instance}/backups", "api_gcp_sql_list_backups", "(project: str, instance: str = \"\")"),
         ("GET", "/api/gcp/rds/databases/{instance}/backups", "api_gcp_sql_list_backups", "(project: str, instance: str = \"\")"),
@@ -421,6 +470,10 @@ def register(app, h) -> None:
         ("PATCH", "/api/gcp/iam/service-accounts/{account}", "api_gcp_iam_patch_service_account", "(project: str, account: str, request: Request)"),
         ("DELETE", "/v1/projects/{project}/serviceAccounts/{account}", "api_gcp_iam_delete_service_account", "(project: str, account: str)"),
         ("DELETE", "/api/gcp/iam/service-accounts/{account}", "api_gcp_iam_delete_service_account", "(project: str, account: str)"),
+        ("POST", "/v1/projects/{project}/serviceAccounts/{account}/keys", "api_gcp_iam_create_service_account_key", "(project: str, account: str, request: Request)"),
+        ("GET", "/v1/projects/{project}/serviceAccounts/{account}/keys", "api_gcp_iam_list_service_account_keys", "(project: str, account: str)"),
+        ("GET", "/v1/projects/{project}/serviceAccounts/{account}/keys/{key}", "api_gcp_iam_get_service_account_key", "(project: str, account: str, key: str)"),
+        ("DELETE", "/v1/projects/{project}/serviceAccounts/{account}/keys/{key}", "api_gcp_iam_delete_service_account_key", "(project: str, account: str, key: str)"),
         ("GET", "/api/gcp/iam/users", "api_gcp_iam_list_users", "()"),
         ("POST", "/api/gcp/iam/users", "api_gcp_iam_create_user", "(request: Request)"),
         ("DELETE", "/api/gcp/iam/users/{user_id}", "api_gcp_iam_delete_user", "(user_id: str)"),

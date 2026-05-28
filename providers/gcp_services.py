@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 from typing import Any
 
 from fastapi import HTTPException, Request
+
+from core import gcp_pubsub_emulator as _ps_emu
+from core import gcp_firestore_emulator as _fs_emu
 
 
 def _server():
@@ -35,6 +39,7 @@ TARGETS = [
     "api_gcp_storage_list_buckets",
     "api_gcp_storage_create_bucket",
     "api_gcp_storage_get_bucket",
+    "api_gcp_storage_patch_bucket",
     "api_gcp_storage_delete_bucket",
     "api_gcp_storage_list_objects",
     "api_gcp_storage_create_object",
@@ -43,8 +48,16 @@ TARGETS = [
     "api_gcp_sql_list_instances",
     "api_gcp_sql_create_instance",
     "api_gcp_sql_get_instance",
+    "api_gcp_sql_patch_instance",
     "api_gcp_sql_delete_instance",
     "api_gcp_sql_restart_instance",
+    "api_gcp_sql_list_users",
+    "api_gcp_sql_create_user",
+    "api_gcp_sql_delete_user",
+    "api_gcp_sql_list_databases",
+    "api_gcp_sql_get_database",
+    "api_gcp_sql_create_database",
+    "api_gcp_sql_delete_database",
     "api_gcp_pubsub_list_topics",
     "api_gcp_pubsub_create_topic",
     "api_gcp_pubsub_get_topic",
@@ -139,7 +152,7 @@ async def api_gcp_storage_create_bucket(request: Request):
     try:
         from core import gcp_gcs_store as gcs
         if gcs.available():
-            gcs.ensure_bucket(name)
+            gcs.ensure_bucket(s._tenant_scoped_bucket(name))
     except Exception:
         pass
     return s._gcp_storage_bucket_view(project, bucket)
@@ -152,6 +165,27 @@ def api_gcp_storage_get_bucket(bucket: str):
         raise HTTPException(404, detail="Bucket not found")
     project = str(bucket_rec.get("project") or "cloudlearn")
     return s._gcp_storage_bucket_view(project, bucket_rec)
+
+
+async def api_gcp_storage_patch_bucket(bucket: str, request: Request):
+    """PATCH/PUT /storage/v1/b/{bucket} — update bucket metadata (Terraform/SDK)."""
+    s = _server()
+    rec = s.gcp_storage_state.get("buckets", {}).get(bucket)
+    if not rec:
+        raise HTTPException(404, detail="Bucket not found")
+    payload = await request.json() if request is not None else {}
+    payload = payload if isinstance(payload, dict) else {}
+    for key in ("storageClass", "location", "locationType"):
+        if payload.get(key):
+            rec[key] = str(payload[key])
+    for key in ("labels", "versioning", "iamConfiguration", "lifecycle", "encryption", "website", "cors"):
+        if isinstance(payload.get(key), (dict, list)):
+            rec[key] = payload[key]
+    if "defaultEventBasedHold" in payload:
+        rec["defaultEventBasedHold"] = bool(payload.get("defaultEventBasedHold"))
+    rec["updated"] = s._now()
+    project = str(rec.get("project") or "cloudlearn")
+    return s._gcp_storage_bucket_view(project, rec)
 
 
 def api_gcp_storage_delete_bucket(bucket: str):
@@ -200,7 +234,7 @@ async def api_gcp_storage_create_object(bucket: str, request: Request):
         # Real SDK / gsutil upload: proxy the raw bytes to the byte store, which
         # handles media/multipart and returns the GCS object metadata.
         try:
-            _status, body = gcs.upload(bucket, str(request.url.query), raw, ctype)
+            _status, body = gcs.upload(s._tenant_scoped_bucket(bucket), str(request.url.query), raw, ctype)
             meta = json.loads(body.decode("utf-8")) if body else {}
             name = str(meta.get("name") or qp.get("name") or "")
         except Exception as exc:
@@ -222,7 +256,7 @@ async def api_gcp_storage_create_object(bucket: str, request: Request):
         ct = str(payload.get("contentType") or "text/plain")
         if gcs_ok:
             try:
-                gcs.put_text(bucket, name, data, ct)
+                gcs.put_text(s._tenant_scoped_bucket(bucket), name, data, ct)
             except Exception:
                 pass
         meta = {"size": str(len(data.encode("utf-8"))), "contentType": ct}
@@ -247,7 +281,7 @@ def api_gcp_storage_get_object(bucket: str, object_name: str, request: Request =
         try:
             from core import gcp_gcs_store as gcs
             from starlette.responses import Response
-            data, ctype = gcs.download(bucket, object_name)
+            data, ctype = gcs.download(s._tenant_scoped_bucket(bucket), object_name)
             return Response(content=data, media_type=ctype)
         except Exception as exc:
             raise HTTPException(404, detail=f"Object media not available: {str(exc)[:120]}")
@@ -263,7 +297,7 @@ def api_gcp_storage_delete_object(bucket: str, object_name: str):
         raise HTTPException(404, detail="Object not found")
     try:
         from core import gcp_gcs_store as gcs
-        gcs.delete(bucket, object_name)
+        gcs.delete(s._tenant_scoped_bucket(bucket), object_name)
     except Exception:
         pass
     del s.gcp_storage_state["objects"][bucket][object_name]
@@ -309,7 +343,9 @@ async def api_gcp_sql_create_instance(project: str, request: Request):
         instance["_backend"] = None
         instance["_backend_error"] = str(exc)[:200]
     s.gcp_sql_state.setdefault("instances", {})[instance["name"]] = instance
-    return s._gcp_sql_instance_view(project, instance)
+    # Real Cloud SQL insert returns a long-running Operation (clients/Terraform
+    # poll operations.get until DONE), not the instance — so does the simulator.
+    return s._gcp_sql_make_operation(project, instance["name"], "CREATE")
 
 
 def api_gcp_sql_get_instance(project: str, instance: str):
@@ -319,6 +355,26 @@ def api_gcp_sql_get_instance(project: str, instance: str):
     if not rec or str(rec.get("project") or project) != project:
         raise HTTPException(404, detail="Instance not found")
     return s._gcp_sql_instance_view(project, rec)
+
+
+async def api_gcp_sql_patch_instance(project: str, instance: str, request: Request):
+    """PATCH/PUT .../instances/{i} — update settings; returns an LRO (Terraform/SDK)."""
+    s = _server()
+    project = s._gcp_project_name(project)
+    rec = s.gcp_sql_state.get("instances", {}).get(instance)
+    if not rec or str(rec.get("project") or project) != project:
+        raise HTTPException(404, detail="Instance not found")
+    payload = await request.json() if request is not None else {}
+    payload = payload if isinstance(payload, dict) else {}
+    if isinstance(payload.get("settings"), dict):
+        cur = rec.get("settings") if isinstance(rec.get("settings"), dict) else {}
+        cur.update(payload["settings"])
+        rec["settings"] = cur
+    for key in ("databaseVersion", "region"):
+        if payload.get(key):
+            rec[key] = str(payload[key])
+    rec["updateTime"] = s._now()
+    return s._gcp_sql_make_operation(project, instance, "UPDATE")
 
 
 def api_gcp_sql_delete_instance(project: str, instance: str):
@@ -334,7 +390,7 @@ def api_gcp_sql_delete_instance(project: str, instance: str):
     except Exception:
         pass
     del s.gcp_sql_state["instances"][instance]
-    return {"kind": "sql#operation", "operationType": "DELETE", "status": "DONE", "targetLink": f"{s._gcp_sql_root()}/projects/{project}/instances/{instance}"}
+    return s._gcp_sql_make_operation(project, instance, "DELETE")
 
 
 def api_gcp_sql_restart_instance(project: str, instance: str):
@@ -345,12 +401,105 @@ def api_gcp_sql_restart_instance(project: str, instance: str):
         raise HTTPException(404, detail="Instance not found")
     rec["state"] = "RUNNABLE"
     rec["updateTime"] = s._now()
-    return {"kind": "sql#operation", "operationType": "RESTART", "status": "DONE", "targetLink": f"{s._gcp_sql_root()}/projects/{project}/instances/{instance}"}
+    return s._gcp_sql_make_operation(project, instance, "RESTART")
+
+
+def _sql_instance_or_404(s, project: str, instance: str) -> dict:
+    rec = s.gcp_sql_state.get("instances", {}).get(instance)
+    if not rec or str(rec.get("project") or project) != project:
+        raise HTTPException(404, detail="Instance not found")
+    return rec
+
+
+def api_gcp_sql_list_users(project: str, instance: str):
+    s = _server()
+    project = s._gcp_project_name(project)
+    rec = _sql_instance_or_404(s, project, instance)
+    users = rec.get("users") if isinstance(rec.get("users"), list) else []
+    return {"kind": "sql#usersList", "items": [
+        {"kind": "sql#user", "name": u.get("name", ""), "host": u.get("host", ""),
+         "instance": instance, "project": project, "type": u.get("type", "BUILT_IN")}
+        for u in users]}
+
+
+async def api_gcp_sql_create_user(project: str, instance: str, request: Request):
+    s = _server()
+    project = s._gcp_project_name(project)
+    rec = _sql_instance_or_404(s, project, instance)
+    payload = await request.json() if request is not None else {}
+    payload = payload if isinstance(payload, dict) else {}
+    name = str(payload.get("name") or "").strip()
+    if not name:
+        raise HTTPException(400, detail="User name is required")
+    host = str(payload.get("host") or "")
+    users = rec.setdefault("users", [])
+    if not any(u.get("name") == name and u.get("host", "") == host for u in users):
+        users.append({"name": name, "host": host, "type": str(payload.get("type") or "BUILT_IN")})
+    return s._gcp_sql_make_operation(project, instance, "CREATE_USER")
+
+
+def api_gcp_sql_delete_user(project: str, instance: str, name: str = "", host: str = ""):
+    s = _server()
+    project = s._gcp_project_name(project)
+    rec = _sql_instance_or_404(s, project, instance)
+    rec["users"] = [u for u in rec.get("users", []) if not (u.get("name") == name and u.get("host", "") == host)]
+    return s._gcp_sql_make_operation(project, instance, "DELETE_USER")
+
+
+def api_gcp_sql_list_databases(project: str, instance: str):
+    s = _server()
+    project = s._gcp_project_name(project)
+    rec = _sql_instance_or_404(s, project, instance)
+    dbs = rec.get("databases") if isinstance(rec.get("databases"), list) else []
+    return {"kind": "sql#databasesList", "items": [
+        {"kind": "sql#database", "name": d.get("name", ""), "charset": d.get("charset", "UTF8"),
+         "collation": d.get("collation", ""), "instance": instance, "project": project,
+         "selfLink": f"{s._gcp_sql_root()}/projects/{project}/instances/{instance}/databases/{d.get('name','')}"}
+        for d in dbs]}
+
+
+def api_gcp_sql_get_database(project: str, instance: str, database: str):
+    s = _server()
+    project = s._gcp_project_name(project)
+    rec = _sql_instance_or_404(s, project, instance)
+    for d in rec.get("databases", []):
+        if d.get("name") == database:
+            return {"kind": "sql#database", "name": d.get("name"), "charset": d.get("charset", "UTF8"),
+                    "collation": d.get("collation", ""), "instance": instance, "project": project,
+                    "selfLink": f"{s._gcp_sql_root()}/projects/{project}/instances/{instance}/databases/{database}"}
+    raise HTTPException(404, detail="Database not found")
+
+
+async def api_gcp_sql_create_database(project: str, instance: str, request: Request):
+    s = _server()
+    project = s._gcp_project_name(project)
+    rec = _sql_instance_or_404(s, project, instance)
+    payload = await request.json() if request is not None else {}
+    payload = payload if isinstance(payload, dict) else {}
+    name = str(payload.get("name") or "").strip()
+    if not name:
+        raise HTTPException(400, detail="Database name is required")
+    dbs = rec.setdefault("databases", [])
+    if not any(d.get("name") == name for d in dbs):
+        dbs.append({"name": name, "charset": str(payload.get("charset") or "UTF8"), "collation": str(payload.get("collation") or "")})
+    return s._gcp_sql_make_operation(project, instance, "CREATE_DATABASE")
+
+
+def api_gcp_sql_delete_database(project: str, instance: str, database: str):
+    s = _server()
+    project = s._gcp_project_name(project)
+    rec = _sql_instance_or_404(s, project, instance)
+    rec["databases"] = [d for d in rec.get("databases", []) if d.get("name") != database]
+    return s._gcp_sql_make_operation(project, instance, "DELETE_DATABASE")
 
 
 def api_gcp_pubsub_list_topics(project: str):
     s = _server()
     project = s._gcp_project_name(project)
+    if _ps_emu.available():
+        topics = [s._gcp_pubsub_topic_view(project, t) for t in _ps_emu.list_topics(project)]
+        topics.sort(key=lambda item: item.get("name", ""))
+        return {"topics": topics, "nextPageToken": "", "kind": "pubsub#topicList"}
     topics = [s._gcp_pubsub_topic_view(project, topic) for topic in s.gcp_pubsub_state.get("topics", {}).values() if str(topic.get("project") or project) == project]
     topics.sort(key=lambda item: item.get("topicId", ""))
     return {"topics": topics, "nextPageToken": "", "kind": "pubsub#topicList"}
@@ -364,6 +513,14 @@ async def api_gcp_pubsub_create_topic(project: str, request: Request):
     topic_id = str(payload.get("topicId") or payload.get("name") or payload.get("topic") or "").split("/")[-1].strip()
     if not topic_id:
         raise HTTPException(400, detail="Topic id is required")
+    if _ps_emu.available():
+        labels = payload.get("labels") if isinstance(payload.get("labels"), dict) else None
+        from google.api_core import exceptions as _gax
+        try:
+            t = await asyncio.to_thread(_ps_emu.create_topic, project, topic_id, labels)
+        except _gax.AlreadyExists:
+            raise HTTPException(409, detail="Topic already exists")
+        return s._gcp_pubsub_topic_view(project, t)
     topic = s._gcp_pubsub_topic_record(project, topic_id, payload)
     s.gcp_pubsub_state.setdefault("topics", {})[topic_id] = topic
     default_sub_id = str(payload.get("subscriptionId") or topic_id).split("/")[-1].strip()
@@ -377,6 +534,11 @@ def api_gcp_pubsub_get_topic(project: str, topic: str):
     s = _server()
     project = s._gcp_project_name(project)
     topic = _strip_action_suffix(topic, ":publish")
+    if _ps_emu.available():
+        t = _ps_emu.get_topic(project, topic)
+        if not t:
+            raise HTTPException(404, detail="Topic not found")
+        return s._gcp_pubsub_topic_view(project, t)
     rec = s.gcp_pubsub_state.get("topics", {}).get(topic)
     if not rec or str(rec.get("project") or project) != project:
         raise HTTPException(404, detail="Topic not found")
@@ -418,6 +580,10 @@ def api_gcp_pubsub_delete_topic(project: str, topic: str):
     s = _server()
     project = s._gcp_project_name(project)
     topic = _strip_action_suffix(topic, ":publish")
+    if _ps_emu.available():
+        if not _ps_emu.delete_topic(project, topic):
+            raise HTTPException(404, detail="Topic not found")
+        return {"done": True}
     rec = s.gcp_pubsub_state.get("topics", {}).get(topic)
     if not rec or str(rec.get("project") or project) != project:
         raise HTTPException(404, detail="Topic not found")
@@ -434,14 +600,32 @@ async def api_gcp_pubsub_publish(project: str, topic: str, request: Request):
     s = _server()
     project = s._gcp_project_name(project)
     topic = _strip_action_suffix(topic, ":publish")
-    rec = s.gcp_pubsub_state.get("topics", {}).get(topic)
-    if not rec or str(rec.get("project") or project) != project:
-        raise HTTPException(404, detail="Topic not found")
     payload = await request.json() if request is not None else {}
     payload = payload if isinstance(payload, dict) else {}
     messages = payload.get("messages", []) if isinstance(payload, dict) else []
     if not isinstance(messages, list):
         messages = []
+    if _ps_emu.available():
+        import base64 as _b64, binascii as _bin
+        ids = []
+        for message in messages:
+            if not isinstance(message, dict):
+                continue
+            raw = message.get("data") or ""
+            if isinstance(raw, str):
+                try:
+                    data = _b64.b64decode(raw, validate=True)
+                except (ValueError, _bin.Error):
+                    data = raw.encode("utf-8")
+            else:
+                data = bytes(raw)
+            attrs = {str(k): str(v) for k, v in (message.get("attributes", {}) or {}).items()} if isinstance(message.get("attributes"), dict) else {}
+            mid = await asyncio.to_thread(_ps_emu.publish, project, topic, data, attrs, str(message.get("orderingKey") or ""))
+            ids.append(mid)
+        return {"messageIds": ids}
+    rec = s.gcp_pubsub_state.get("topics", {}).get(topic)
+    if not rec or str(rec.get("project") or project) != project:
+        raise HTTPException(404, detail="Topic not found")
     message_ids = []
     for message in messages:
         if not isinstance(message, dict):
@@ -460,6 +644,10 @@ async def api_gcp_pubsub_publish(project: str, topic: str, request: Request):
 def api_gcp_pubsub_list_subscriptions(project: str):
     s = _server()
     project = s._gcp_project_name(project)
+    if _ps_emu.available():
+        subs = [s._gcp_pubsub_subscription_view(project, sub) for sub in _ps_emu.list_subscriptions(project)]
+        subs.sort(key=lambda item: item.get("name", ""))
+        return {"subscriptions": subs, "nextPageToken": "", "kind": "pubsub#subscriptionList"}
     subs = [s._gcp_pubsub_subscription_view(project, sub) for sub in s.gcp_pubsub_state.get("subscriptions", {}).values() if str(sub.get("project") or project) == project]
     subs.sort(key=lambda item: item.get("subscriptionId", ""))
     return {"subscriptions": subs, "nextPageToken": "", "kind": "pubsub#subscriptionList"}
@@ -473,6 +661,24 @@ async def api_gcp_pubsub_create_subscription(project: str, request: Request, que
     sub_id = str(payload.get("subscriptionId") or payload.get("name") or queue_name or "").split("/")[-1].strip()
     if not sub_id:
         raise HTTPException(400, detail="Subscription id is required")
+    if _ps_emu.available():
+        topic_id = str(payload.get("topic") or "").split("/")[-1].strip()
+        if not topic_id:
+            raise HTTPException(400, detail="Topic is required")
+        from google.api_core import exceptions as _gax
+        try:
+            sub = await asyncio.to_thread(
+                _ps_emu.create_subscription, project, sub_id, topic_id,
+                int(payload.get("ackDeadlineSeconds") or 10),
+                str(payload.get("messageRetentionDuration") or ""),
+                payload.get("labels") if isinstance(payload.get("labels"), dict) else None,
+                bool(payload.get("enableMessageOrdering", False)),
+            )
+        except _gax.AlreadyExists:
+            raise HTTPException(409, detail="Subscription already exists")
+        except _gax.NotFound:
+            raise HTTPException(404, detail="Topic not found")
+        return s._gcp_pubsub_subscription_view(project, sub)
     sub = s._gcp_pubsub_subscription_record(project, sub_id, payload)
     if not sub.get("topic"):
         raise HTTPException(400, detail="Topic is required")
@@ -484,6 +690,11 @@ def api_gcp_pubsub_get_subscription(project: str, subscription: str):
     s = _server()
     project = s._gcp_project_name(project)
     subscription = _strip_action_suffix(subscription, ":purge", ":pull", ":acknowledge", ":modifyAckDeadline")
+    if _ps_emu.available():
+        sub = _ps_emu.get_subscription(project, subscription)
+        if not sub:
+            raise HTTPException(404, detail="Subscription not found")
+        return s._gcp_pubsub_subscription_view(project, sub)
     rec = s.gcp_pubsub_state.get("subscriptions", {}).get(subscription)
     if not rec or str(rec.get("project") or project) != project:
         raise HTTPException(404, detail="Subscription not found")
@@ -495,6 +706,12 @@ async def api_gcp_pubsub_patch_subscription(project: str, subscription: str, req
     s = _server()
     project = s._gcp_project_name(project)
     subscription = _strip_action_suffix(subscription, ":purge", ":pull", ":acknowledge", ":modifyAckDeadline")
+    if _ps_emu.available():
+        # Best-effort under the emulator: confirm it exists and return its view.
+        sub = _ps_emu.get_subscription(project, subscription)
+        if not sub:
+            raise HTTPException(404, detail="Subscription not found")
+        return s._gcp_pubsub_subscription_view(project, sub)
     rec = s.gcp_pubsub_state.get("subscriptions", {}).get(subscription)
     if not rec or str(rec.get("project") or project) != project:
         raise HTTPException(404, detail="Subscription not found")
@@ -544,6 +761,10 @@ def api_gcp_pubsub_delete_subscription(project: str, subscription: str):
     s = _server()
     project = s._gcp_project_name(project)
     subscription = _strip_action_suffix(subscription, ":purge", ":pull", ":acknowledge", ":modifyAckDeadline")
+    if _ps_emu.available():
+        if not _ps_emu.delete_subscription(project, subscription):
+            raise HTTPException(404, detail="Subscription not found")
+        return {"done": True}
     rec = s.gcp_pubsub_state.get("subscriptions", {}).get(subscription)
     if not rec or str(rec.get("project") or project) != project:
         raise HTTPException(404, detail="Subscription not found")
@@ -579,12 +800,15 @@ async def api_gcp_pubsub_pull(project: str, subscription: str, request: Request)
     s = _server()
     project = s._gcp_project_name(project)
     subscription = _strip_action_suffix(subscription, ":purge", ":pull", ":acknowledge", ":modifyAckDeadline")
-    rec = s.gcp_pubsub_state.get("subscriptions", {}).get(subscription)
-    if not rec or str(rec.get("project") or project) != project:
-        raise HTTPException(404, detail="Subscription not found")
     payload = await request.json() if request is not None else {}
     payload = payload if isinstance(payload, dict) else {}
     max_messages = int(payload.get("maxMessages") or payload.get("max_messages") or 10)
+    if _ps_emu.available():
+        received = await asyncio.to_thread(_ps_emu.pull, project, subscription, max_messages)
+        return {"receivedMessages": received}
+    rec = s.gcp_pubsub_state.get("subscriptions", {}).get(subscription)
+    if not rec or str(rec.get("project") or project) != project:
+        raise HTTPException(404, detail="Subscription not found")
     # Lease messages for the ack deadline: a pulled-but-unacked message is hidden
     # until its deadline expires, then redelivered (with an incremented delivery
     # attempt). Acked messages are removed entirely. This gives real at-least-once
@@ -634,13 +858,17 @@ async def api_gcp_pubsub_ack(project: str, subscription: str, request: Request, 
     s = _server()
     project = s._gcp_project_name(project)
     subscription = _strip_action_suffix(subscription, ":purge", ":pull", ":acknowledge", ":modifyAckDeadline")
-    if subscription not in s.gcp_pubsub_state.get("subscriptions", {}):
-        raise HTTPException(404, detail="Subscription not found")
     body = await request.json() if request is not None else {}
     body = body if isinstance(body, dict) else {}
     ack_ids = body.get("ackIds") if isinstance(body, dict) else []
     if not isinstance(ack_ids, list):
         ack_ids = []
+    if _ps_emu.available():
+        ids = [str(a) for a in ack_ids] + ([receipt_handle] if receipt_handle else [])
+        await asyncio.to_thread(_ps_emu.acknowledge, project, subscription, ids)
+        return {"acknowledged": True}
+    if subscription not in s.gcp_pubsub_state.get("subscriptions", {}):
+        raise HTTPException(404, detail="Subscription not found")
     queue = s.gcp_pubsub_state.setdefault("messages", {}).get(subscription, [])
     s.gcp_pubsub_state.setdefault("messages", {})[subscription] = [item for item in queue if item.get("ackId") not in set(map(str, ack_ids)) and item.get("ackId") != receipt_handle]
     return {"acknowledged": True}
@@ -672,6 +900,10 @@ async def api_gcp_pubsub_modify_ack_deadline(project: str, subscription: str, re
 def api_gcp_pubsub_list_topic_subscriptions(project: str, topic: str):
     s = _server()
     project = s._gcp_project_name(project)
+    if _ps_emu.available():
+        subs = [f"projects/{project}/subscriptions/{sid}" for sid in _ps_emu.topic_subscriptions(project, topic)]
+        subs.sort()
+        return {"subscriptions": subs, "nextPageToken": ""}
     topic_name = f"projects/{project}/topics/{topic}"
     subscriptions = []
     for sub in s.gcp_pubsub_state.get("subscriptions", {}).values():
@@ -700,6 +932,8 @@ def api_gcp_firestore_list_root_documents(project: str, database: str):
     s = _server()
     project = s._gcp_project_name(project)
     database = str(database or "(default)")
+    if _fs_emu.available():
+        return {"documents": _fs_emu.list_root(project, database), "nextPageToken": "", "kind": "firestore#documents"}
     docs = s._gcp_firestore_engine().list_root_documents(project, database)
     return {"documents": docs, "nextPageToken": "", "kind": "firestore#documents"}
 
@@ -708,6 +942,8 @@ def api_gcp_firestore_list_documents(project: str, database: str, collection: st
     s = _server()
     project = s._gcp_project_name(project)
     database = str(database or "(default)")
+    if _fs_emu.available():
+        return {"documents": _fs_emu.list_collection(project, database, collection), "nextPageToken": "", "kind": "firestore#documents"}
     docs = s._gcp_firestore_engine().list_documents(project, database, collection)
     return {"documents": docs, "nextPageToken": "", "kind": "firestore#documents"}
 
@@ -723,6 +959,8 @@ async def api_gcp_firestore_create_document(project: str, database: str, collect
     if "/" in doc_id:
         doc_id = doc_id.rsplit("/", 1)[-1]
     fields = payload.get("fields", {}) if isinstance(payload.get("fields"), dict) else {}
+    if _fs_emu.available():
+        return await asyncio.to_thread(_fs_emu.create, project, database, collection, doc_id, fields)
     return s._gcp_firestore_engine().create_document(project, database, collection, s._gcp_firestore_normalize_fields(fields), doc_id)
 
 
@@ -730,6 +968,11 @@ def api_gcp_firestore_get_document(project: str, database: str, collection: str,
     s = _server()
     project = s._gcp_project_name(project)
     database = str(database or "(default)")
+    if _fs_emu.available():
+        doc = _fs_emu.get(project, database, collection, doc_id)
+        if doc is None:
+            raise HTTPException(404, detail="Document not found")
+        return doc
     doc = s._gcp_firestore_engine().get_document(project, database, collection, doc_id)
     if not doc:
         raise HTTPException(404, detail="Document not found")
@@ -740,6 +983,9 @@ def api_gcp_firestore_delete_document(project: str, database: str, collection: s
     s = _server()
     project = s._gcp_project_name(project)
     database = str(database or "(default)")
+    if _fs_emu.available():
+        _fs_emu.delete(project, database, collection, doc_id)
+        return {"done": True}
     try:
         s._gcp_firestore_engine().delete_document(project, database, collection, doc_id)
     except KeyError:
@@ -754,6 +1000,11 @@ async def api_gcp_firestore_update_document(project: str, database: str, collect
     payload = await request.json() if request is not None else {}
     payload = payload if isinstance(payload, dict) else {}
     fields = payload.get("fields") if isinstance(payload.get("fields"), dict) else {}
+    if _fs_emu.available():
+        doc = await asyncio.to_thread(_fs_emu.update, project, database, collection, doc_id, fields)
+        if doc is None:
+            raise HTTPException(404, detail="Document not found")
+        return doc
     try:
         doc = s._gcp_firestore_engine().update_document(project, database, collection, doc_id, s._gcp_firestore_normalize_fields(fields))
     except KeyError:
@@ -915,7 +1166,9 @@ async def api_gcp_functions_create(project: str, request: Request, location: str
     payload = payload if isinstance(payload, dict) else {}
     fn = s._gcp_functions_record(project, location, payload)
     s.gcp_functions_state.setdefault("functions", {})[fn["name"]] = fn
-    return s._gcp_functions_view(project, location, fn)
+    # Real Cloud Functions create returns a google.longrunning.Operation (clients
+    # and Terraform poll operations.get to done), not the function directly.
+    return s._gcp_functions_make_operation(project, location, s._gcp_functions_view(project, location, fn), "CREATE_FUNCTION")
 
 
 async def api_gcp_functions_update(project: str, location: str, function: str, request: Request):
@@ -1059,11 +1312,21 @@ async def api_gcp_functions_call(project: str, location: str, function: str, req
     payload = payload if isinstance(payload, dict) else {}
     # Actually execute the uploaded source with the request payload.
     event = payload.get("data") if isinstance(payload.get("data"), (dict, list)) else payload
+    runtime = str(fn.get("runtime") or "python311")
+    entry = str(fn.get("entryPoint") or "handler")
+    code = str(fn.get("code") or "")
+    if not code.strip():
+        # No source was deployed for this function — run a default echo handler
+        # so it stays invocable in the simulator instead of erroring out.
+        if "node" in runtime.lower() or runtime.lower().startswith("js"):
+            code = f"exports.{entry} = (event) => ({{ message: 'default handler (no source deployed)', echo: event }});\n"
+        else:
+            code = f"def {entry}(event):\n    return {{'message': 'default handler (no source deployed)', 'echo': event}}\n"
     try:
         from core import gcp_function_runtime
         timeout = int(fn.get("serviceConfig", {}).get("timeoutSeconds") or fn.get("timeout") or 30)
         outcome = gcp_function_runtime.execute(
-            fn.get("code", ""), fn.get("entryPoint", "handler"), fn.get("runtime", "python311"),
+            code, entry, runtime,
             event, timeout=min(max(timeout, 1), 120),
         )
     except Exception as exc:

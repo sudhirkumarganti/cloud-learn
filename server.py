@@ -86,14 +86,944 @@ from providers.gcp_routes import gcutil_resolve as gcp_gcutil_resolve
 from providers.gcp_routes import sdk_go_snippet as gcp_sdk_go_snippet
 from providers.gcp_routes import sdk_java_snippet as gcp_sdk_java_snippet
 from providers.gcp_routes import register as register_gcp_routes
+from providers import azure_services as provider_azure_services
+from providers.azure_services import register as register_azure_routes
 from core.tooling_simulators import aws_cli_resolve, sdk_snippet
 
-app = FastAPI(title="CloudLearn S3 Simulator", version="2.0.0")
+app = FastAPI(title="CloudLearn Cloud Simulator", version="2.0.0", docs_url=None, redoc_url=None)
+
+
+def _swagger_html(openapi_url: str, title: str):
+    """Swagger UI from locally-bundled assets (works fully offline)."""
+    from fastapi.openapi.docs import get_swagger_ui_html
+    return get_swagger_ui_html(
+        openapi_url=openapi_url,
+        title=title,
+        swagger_js_url="/assets/swagger/swagger-ui-bundle.js",
+        swagger_css_url="/assets/swagger/swagger-ui.css",
+        swagger_favicon_url="/assets/swagger/favicon-32x32.png",
+    )
+
+
+def _openapi_subset(provider: str) -> dict:
+    """A per-provider OpenAPI spec: keep only that provider's paths so AWS and GCP
+    each get their own Swagger console instead of one giant combined list."""
+    import copy
+    spec = copy.deepcopy(app.openapi())
+    label = "GCP" if provider == "gcp" else "AWS"
+    spec["info"] = {**spec.get("info", {}), "title": f"CloudLearn — {label} API"}
+    paths = spec.get("paths", {}) or {}
+    spec["paths"] = {p: it for p, it in paths.items() if _is_gcp_native_path(p) == (provider == "gcp")}
+    # Prune now-unreferenced tags (cosmetic).
+    return spec
+
+
+@app.get("/openapi-gcp.json", include_in_schema=False)
+def openapi_gcp():
+    from fastapi.responses import JSONResponse
+    return JSONResponse(_openapi_subset("gcp"))
+
+
+@app.get("/openapi-aws.json", include_in_schema=False)
+def openapi_aws():
+    from fastapi.responses import JSONResponse
+    return JSONResponse(_openapi_subset("aws"))
+
+
+@app.get("/openapi-azure.json", include_in_schema=False)
+def openapi_azure():
+    from fastapi.responses import JSONResponse
+    return JSONResponse(provider_azure_services.build_openapi())
+
+
+@app.get("/docs/azure", include_in_schema=False)
+def docs_azure():
+    return _swagger_html("/openapi-azure.json", "CloudLearn — Azure API")
+
+
+@app.get("/console/azure", include_in_schema=False)
+@app.get("/console/azure/{path:path}", include_in_schema=False)
+def console_azure(path: str = ""):
+    from fastapi.responses import HTMLResponse
+    html_path = os.path.join(os.path.dirname(__file__), "static", "azure-console.html")
+    with open(html_path, "rb") as f:
+        return HTMLResponse(content=f.read().decode("utf-8"), headers={"Cache-Control": "no-store, max-age=0"})
+
+
+# Cross-cloud parity: standalone AWS console (mirrors /console/azure layout +
+# Phases A–E renderer patterns). Catalog endpoint feeds it via a single fetch.
+@app.get("/console/aws", include_in_schema=False)
+@app.get("/console/aws/{path:path}", include_in_schema=False)
+def console_aws(path: str = ""):
+    from fastapi.responses import HTMLResponse
+    html_path = os.path.join(os.path.dirname(__file__), "static", "aws-console.html")
+    with open(html_path, "rb") as f:
+        return HTMLResponse(content=f.read().decode("utf-8"), headers={"Cache-Control": "no-store, max-age=0"})
+
+
+@app.get("/api/aws/catalog", include_in_schema=False)
+def api_aws_catalog():
+    from fastapi.responses import JSONResponse
+    from providers.aws_catalog import build_console_payload
+    space = PLATFORM.get_active_space() or {}
+    region  = str(space.get("active_region") or "us-east-1")
+    account = str(space.get("active_account") or "123456789012")
+    return JSONResponse(build_console_payload(active_region=region, active_account=account))
+
+
+# ===========================================================================
+# AWS rail extras — generic CRUD backend for the previously-stub rail items
+# (Launch Templates / Volumes / Snapshots / Elastic IPs / Key Pairs / etc.).
+# Schema lives in core/aws_rail_extras.py; this dispatches by "<service>/<stub>".
+# Items are space-scoped (via the existing space.service_states proxy) and
+# seeded on first read from the schema's `seed` list.
+# Derived stubs (network-ifs from EC2 instances, dlqs from SQS queues, etc.)
+# compute on the fly instead of using stored items.
+# ===========================================================================
+
+def _aws_extras_state(stub_key: str) -> dict:
+    """Per-space slot for a given <service>/<stub-key>. Always returns a dict
+    with {items:{}, seeded:False} created lazily.
+
+    IMPORTANT: `PLATFORM.get_active_space()` returns a deepcopy. Mutating that
+    copy doesn't persist. Reach into the kernel's live state dict directly
+    (same pattern as PLATFORM.get_space_policy at cloudlearn_platform.py:1720)."""
+    spaces_state = PLATFORM.kernel.state.setdefault("spaces", {"spaces": {}, "active_space_id": "", "settings": {}})
+    active_id = spaces_state.get("active_space_id", "")
+    if not active_id:
+        return {"items": {}, "seeded": False}   # no-op; won't persist
+    space = spaces_state.setdefault("spaces", {}).setdefault(active_id, {})
+    services = space.setdefault("service_states", {})
+    extras = services.setdefault("aws_extras", {})
+    slot = extras.setdefault(stub_key, {"items": {}, "seeded": False})
+    if not isinstance(slot, dict):
+        slot = {"items": {}, "seeded": False}
+        extras[stub_key] = slot
+    slot.setdefault("items", {})
+    return slot
+
+
+def _aws_extras_seed_if_needed(stub_key: str) -> None:
+    from core.aws_rail_extras import EXTRAS
+    schema = EXTRAS.get(stub_key)
+    if not schema:
+        return
+    slot = _aws_extras_state(stub_key)
+    if slot.get("seeded"):
+        return
+    for s in schema.get("seed") or []:
+        # Use the schema-provided name field if any, else generate.
+        name = s.get("name") or s.get("id") or s.get("snapshot_id") or s.get("volume_id") \
+            or s.get("allocation_id") or s.get("key_pair_id") or s.get("request_id") \
+            or s.get("interface_id") or s.get("event_id") or s.get("user") or s.get("dashboard")
+        if not name:
+            import secrets as _sec
+            name = "item-" + _sec.token_hex(3)
+        slot["items"][name] = dict(s)
+    slot["seeded"] = True
+
+
+def _aws_extras_derive(stub_key: str) -> list[dict]:
+    """For 'derived_from' stubs, compute items on the fly from related state
+    in the active space. Each derivation key returns a fresh list per call.
+    Reads from the live kernel state (not a deepcopy) so it reflects writes
+    just made by other endpoints."""
+    spaces_state = PLATFORM.kernel.state.setdefault("spaces", {"spaces": {}, "active_space_id": "", "settings": {}})
+    active_id = spaces_state.get("active_space_id", "")
+    space = spaces_state.get("spaces", {}).get(active_id, {}) if active_id else {}
+    services = space.get("service_states", {}) if isinstance(space, dict) else {}
+    if stub_key == "ec2/instance-types":
+        # Drive from the shared per-provider instance catalog
+        try:
+            from core import instance_catalog as cat
+            out = []
+            for name, meta in cat.AWS.items():
+                ram_gb = (meta.get("ram_mb", 0) or 0) / 1024
+                out.append({"name": name, "vcpu": meta.get("vcpu"),
+                            "ram_gb": f"{ram_gb:.1f} GiB" if ram_gb < 10 else f"{int(ram_gb)} GiB",
+                            "family": meta.get("family"),
+                            "network": "Up to 5 Gbps" if "small" in name or "micro" in name else "Up to 25 Gbps"})
+            return out
+        except Exception:
+            return []
+    if stub_key == "ec2/ami-catalog":
+        # Reuse the AMI list endpoint format
+        try:
+            res = api_ec2_amis()
+            amis = res.get("amis") if isinstance(res, dict) else res
+            return list(amis or [])
+        except Exception:
+            return []
+    if stub_key == "ec2/network-ifs":
+        ec2_instances = services.get("ec2", {}).get("instances", {}) or {}
+        out = []
+        for iid, inst in ec2_instances.items():
+            if not isinstance(inst, dict): continue
+            out.append({
+                "interface_id": f"eni-{iid[-8:]}",
+                "description": f"Primary ENI for {iid}",
+                "instance_id": iid,
+                "private_ip": inst.get("private_ip", "10.0.0.x"),
+                "public_ip": inst.get("public_ip", "—"),
+                "subnet_id": inst.get("subnet_id", "subnet-default"),
+                "status": "in-use" if inst.get("state") == "running" else "available",
+            })
+        return out
+    if stub_key == "iam/dashboard":
+        iam = services.get("iam", {}) or {}
+        return [
+            {"metric": "Users",          "value": str(len(iam.get("users") or {})),    "recommendation": "Rotate access keys every 90 days"},
+            {"metric": "Groups",         "value": str(len(iam.get("groups") or {})),    "recommendation": "Use groups to assign permissions, not direct user policies"},
+            {"metric": "Roles",          "value": str(len(iam.get("roles") or {})),     "recommendation": "Prefer roles over long-lived access keys"},
+            {"metric": "Customer policies","value": str(len(iam.get("policies") or {})),"recommendation": "Use AWS managed policies where possible"},
+            {"metric": "MFA users",      "value": "0", "recommendation": "Require MFA for all users"},
+        ]
+    if stub_key == "rds/dashboard":
+        rds = services.get("rds", {}) or {}
+        dbs = rds.get("db_instances") or rds.get("databases") or {}
+        return [
+            {"metric": "DB instances",   "value": str(len(dbs))},
+            {"metric": "Total storage",  "value": f"{sum((d.get('allocated_storage') or 20) for d in dbs.values() if isinstance(d,dict))} GiB"},
+            {"metric": "Snapshots",      "value": "—"},
+            {"metric": "Events (24h)",   "value": "—"},
+        ]
+    if stub_key == "dynamodb/dashboard":
+        dyn = services.get("dynamodb", {}) or {}
+        tables = dyn.get("tables") or {}
+        return [
+            {"metric": "Total tables",   "value": str(len(tables))},
+            {"metric": "Item count",     "value": str(sum(int(t.get("item_count", 0) or 0) for t in tables.values() if isinstance(t, dict)))},
+            {"metric": "Provisioned RCU","value": "—"},
+            {"metric": "Provisioned WCU","value": "—"},
+        ]
+    if stub_key == "lambda/dashboard":
+        lam = services.get("lambda", {}) or {}
+        fns = lam.get("functions") or {}
+        return [
+            {"metric": "Functions",       "value": str(len(fns))},
+            {"metric": "Layers",          "value": "0"},
+            {"metric": "Invocations 24h", "value": str(sum(len((f.get("invocations") or [])) for f in fns.values() if isinstance(f, dict)))},
+            {"metric": "Errors 24h",      "value": "0"},
+        ]
+    if stub_key == "vpc/dashboard":
+        vpc = services.get("vpc", {}) or {}
+        return [
+            {"metric": "VPCs",             "value": str(len(vpc.get("vpcs") or {}))},
+            {"metric": "Subnets",          "value": str(len(vpc.get("subnets") or {}))},
+            {"metric": "Security groups",  "value": str(len(vpc.get("security_groups") or {}))},
+            {"metric": "Route tables",     "value": str(len(vpc.get("route_tables") or {}))},
+            {"metric": "Internet gateways","value": str(len(vpc.get("internet_gateways") or {}))},
+        ]
+    if stub_key == "sqs/dlqs":
+        sqs = services.get("sqs", {}) or {}
+        out = []
+        queues = sqs.get("queues") or {}
+        for qname, q in queues.items():
+            if not isinstance(q, dict): continue
+            # A queue is "a DLQ" if any other queue points to it via redrive policy.
+            sources = [n for n, other in queues.items()
+                       if isinstance(other, dict)
+                       and (other.get("dlq_arn") or "").endswith("/"+qname)]
+            if sources:
+                out.append({
+                    "name": qname, "arn": q.get("arn", f"arn:aws:sqs:us-east-1:123456789012:{qname}"),
+                    "source_queues": ", ".join(sources), "approximate_messages": str(q.get("message_count") or 0),
+                })
+        return out
+    return []
+
+
+@app.get("/api/aws/extras/{stub_path:path}", include_in_schema=False)
+def api_aws_extras_get(stub_path: str):
+    from core.aws_rail_extras import EXTRAS
+    schema = EXTRAS.get(stub_path)
+    if not schema:
+        raise HTTPException(status_code=404, detail=f"Unknown stub: {stub_path}")
+    if schema.get("derived_from"):
+        return {"items": _aws_extras_derive(stub_path), "derived": True,
+                "schema": {"category": schema.get("category"), "columns": schema.get("columns")}}
+    _aws_extras_seed_if_needed(stub_path)
+    slot = _aws_extras_state(stub_path)
+    return {"items": list(slot["items"].values()), "derived": False,
+            "schema": {"category": schema.get("category"), "columns": schema.get("columns")}}
+
+
+@app.post("/api/aws/extras/{stub_path:path}", include_in_schema=False)
+def api_aws_extras_create(stub_path: str, payload: dict[str, Any] | None = None):
+    from core.aws_rail_extras import EXTRAS
+    import secrets as _sec
+    schema = EXTRAS.get(stub_path)
+    if not schema:
+        raise HTTPException(status_code=404, detail=f"Unknown stub: {stub_path}")
+    if schema.get("derived_from"):
+        raise HTTPException(status_code=400, detail="Derived collection — create via the source service.")
+    if schema.get("category") == "config":
+        raise HTTPException(status_code=400, detail="Use PUT to update config.")
+    payload = dict(payload or {})
+    # Find a name field; auto-generate if missing.
+    name = payload.get("name") or payload.get("id")
+    if not name:
+        prefix = stub_path.split("/")[-1].split("-")[0][:3]
+        name = f"{prefix}-{_sec.token_hex(4)}"
+    payload["name"] = name
+    payload.setdefault("created", _now() if "_now" in globals() else "")
+    # Backfill expected columns with a placeholder so the row renders cleanly.
+    for col_path, _ in (schema.get("columns") or []):
+        if "." not in col_path and col_path not in payload:
+            payload[col_path] = payload.get(col_path, "—")
+    slot = _aws_extras_state(stub_path)
+    slot["items"][name] = payload
+    slot["seeded"] = True
+    _persist_state()
+    return payload
+
+
+@app.delete("/api/aws/extras/{stub_path:path}", include_in_schema=False)
+def api_aws_extras_delete_one(stub_path: str):
+    """Delete by name. URL pattern is /api/aws/extras/<svc>/<stub>/<name> —
+    the last segment is the item name. Because :path captures everything, we
+    split here at the last slash."""
+    from core.aws_rail_extras import EXTRAS
+    parts = stub_path.rsplit("/", 1)
+    if len(parts) != 2:
+        raise HTTPException(status_code=400, detail="Expected /api/aws/extras/<service>/<stub>/<name>")
+    key, name = parts
+    schema = EXTRAS.get(key)
+    if not schema:
+        raise HTTPException(status_code=404, detail=f"Unknown stub: {key}")
+    if schema.get("derived_from"):
+        raise HTTPException(status_code=400, detail="Derived collection — delete via the source service.")
+    slot = _aws_extras_state(key)
+    slot["items"].pop(name, None)
+    _persist_state()
+    return {"deleted": True, "name": name}
+
+
+@app.get("/api/aws/extras-config/{stub_path:path}", include_in_schema=False)
+def api_aws_extras_config_get(stub_path: str):
+    """Config-category stubs are a single editable record (e.g. S3 Block
+    Public Access). Returns {values: {...}, schema: {fields, defaults}}."""
+    from core.aws_rail_extras import EXTRAS
+    schema = EXTRAS.get(stub_path)
+    if not schema or schema.get("category") != "config":
+        raise HTTPException(status_code=404, detail=f"Not a config stub: {stub_path}")
+    slot = _aws_extras_state(stub_path)
+    if not slot.get("seeded"):
+        slot["items"] = dict(schema.get("defaults") or {})
+        slot["seeded"] = True
+    return {"values": slot["items"], "schema": {"fields": schema.get("fields"), "defaults": schema.get("defaults")}}
+
+
+@app.put("/api/aws/extras-config/{stub_path:path}", include_in_schema=False)
+def api_aws_extras_config_put(stub_path: str, payload: dict[str, Any] | None = None):
+    from core.aws_rail_extras import EXTRAS
+    schema = EXTRAS.get(stub_path)
+    if not schema or schema.get("category") != "config":
+        raise HTTPException(status_code=404, detail=f"Not a config stub: {stub_path}")
+    slot = _aws_extras_state(stub_path)
+    slot["items"] = dict(payload or {})
+    slot["seeded"] = True
+    _persist_state()
+    return {"values": slot["items"]}
+
+
+# ===========================================================================
+# GCP rail extras — mirror of AWS extras, namespaced under gcp_extras in the
+# space state. Powers the new Eventarc / Secret Manager / Cloud KMS services
+# (which have no dedicated backend in the simulator) plus per-service rail
+# sub-features (Compute Disks/Snapshots/Images, Cloud SQL Backups/Replicas).
+# Same footgun mitigation as AWS — use PLATFORM.kernel.state directly.
+# ===========================================================================
+
+def _gcp_extras_state(stub_key: str) -> dict:
+    spaces_state = PLATFORM.kernel.state.setdefault("spaces", {"spaces": {}, "active_space_id": "", "settings": {}})
+    active_id = spaces_state.get("active_space_id", "")
+    if not active_id:
+        return {"items": {}, "seeded": False}
+    space = spaces_state.setdefault("spaces", {}).setdefault(active_id, {})
+    services = space.setdefault("service_states", {})
+    extras = services.setdefault("gcp_extras", {})
+    slot = extras.setdefault(stub_key, {"items": {}, "seeded": False})
+    if not isinstance(slot, dict):
+        slot = {"items": {}, "seeded": False}; extras[stub_key] = slot
+    slot.setdefault("items", {})
+    return slot
+
+
+def _gcp_extras_seed_if_needed(stub_key: str) -> None:
+    from core.gcp_rail_extras import EXTRAS
+    schema = EXTRAS.get(stub_key)
+    if not schema:
+        return
+    slot = _gcp_extras_state(stub_key)
+    if slot.get("seeded"):
+        return
+    for s in schema.get("seed") or []:
+        name = s.get("name") or s.get("id") or s.get("key_id") or s.get("trigger_id")
+        if not name:
+            import secrets as _sec
+            name = "item-" + _sec.token_hex(3)
+        slot["items"][name] = dict(s)
+    slot["seeded"] = True
+
+
+@app.get("/api/gcp/extras/{stub_path:path}", include_in_schema=False)
+def api_gcp_extras_get(stub_path: str):
+    from core.gcp_rail_extras import EXTRAS
+    schema = EXTRAS.get(stub_path)
+    if not schema:
+        raise HTTPException(status_code=404, detail=f"Unknown GCP stub: {stub_path}")
+    _gcp_extras_seed_if_needed(stub_path)
+    slot = _gcp_extras_state(stub_path)
+    return {"items": list(slot["items"].values()), "derived": False,
+            "schema": {"category": schema.get("category"), "columns": schema.get("columns")}}
+
+
+@app.post("/api/gcp/extras/{stub_path:path}", include_in_schema=False)
+def api_gcp_extras_create(stub_path: str, payload: dict[str, Any] | None = None):
+    from core.gcp_rail_extras import EXTRAS
+    import secrets as _sec
+    schema = EXTRAS.get(stub_path)
+    if not schema:
+        raise HTTPException(status_code=404, detail=f"Unknown GCP stub: {stub_path}")
+    payload = dict(payload or {})
+    name = payload.get("name") or payload.get("id")
+    if not name:
+        prefix = stub_path.split("/")[-1].split("-")[0][:3]
+        name = f"{prefix}-{_sec.token_hex(4)}"
+    payload["name"] = name
+    payload.setdefault("created", _now() if "_now" in globals() else "")
+    for col_path, _ in (schema.get("columns") or []):
+        if "." not in col_path and col_path not in payload:
+            payload[col_path] = payload.get(col_path, "—")
+    slot = _gcp_extras_state(stub_path)
+    slot["items"][name] = payload
+    slot["seeded"] = True
+    _persist_state()
+    return payload
+
+
+@app.delete("/api/gcp/extras/{stub_path:path}", include_in_schema=False)
+def api_gcp_extras_delete_one(stub_path: str):
+    from core.gcp_rail_extras import EXTRAS
+    parts = stub_path.rsplit("/", 1)
+    if len(parts) != 2:
+        raise HTTPException(status_code=400, detail="Expected /api/gcp/extras/<service>/<stub>/<name>")
+    key, name = parts
+    if key not in EXTRAS:
+        raise HTTPException(status_code=404, detail=f"Unknown GCP stub: {key}")
+    slot = _gcp_extras_state(key)
+    slot["items"].pop(name, None)
+    _persist_state()
+    return {"deleted": True, "name": name}
+
+
+@app.get("/api/gcp/extras-config/{stub_path:path}", include_in_schema=False)
+def api_gcp_extras_config_get(stub_path: str):
+    from core.gcp_rail_extras import EXTRAS
+    schema = EXTRAS.get(stub_path)
+    if not schema or schema.get("category") != "config":
+        raise HTTPException(status_code=404, detail=f"Not a GCP config stub: {stub_path}")
+    slot = _gcp_extras_state(stub_path)
+    if not slot.get("seeded"):
+        slot["items"] = dict(schema.get("defaults") or {})
+        slot["seeded"] = True
+    return {"values": slot["items"], "schema": {"fields": schema.get("fields"), "defaults": schema.get("defaults")}}
+
+
+@app.put("/api/gcp/extras-config/{stub_path:path}", include_in_schema=False)
+def api_gcp_extras_config_put(stub_path: str, payload: dict[str, Any] | None = None):
+    from core.gcp_rail_extras import EXTRAS
+    schema = EXTRAS.get(stub_path)
+    if not schema or schema.get("category") != "config":
+        raise HTTPException(status_code=404, detail=f"Not a GCP config stub: {stub_path}")
+    slot = _gcp_extras_state(stub_path)
+    slot["items"] = dict(payload or {})
+    slot["seeded"] = True
+    _persist_state()
+    return {"values": slot["items"]}
+
+
+# Cross-cloud parity Step 2: standalone GCP console (mirrors /console/azure
+# and /console/aws). Catalog endpoint feeds it via a single fetch.
+@app.get("/console/gcp", include_in_schema=False)
+@app.get("/console/gcp/{path:path}", include_in_schema=False)
+def console_gcp(path: str = ""):
+    from fastapi.responses import HTMLResponse
+    html_path = os.path.join(os.path.dirname(__file__), "static", "gcp-console.html")
+    with open(html_path, "rb") as f:
+        return HTMLResponse(content=f.read().decode("utf-8"), headers={"Cache-Control": "no-store, max-age=0"})
+
+
+@app.get("/api/gcp/catalog", include_in_schema=False)
+def api_gcp_catalog():
+    from fastapi.responses import JSONResponse
+    from providers.gcp_catalog import build_console_payload
+    space = PLATFORM.get_active_space() or {}
+    project = str(space.get("active_account") or "cloudlearn")
+    region  = str(space.get("active_region") or "us-central1")
+    # Derive a zone from the region (real GCP would let user pick; this is a
+    # sensible default for the console shell).
+    zone = region + "-a"
+    return JSONResponse(build_console_payload(active_project=project,
+                                              active_region=region,
+                                              active_zone=zone))
+
+
+@app.get("/docs/gcp", include_in_schema=False)
+def docs_gcp():
+    return _swagger_html("/openapi-gcp.json", "CloudLearn — GCP API")
+
+
+@app.get("/docs/aws", include_in_schema=False)
+def docs_aws():
+    return _swagger_html("/openapi-aws.json", "CloudLearn — AWS API")
+
+
+@app.get("/docs/all", include_in_schema=False)
+def docs_all():
+    return _swagger_html(app.openapi_url or "/openapi.json", "CloudLearn — All APIs")
+
+
+_USAGE = {
+    "gcp": {
+        "connect": [
+            ("gcloud / gsutil — point at the simulator", "bash", """gcloud config set auth/disable_credentials true
+gcloud config set core/project gcp-dev
+# REST services — set the override for the one you use:
+export CLOUDSDK_API_ENDPOINT_OVERRIDES_STORAGE="__BASE__/storage/v1/"
+export CLOUDSDK_API_ENDPOINT_OVERRIDES_COMPUTE="__BASE__/compute/v1/"
+export CLOUDSDK_API_ENDPOINT_OVERRIDES_SQLADMIN="__BASE__/sql/v1beta4/"
+export CLOUDSDK_API_ENDPOINT_OVERRIDES_CLOUDFUNCTIONS="__BASE__/v1/"
+export CLOUDSDK_API_ENDPOINT_OVERRIDES_IAM="__BASE__/v1/"
+# gRPC services use the bundled emulators (separate ports):
+export STORAGE_EMULATOR_HOST="__HOST__"
+export PUBSUB_EMULATOR_HOST="__HOSTNAME__:8085"
+export FIRESTORE_EMULATOR_HOST="__HOSTNAME__:8080" """),
+            ("Java — shared auth", "java", """// libraries-bom 26.43.0. gapic clients (Storage/PubSub/Firestore): NoCredentials + setHost
+// or *_EMULATOR_HOST. Apiary REST clients (Compute/SQL/Functions/IAM): setRootUrl("__BASE__/").
+HttpTransport transport = GoogleNetHttpTransport.newTrustedTransport();
+JsonFactory json = GsonFactory.getDefaultInstance();"""),
+            ("Go — shared auth", "go", """import "google.golang.org/api/option"
+var noAuth = option.WithoutAuthentication()   // for REST clients (Compute/SQL/Functions/IAM)
+// Storage/PubSub/Firestore: set *_EMULATOR_HOST instead of an endpoint."""),
+        ],
+        "services": [
+            ("Cloud Storage", [
+                ("CLI", "bash", """export STORAGE_EMULATOR_HOST="__HOST__"
+gcloud storage buckets create gs://demo
+gcloud storage cp ./f.txt gs://demo/f.txt
+gcloud storage ls gs://demo"""),
+                ("Java", "java", """Storage st = StorageOptions.newBuilder().setHost("__BASE__")
+    .setProjectId("gcp-dev").setCredentials(NoCredentials.getInstance()).build().getService();
+st.create(BucketInfo.of("demo"));
+st.create(BlobInfo.newBuilder("demo", "f.txt").build(), "hello".getBytes());"""),
+                ("Go", "go", """// STORAGE_EMULATOR_HOST=__HOST__
+c, _ := storage.NewClient(ctx)
+c.Bucket("demo").Create(ctx, "gcp-dev", nil)
+w := c.Bucket("demo").Object("f.txt").NewWriter(ctx); w.Write([]byte("hello")); w.Close()"""),
+            ]),
+            ("Compute Engine", [
+                ("CLI", "bash", """gcloud compute instances create vm1 --zone=us-central1-a --machine-type=e2-micro
+gcloud compute instances list --zones=us-central1-a"""),
+                ("Java", "java", """Compute compute = new Compute.Builder(transport, json, null)
+    .setRootUrl("__BASE__/").setApplicationName("cl").build();
+compute.instances().list("gcp-dev", "us-central1-a").execute();"""),
+                ("Go", "go", """csvc, _ := compute.NewService(ctx, noAuth, option.WithEndpoint("__BASE__/compute/v1/"))
+list, _ := csvc.Instances.List("gcp-dev", "us-central1-a").Do()"""),
+            ]),
+            ("Cloud SQL (Admin)", [
+                ("CLI", "bash", """gcloud sql instances create db1 --database-version=POSTGRES_16 --tier=db-f1-micro --region=us-central1
+gcloud sql instances list"""),
+                ("Java", "java", """SQLAdmin sql = new SQLAdmin.Builder(transport, json, null)
+    .setRootUrl("__BASE__/").setApplicationName("cl").build();
+sql.instances().list("gcp-dev").execute();"""),
+                ("Go", "go", """ssvc, _ := sqladmin.NewService(ctx, noAuth, option.WithEndpoint("__BASE__/"))
+ssvc.Instances.List("gcp-dev").Do()"""),
+            ]),
+            ("Pub/Sub", [
+                ("CLI", "bash", """export PUBSUB_EMULATOR_HOST="__HOSTNAME__:8085"
+gcloud pubsub topics create demo-topic
+gcloud pubsub subscriptions create demo-sub --topic=demo-topic"""),
+                ("Java", "java", """// PUBSUB_EMULATOR_HOST=__HOSTNAME__:8085
+TopicAdminClient admin = TopicAdminClient.create();
+admin.createTopic(TopicName.of("gcp-dev", "demo-topic"));
+Publisher pub = Publisher.newBuilder(TopicName.of("gcp-dev", "demo-topic")).build();
+pub.publish(PubsubMessage.newBuilder().setData(ByteString.copyFromUtf8("hi")).build());"""),
+                ("Go", "go", """// PUBSUB_EMULATOR_HOST=__HOSTNAME__:8085
+c, _ := pubsub.NewClient(ctx, "gcp-dev")
+t, _ := c.CreateTopic(ctx, "demo-topic")
+t.Publish(ctx, &pubsub.Message{Data: []byte("hi")}).Get(ctx)"""),
+            ]),
+            ("Firestore", [
+                ("CLI", "bash", """export FIRESTORE_EMULATOR_HOST="__HOSTNAME__:8080"
+# Document CRUD is via the client libraries (gcloud has no doc-level CRUD)."""),
+                ("Java", "java", """// FIRESTORE_EMULATOR_HOST=__HOSTNAME__:8080
+Firestore db = FirestoreOptions.getDefaultInstance().getService();
+db.collection("users").document("alice").set(Map.of("name", "Alice"));"""),
+                ("Go", "go", """// FIRESTORE_EMULATOR_HOST=__HOSTNAME__:8080
+c, _ := firestore.NewClient(ctx, "gcp-dev")
+c.Collection("users").Doc("alice").Set(ctx, map[string]any{"name": "Alice"})"""),
+            ]),
+            ("Cloud Functions", [
+                ("CLI", "bash", """gcloud functions list --region=us-central1"""),
+                ("Java", "java", """CloudFunctions fn = new CloudFunctions.Builder(transport, json, null)
+    .setRootUrl("__BASE__/").setApplicationName("cl").build();
+fn.projects().locations().functions().list("projects/gcp-dev/locations/us-central1").execute();"""),
+                ("Go", "go", """fsvc, _ := cloudfunctions.NewService(ctx, noAuth, option.WithEndpoint("__BASE__/"))
+fsvc.Projects.Locations.Functions.List("projects/gcp-dev/locations/us-central1").Do()"""),
+            ]),
+            ("IAM", [
+                ("CLI", "bash", """gcloud iam service-accounts create demo-sa
+gcloud iam service-accounts list"""),
+                ("Java", "java", """Iam iam = new Iam.Builder(transport, json, null)
+    .setRootUrl("__BASE__/").setApplicationName("cl").build();
+iam.projects().serviceAccounts().list("projects/gcp-dev").execute();"""),
+                ("Go", "go", """isvc, _ := iam.NewService(ctx, noAuth, option.WithEndpoint("__BASE__/"))
+isvc.Projects.ServiceAccounts.List("projects/gcp-dev").Do()"""),
+            ]),
+            ("VPC Network", [
+                ("CLI", "bash", """gcloud compute networks create demo-vpc --subnet-mode=custom
+gcloud compute networks list
+gcloud compute firewall-rules list"""),
+                ("Java", "java", """// same Apiary Compute client as Compute Engine
+compute.networks().list("gcp-dev").execute();
+compute.firewalls().list("gcp-dev").execute();"""),
+                ("Go", "go", """csvc.Networks.List("gcp-dev").Do()
+csvc.Firewalls.List("gcp-dev").Do()"""),
+            ]),
+        ],
+    },
+    "aws": {
+        "connect": [
+            ("AWS CLI / env", "bash", """export AWS_ACCESS_KEY_ID=test
+export AWS_SECRET_ACCESS_KEY=test
+export AWS_DEFAULT_REGION=us-east-1
+# then pass --endpoint-url __BASE__ to every command (or set a profile)."""),
+            ("Java — shared client config", "java", """var creds = StaticCredentialsProvider.create(AwsBasicCredentials.create("test", "test"));
+URI ep = URI.create("__BASE__");   // pass ep + creds to every <Svc>Client.builder()"""),
+            ("Go — shared config", "go", """cfg, _ := config.LoadDefaultConfig(ctx, config.WithRegion("us-east-1"),
+    config.WithCredentialsProvider(credentials.NewStaticCredentialsProvider("test", "test", "")))
+// then per service: NewFromConfig(cfg, func(o){ o.BaseEndpoint = aws.String("__BASE__") })"""),
+        ],
+        "services": [
+            ("S3", [
+                ("CLI", "bash", """aws --endpoint-url __BASE__ s3 mb s3://demo
+aws --endpoint-url __BASE__ s3 cp ./f.txt s3://demo/f.txt
+aws --endpoint-url __BASE__ s3 ls s3://demo"""),
+                ("Java", "java", """S3Client s3 = S3Client.builder().endpointOverride(ep).region(Region.US_EAST_1)
+    .credentialsProvider(creds).forcePathStyle(true).build();
+s3.createBucket(b -> b.bucket("demo"));"""),
+                ("Go", "go", """s3c := s3.NewFromConfig(cfg, func(o *s3.Options) {
+    o.BaseEndpoint = aws.String("__BASE__"); o.UsePathStyle = true })
+s3c.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String("demo")})"""),
+            ]),
+            ("EC2", [
+                ("CLI", "bash", """aws --endpoint-url __BASE__ ec2 describe-instances
+aws --endpoint-url __BASE__ ec2 describe-vpcs"""),
+                ("Java", "java", """Ec2Client ec2 = Ec2Client.builder().endpointOverride(ep).region(Region.US_EAST_1)
+    .credentialsProvider(creds).build();
+ec2.describeInstances();"""),
+                ("Go", "go", """ec2c := ec2.NewFromConfig(cfg, func(o *ec2.Options) { o.BaseEndpoint = aws.String("__BASE__") })
+ec2c.DescribeInstances(ctx, &ec2.DescribeInstancesInput{})"""),
+            ]),
+            ("IAM", [
+                ("CLI", "bash", """aws --endpoint-url __BASE__ iam create-user --user-name alice
+aws --endpoint-url __BASE__ iam list-users"""),
+                ("Java", "java", """IamClient iam = IamClient.builder().endpointOverride(ep).region(Region.AWS_GLOBAL)
+    .credentialsProvider(creds).build();
+iam.listUsers();"""),
+                ("Go", "go", """iamc := iam.NewFromConfig(cfg, func(o *iam.Options) { o.BaseEndpoint = aws.String("__BASE__") })
+iamc.ListUsers(ctx, &iam.ListUsersInput{})"""),
+            ]),
+            ("SQS", [
+                ("CLI", "bash", """aws --endpoint-url __BASE__ sqs create-queue --queue-name demo
+aws --endpoint-url __BASE__ sqs list-queues"""),
+                ("Java", "java", """SqsClient sqs = SqsClient.builder().endpointOverride(ep).region(Region.US_EAST_1)
+    .credentialsProvider(creds).build();
+sqs.createQueue(b -> b.queueName("demo"));"""),
+                ("Go", "go", """sqsc := sqs.NewFromConfig(cfg, func(o *sqs.Options) { o.BaseEndpoint = aws.String("__BASE__") })
+sqsc.CreateQueue(ctx, &sqs.CreateQueueInput{QueueName: aws.String("demo")})"""),
+            ]),
+            ("DynamoDB", [
+                ("CLI", "bash", """aws --endpoint-url __BASE__ dynamodb list-tables"""),
+                ("Java", "java", """DynamoDbClient ddb = DynamoDbClient.builder().endpointOverride(ep).region(Region.US_EAST_1)
+    .credentialsProvider(creds).build();
+ddb.listTables();"""),
+                ("Go", "go", """ddbc := dynamodb.NewFromConfig(cfg, func(o *dynamodb.Options) { o.BaseEndpoint = aws.String("__BASE__") })
+ddbc.ListTables(ctx, &dynamodb.ListTablesInput{})"""),
+            ]),
+            ("RDS", [
+                ("CLI", "bash", """aws --endpoint-url __BASE__ rds describe-db-instances"""),
+                ("Java", "java", """RdsClient rds = RdsClient.builder().endpointOverride(ep).region(Region.US_EAST_1)
+    .credentialsProvider(creds).build();
+rds.describeDBInstances();"""),
+                ("Go", "go", """rdsc := rds.NewFromConfig(cfg, func(o *rds.Options) { o.BaseEndpoint = aws.String("__BASE__") })
+rdsc.DescribeDBInstances(ctx, &rds.DescribeDBInstancesInput{})"""),
+            ]),
+            ("Lambda", [
+                ("CLI", "bash", """aws --endpoint-url __BASE__ lambda list-functions"""),
+                ("Java", "java", """LambdaClient lam = LambdaClient.builder().endpointOverride(ep).region(Region.US_EAST_1)
+    .credentialsProvider(creds).build();
+lam.listFunctions();"""),
+                ("Go", "go", """lamc := lambda.NewFromConfig(cfg, func(o *lambda.Options) { o.BaseEndpoint = aws.String("__BASE__") })
+lamc.ListFunctions(ctx, &lambda.ListFunctionsInput{})"""),
+            ]),
+            ("API Gateway", [
+                ("CLI", "bash", """aws --endpoint-url __BASE__ apigateway get-rest-apis"""),
+                ("Java", "java", """ApiGatewayClient ag = ApiGatewayClient.builder().endpointOverride(ep).region(Region.US_EAST_1)
+    .credentialsProvider(creds).build();
+ag.getRestApis();"""),
+                ("Go", "go", """agc := apigateway.NewFromConfig(cfg, func(o *apigateway.Options) { o.BaseEndpoint = aws.String("__BASE__") })
+agc.GetRestApis(ctx, &apigateway.GetRestApisInput{})"""),
+            ]),
+        ],
+    },
+    "azure": {
+        "connect": [
+            ("az CLI — register the simulator as a custom cloud", "bash", """# Point az at the simulator's ARM endpoint, then use a throwaway login.
+az cloud register -n CloudLearn \\
+  --endpoint-resource-manager "__BASE__" \\
+  --endpoint-active-directory "__BASE__" \\
+  --endpoint-active-directory-resource-id "__BASE__"
+az cloud set -n CloudLearn
+# The simulator ignores credentials — any login (or none) works.
+export SUB="__SUB__"   # default subscription
+export RG="cloudlearn-rg" """),
+            ("curl — raw ARM REST", "bash", """# Every ARM call needs ?api-version=. Auth is faked.
+curl -s "__BASE__/subscriptions/__SUB__/resourceGroups/cloudlearn-rg/providers/Microsoft.Compute/virtualMachines?api-version=2023-09-01" """),
+            ("Java — fake credential + custom AzureEnvironment", "java", """// com.azure.resourcemanager:azure-resourcemanager + azure-identity
+TokenCredential cred = req -> Mono.just(
+    new AccessToken("fake", OffsetDateTime.now().plusHours(1)));
+AzureEnvironment env = new AzureEnvironment(Map.of(
+    "resourceManagerEndpointUrl", "__BASE__/",
+    "activeDirectoryEndpointUrl", "__BASE__/",
+    "managementEndpointUrl", "__BASE__/"));
+AzureProfile profile = new AzureProfile("tenant", "__SUB__", env);"""),
+            ("Go — fake credential + custom cloud config", "go", """import ("github.com/Azure/azure-sdk-for-go/sdk/azcore"; "github.com/Azure/azure-sdk-for-go/sdk/azcore/arm";
+        "github.com/Azure/azure-sdk-for-go/sdk/azcore/cloud")
+cfg := cloud.Configuration{Services: map[cloud.ServiceName]cloud.ServiceConfiguration{
+  cloud.ResourceManager: {Endpoint: "__BASE__", Audience: "__BASE__"}}}
+opts := &arm.ClientOptions{ClientOptions: azcore.ClientOptions{Cloud: cfg}}
+// cred: a fake azcore.TokenCredential returning any token (sim ignores it)."""),
+        ],
+        "services": [
+            ("Virtual Machines (Microsoft.Compute)", [
+                ("az CLI", "bash", """az vm list -g $RG
+az resource create -g $RG -n vm-demo --resource-type Microsoft.Compute/virtualMachines \\
+  --api-version 2023-09-01 --properties '{"hardwareProfile":{"vmSize":"Standard_B1s"}}'"""),
+                ("Java", "java", """ComputeManager compute = ComputeManager.authenticate(cred, profile);
+compute.virtualMachines().listByResourceGroup("cloudlearn-rg")
+    .forEach(vm -> System.out.println(vm.name()));"""),
+                ("Go", "go", """vmc, _ := armcompute.NewVirtualMachinesClient("__SUB__", cred, opts)
+pager := vmc.NewListPager("cloudlearn-rg", nil)
+page, _ := pager.NextPage(ctx)   // page.Value = []*VirtualMachine"""),
+            ]),
+            ("Blob Storage (Microsoft.Storage)", [
+                ("az CLI", "bash", """az storage account list -g $RG
+az resource create -g $RG -n stdemo --resource-type Microsoft.Storage/storageAccounts \\
+  --api-version 2023-01-01 --properties '{}' --location eastus"""),
+                ("Java", "java", """StorageManager storage = StorageManager.authenticate(cred, profile);
+storage.storageAccounts().listByResourceGroup("cloudlearn-rg")
+    .forEach(a -> System.out.println(a.name()));"""),
+                ("Go", "go", """sac, _ := armstorage.NewAccountsClient("__SUB__", cred, opts)
+pager := sac.NewListByResourceGroupPager("cloudlearn-rg", nil)"""),
+            ]),
+            ("SQL Database (Microsoft.Sql)", [
+                ("az CLI", "bash", """az sql server list -g $RG
+az resource create -g $RG -n sql-demo --resource-type Microsoft.Sql/servers \\
+  --api-version 2023-05-01-preview --properties '{"administratorLogin":"sqladmin"}'"""),
+                ("Java", "java", """SqlServerManager sql = SqlServerManager.authenticate(cred, profile);
+sql.sqlServers().listByResourceGroup("cloudlearn-rg").forEach(s -> System.out.println(s.name()));"""),
+                ("Go", "go", """sc, _ := armsql.NewServersClient("__SUB__", cred, opts)
+pager := sc.NewListByResourceGroupPager("cloudlearn-rg", nil)"""),
+            ]),
+            ("Service Bus (Microsoft.ServiceBus)", [
+                ("az CLI", "bash", """az servicebus namespace list -g $RG
+az servicebus queue list -g $RG --namespace-name sb-cloudlearn"""),
+                ("Java", "java", """ServiceBusManager sb = ServiceBusManager.authenticate(cred, profile);
+sb.namespaces().listByResourceGroup("cloudlearn-rg").forEach(n -> System.out.println(n.name()));"""),
+                ("Go", "go", """nc, _ := armservicebus.NewNamespacesClient("__SUB__", cred, opts)
+pager := nc.NewListByResourceGroupPager("cloudlearn-rg", nil)"""),
+            ]),
+            ("Cosmos DB (Microsoft.DocumentDB)", [
+                ("az CLI", "bash", """az cosmosdb list -g $RG
+az resource create -g $RG -n cosmos-demo --resource-type Microsoft.DocumentDB/databaseAccounts \\
+  --api-version 2024-05-15 --properties '{"databaseAccountOfferType":"Standard"}'"""),
+                ("Java", "java", """CosmosManager cosmos = CosmosManager.authenticate(cred, profile);
+cosmos.databaseAccounts().listByResourceGroup("cloudlearn-rg").forEach(a -> System.out.println(a.name()));"""),
+                ("Go", "go", """cc, _ := armcosmos.NewDatabaseAccountsClient("__SUB__", cred, opts)
+pager := cc.NewListByResourceGroupPager("cloudlearn-rg", nil)"""),
+            ]),
+            ("Functions (Microsoft.Web)", [
+                ("az CLI", "bash", """az functionapp list -g $RG
+az resource create -g $RG -n fn-demo --resource-type Microsoft.Web/sites \\
+  --api-version 2023-12-01 --properties '{}' --location eastus"""),
+                ("Java", "java", """AppServiceManager web = AppServiceManager.authenticate(cred, profile);
+web.functionApps().listByResourceGroup("cloudlearn-rg").forEach(f -> System.out.println(f.name()));"""),
+                ("Go", "go", """wc, _ := armappservice.NewWebAppsClient("__SUB__", cred, opts)
+pager := wc.NewListByResourceGroupPager("cloudlearn-rg", nil)"""),
+            ]),
+            ("API Management (Microsoft.ApiManagement)", [
+                ("az CLI", "bash", """az apim list -g $RG
+az resource show -g $RG -n apim-cloudlearn --resource-type Microsoft.ApiManagement/service \\
+  --api-version 2023-05-01-preview"""),
+                ("Java", "java", """ApiManagementManager apim = ApiManagementManager.authenticate(cred, profile);
+apim.apiManagementServices().listByResourceGroup("cloudlearn-rg").forEach(s -> System.out.println(s.name()));"""),
+                ("Go", "go", """ac, _ := armapimanagement.NewServiceClient("__SUB__", cred, opts)
+pager := ac.NewListByResourceGroupPager("cloudlearn-rg", nil)"""),
+            ]),
+            ("Virtual Network (Microsoft.Network)", [
+                ("az CLI", "bash", """az network vnet list -g $RG
+az resource create -g $RG -n vnet-demo --resource-type Microsoft.Network/virtualNetworks \\
+  --api-version 2023-11-01 --properties '{"addressSpace":{"addressPrefixes":["10.0.0.0/16"]}}'"""),
+                ("Java", "java", """NetworkManager net = NetworkManager.authenticate(cred, profile);
+net.networks().listByResourceGroup("cloudlearn-rg").forEach(v -> System.out.println(v.name()));"""),
+                ("Go", "go", """vnc, _ := armnetwork.NewVirtualNetworksClient("__SUB__", cred, opts)
+pager := vnc.NewListPager("cloudlearn-rg", nil)"""),
+            ]),
+            ("Entra ID / RBAC (Microsoft.Authorization)", [
+                ("az CLI", "bash", """az role assignment list -g $RG
+az role assignment create --role Contributor --assignee user@cloudlearn.dev \\
+  --scope /subscriptions/$SUB/resourceGroups/$RG"""),
+                ("Java", "java", """AuthorizationManager authz = AuthorizationManager.authenticate(cred, profile);
+authz.roleAssignments().listByResourceGroup("cloudlearn-rg").forEach(r -> System.out.println(r.name()));"""),
+                ("Go", "go", """rac, _ := armauthorization.NewRoleAssignmentsClient("__SUB__", cred, opts)
+pager := rac.NewListForResourceGroupPager("cloudlearn-rg", nil)"""),
+            ]),
+        ],
+    },
+}
+
+
+def _usage_html(request, provider: str) -> str:
+    import html as _html
+    host = request.headers.get("host") or request.url.netloc or "localhost:9000"
+    scheme = request.headers.get("x-forwarded-proto") or request.url.scheme or "http"
+    base = f"{scheme}://{host}"
+    hostname = host.split(":")[0]
+    label = {"gcp": "GCP", "azure": "Azure"}.get(provider, "AWS")
+    accent = {"gcp": "#1a73e8", "azure": "#0078d4"}.get(provider, "#ff9900")
+    data = _USAGE.get(provider, {})
+
+    def sub(code: str) -> str:
+        return (code.replace("__BASE__", base).replace("__HOSTNAME__", hostname)
+                    .replace("__HOST__", host)
+                    .replace("__SUB__", provider_azure_services.DEFAULT_SUBSCRIPTION))
+
+    def block(title: str, lang: str, code: str) -> str:
+        return (f'<div class="blk"><div class="bh"><h3>{_html.escape(title)}</h3>'
+                f'<span class="lang">{_html.escape(lang)}</span></div>'
+                f'<pre><code>{_html.escape(sub(code))}</code></pre></div>')
+
+    connect = "".join(block(t, lang, code) for (t, lang, code) in data.get("connect", []))
+    toc, svc_sections = [], []
+    for i, (svc, langs) in enumerate(data.get("services", [])):
+        anchor = f"svc-{i}"
+        toc.append(f'<a class="tocl" href="#{anchor}">{_html.escape(svc)}</a>')
+        blocks = "".join(block(lname, lang, code) for (lname, lang, code) in langs)
+        svc_sections.append(f'<section class="svc" id="{anchor}"><h2>{_html.escape(svc)}</h2>{blocks}</section>')
+    swagger_link = f"/docs/{provider}"
+    return f"""<!doctype html><html><head><meta charset="utf-8">
+<title>CloudLearn — {label} SDK &amp; CLI usage</title><link rel="icon" href="/assets/swagger/favicon-32x32.png">
+<style>
+ body{{margin:0;font-family:Roboto,Arial,sans-serif;background:#0f1b2d;color:#e8eef6}}
+ .top{{position:sticky;top:0;z-index:5;background:#0b1422;padding:16px 28px;border-bottom:1px solid #1d2c44;display:flex;align-items:center;gap:16px}}
+ .top h1{{font-size:18px;font-weight:500;margin:0}}.top .b{{background:{accent};color:#06101f;font-weight:700;border-radius:6px;padding:3px 10px;font-size:13px}}
+ .top a{{margin-left:auto;color:#9fb0c7;text-decoration:none;font-size:13px}}.top a+a{{margin-left:16px}}.top a:hover{{color:#fff}}
+ .wrap{{max-width:920px;margin:0 auto;padding:24px 28px 60px}}
+ .intro{{color:#9fb0c7;font-size:14px;line-height:1.6}}.intro code{{background:#16243a;padding:1px 6px;border-radius:4px;color:#cfe0f7}}
+ .toc{{display:flex;flex-wrap:wrap;gap:8px;margin:16px 0 6px}}
+ .tocl{{background:#16243a;border:1px solid #243650;border-radius:999px;padding:5px 12px;font-size:12px;color:#cfe0f7;text-decoration:none}}.tocl:hover{{background:#1d2f4a;color:#fff}}
+ h2{{margin:30px 0 10px;font-size:18px;font-weight:600;border-left:3px solid {accent};padding-left:10px}}
+ .sechead{{margin-top:26px;font-size:13px;letter-spacing:.5px;text-transform:uppercase;color:#8aa0bd}}
+ .blk{{margin:12px 0;border:1px solid #1d2c44;border-radius:10px;overflow:hidden;background:#0c1626}}
+ .bh{{display:flex;align-items:center;justify-content:space-between;padding:9px 14px;background:#13243d;border-bottom:1px solid #1d2c44}}
+ .bh h3{{margin:0;font-size:14px;font-weight:600}}.lang{{font-size:11px;color:#8aa0bd;text-transform:uppercase;letter-spacing:.5px}}
+ pre{{margin:0;padding:14px;overflow:auto;font-size:12.5px;line-height:1.55;font-family:ui-monospace,Menlo,Consolas,monospace;color:#d7e3f4}}
+</style></head><body>
+ <div class="top"><span class="b">{label}</span><h1>SDK &amp; CLI usage — per service</h1>
+   <a href="{swagger_link}">{label} Swagger ›</a><a href="/docs">All consoles ›</a></div>
+ <div class="wrap">
+   <p class="intro">Point unmodified {label} tools at this simulator at <code>{base}</code> — no real credentials needed.
+   Snippets are copy-paste ready (your live host is filled in) and mirror the conformance harness in <code>tests/conformance/</code>.</p>
+   <div class="toc">{''.join(toc)}</div>
+   <div class="sechead">Connect (one-time setup)</div>
+   {connect}
+   <div class="sechead">Per-service examples (CLI · Java · Go)</div>
+   {''.join(svc_sections)}
+ </div>
+</body></html>"""
+
+
+@app.get("/docs/gcp/usage", include_in_schema=False)
+def docs_gcp_usage(request: Request):
+    from fastapi.responses import HTMLResponse
+    return HTMLResponse(_usage_html(request, "gcp"))
+
+
+@app.get("/docs/aws/usage", include_in_schema=False)
+def docs_aws_usage(request: Request):
+    from fastapi.responses import HTMLResponse
+    return HTMLResponse(_usage_html(request, "aws"))
+
+
+@app.get("/docs/azure/usage", include_in_schema=False)
+def docs_azure_usage(request: Request):
+    from fastapi.responses import HTMLResponse
+    return HTMLResponse(_usage_html(request, "azure"))
+
+
+@app.get("/docs", include_in_schema=False)
+def docs_chooser():
+    """Landing chooser that links to the separate AWS and GCP API consoles."""
+    from fastapi.responses import HTMLResponse
+    html = """<!doctype html><html><head><meta charset="utf-8"><title>CloudLearn API Consoles</title>
+<link rel="icon" href="/assets/swagger/favicon-32x32.png">
+<style>
+ body{margin:0;font-family:Roboto,Arial,sans-serif;background:#0f1b2d;color:#e8eef6;min-height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:28px}
+ h1{font-weight:500;margin:0 0 4px}.sub{color:#9fb0c7;margin-bottom:8px}
+ .cards{display:flex;gap:24px;flex-wrap:wrap;justify-content:center}
+ .col{display:flex;flex-direction:column;gap:12px;align-items:stretch;width:280px}
+ a.card{display:block;padding:28px;border-radius:14px;text-decoration:none;color:#fff;box-shadow:0 8px 30px rgba(0,0,0,.35);transition:transform .12s}
+ a.card:hover{transform:translateY(-4px)}
+ .aws{background:linear-gradient(135deg,#ff9900,#d97700)}.gcp{background:linear-gradient(135deg,#1a73e8,#1761c9)}.azure{background:linear-gradient(135deg,#0078d4,#005a9e)}
+ .card h2{margin:0 0 6px;font-size:22px}.card p{margin:0;opacity:.9;font-size:14px}
+ .ulink{display:block;text-align:center;color:#cfe0f7;font-size:13px;text-decoration:none;background:#16243a;border:1px solid #243650;border-radius:8px;padding:9px}
+ .ulink:hover{background:#1d2f4a;color:#fff}
+ .all{color:#9fb0c7;font-size:13px;text-decoration:none}.all:hover{color:#fff}
+</style></head><body>
+ <div style="text-align:center"><h1>CloudLearn — API Reference</h1><div class="sub">Interactive Swagger consoles + SDK/CLI usage, one per cloud.</div></div>
+ <div class="cards">
+   <div class="col">
+     <a class="card aws" href="/docs/aws"><h2>AWS API ›</h2><p>S3, EC2, IAM, SQS, RDS, DynamoDB, Lambda, API Gateway, VPC.</p></a>
+     <a class="ulink" href="/docs/aws/usage">⌨ SDK &amp; CLI usage (CLI · boto3 · Java · Go · Terraform) ›</a>
+   </div>
+   <div class="col">
+     <a class="card gcp" href="/docs/gcp"><h2>GCP API ›</h2><p>Compute, Storage, Cloud SQL, Pub/Sub, Firestore, Functions, API Gateway, VPC, IAM.</p></a>
+     <a class="ulink" href="/docs/gcp/usage">⌨ SDK &amp; CLI usage (gcloud/gsutil · Java · Go · Terraform) ›</a>
+   </div>
+   <div class="col">
+     <a class="card azure" href="/docs/azure"><h2>Azure API ›</h2><p>Virtual Machines, Blob Storage, SQL, Service Bus, Cosmos DB, Functions, API Management, VNet, Entra/RBAC.</p></a>
+     <a class="ulink" href="/docs/azure/usage">⌨ SDK &amp; CLI usage (az CLI · Java · Go) ›</a>
+     <a class="ulink" href="/console/azure">🖥 Azure portal console ›</a>
+   </div>
+ </div>
+ <a class="all" href="/docs/all">View all endpoints (combined) →</a>
+</body></html>"""
+    return HTMLResponse(html)
+
+
 register_aws_ec2_routes(app, None)
 register_gcp_compute_routes(app, None)
 register_aws_routes(app, None)
 register_gcp_routes(app, None)
+register_azure_routes(app, None)
 REQUEST_PROVIDER: ContextVar[str] = ContextVar("cloudlearn_request_provider", default="aws")
+# Per-request simulator origin (set from the Host header) so GCP resource
+# metadata reflects the address the client actually used. Request-scoped to
+# avoid cross-request races (e.g. the container healthcheck hitting 127.0.0.1).
+REQUEST_PUBLIC_BASE: ContextVar[str] = ContextVar("cloudlearn_public_base", default="")
 
 
 def _is_gcp_native_path(path: str) -> bool:
@@ -101,10 +1031,12 @@ def _is_gcp_native_path(path: str) -> bool:
         "/compute/v1/",
         "/storage/v1/",
         "/upload/storage/v1/",
+        "/download/storage/v1/",
         "/sql/v1beta4/",
         "/pubsub/v1/",
         "/firestore/v1/",
         "/v1/projects/",
+        "/v1/operations/",
         "/api/gcp/s3/",
         "/api/gcp/iam/",
         "/api/gcp/rds/",
@@ -120,7 +1052,17 @@ def _is_gcp_native_path(path: str) -> bool:
         "/api/gcp/firestore/",
         "/api/gcp/cloudfunctions/",
         "/api/gcp/console/",
+        "/api/gcp/catalog",   # standalone console payload — must NOT be path-stripped
+        "/api/gcp/extras/",   # reserved for GCP-D (parity with /api/aws/extras)
+        "/api/gcp/extras-config/",
     ))
+
+
+def _is_azure_native_path(path: str) -> bool:
+    """Azure ARM control-plane (`/subscriptions/...`) and the console catalog.
+    These are served by the generic ARM dispatcher and must bypass the AWS
+    action/capability gating (they aren't S3/EC2 calls)."""
+    return path.startswith(("/subscriptions/", "/api/azure/", "/azure-data/"))
 
 
 def _gcp_iam_enforcement_response(request, path: str):
@@ -157,10 +1099,20 @@ def _gcp_iam_enforcement_response(request, path: str):
 async def provider_api_alias_middleware(request, call_next):
     path = request.scope.get("path", "")
     _gcp_capture_public_base(request)
-    provider = "gcp" if _is_gcp_native_path(path) or path.startswith(("/ws/gcp/compute/", "/ws/compute/")) else "aws"
+    if _is_azure_native_path(path):
+        provider = "azure"
+    elif _is_gcp_native_path(path) or path.startswith(("/ws/gcp/compute/", "/ws/compute/")):
+        provider = "gcp"
+    else:
+        provider = "aws"
     token = REQUEST_PROVIDER.set(provider)
     request.state.cloudlearn_provider = provider
     request.state.cloudlearn_original_path = path
+    if _is_azure_native_path(path):
+        try:
+            return await call_next(request)
+        finally:
+            REQUEST_PROVIDER.reset(token)
     if _is_gcp_native_path(path) or path.startswith(("/ws/gcp/compute/", "/ws/compute/")):
         try:
             if not path.startswith(("/ws/", "/api/gcp/console/")):
@@ -177,6 +1129,73 @@ async def provider_api_alias_middleware(request, call_next):
     finally:
         REQUEST_PROVIDER.reset(token)
 
+
+@app.middleware("http")
+async def tenant_context_middleware(request, call_next):
+    """Read X-CloudLearn-Tenant header → request-scoped tenant override
+    (ContextVar). Without the header, requests fall through to the globally
+    active tenant. Cross-tenant access is then blocked by the state proxy."""
+    tid = (request.headers.get("x-cloudlearn-tenant") or "").strip()
+    token = REQUEST_TENANT.set(tid) if tid else None
+    try:
+        response = await call_next(request)
+    finally:
+        if token is not None:
+            REQUEST_TENANT.reset(token)
+    return response
+
+
+class _DecompressRequestMiddleware:
+    """Transparently decode gzip/deflate-compressed request bodies. Real Google
+    client libraries (e.g. google-cloud-storage for Java) gzip their JSON request
+    bodies; without this the handlers' `await request.json()` chokes on the gzip
+    magic bytes (0x1f 0x8b) with a UnicodeDecodeError → 500."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope.get("type") != "http":
+            return await self.app(scope, receive, send)
+        headers = {k.lower(): v for (k, v) in (scope.get("headers") or [])}
+        enc = headers.get(b"content-encoding", b"").lower()
+        if enc not in (b"gzip", b"x-gzip", b"deflate"):
+            return await self.app(scope, receive, send)
+        import gzip as _gzip
+        import zlib as _zlib
+        body = b""
+        more = True
+        while more:
+            message = await receive()
+            if message["type"] == "http.request":
+                body += message.get("body", b"")
+                more = message.get("more_body", False)
+            elif message["type"] == "http.disconnect":
+                break
+        try:
+            body = _gzip.decompress(body) if enc in (b"gzip", b"x-gzip") else _zlib.decompress(body)
+        except Exception:
+            pass  # leave body untouched if it wasn't actually compressed
+        new_headers = [
+            (k, v) for (k, v) in (scope.get("headers") or [])
+            if k.lower() not in (b"content-encoding", b"content-length")
+        ]
+        new_headers.append((b"content-length", str(len(body)).encode("ascii")))
+        new_scope = dict(scope)
+        new_scope["headers"] = new_headers
+        delivered = False
+
+        async def _receive():
+            nonlocal delivered
+            if not delivered:
+                delivered = True
+                return {"type": "http.request", "body": body, "more_body": False}
+            return {"type": "http.request", "body": b"", "more_body": False}
+
+        return await self.app(new_scope, _receive, send)
+
+
+app.add_middleware(_DecompressRequestMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -773,7 +1792,7 @@ def _iam_route_action_resource(request: Request) -> tuple[str, str] | None:
     method = request.method.upper()
     query = dict(request.query_params)
 
-    if path in {"/healthz", "/docs", "/redoc", "/openapi.json"} or path.startswith(("/ui", "/product", "/assets/", "/static/", "/favicon.ico")):
+    if path in {"/healthz", "/docs", "/redoc", "/openapi.json"} or path.startswith(("/ui", "/product", "/assets/", "/static/", "/favicon.ico", "/console", "/docs/", "/api/tenants", "/api/instances", "/api/runtime")):
         return None
     if path.startswith("/api/catalog") or path.startswith("/api/packs") or path.startswith("/api/license") or path.startswith("/api/runtime/bundles") or path.startswith("/api/deployments") or path.startswith("/api/actions"):
         return None
@@ -1513,6 +2532,79 @@ PLATFORM.persist()
 STATE = PLATFORM.state
 STATE_LOCK = PLATFORM.store.lock
 
+# ──────────────────────────────────────────────────────────────────────────────
+# Tenant model — the licensing/isolation boundary ABOVE Space.
+#
+#   Tenant 1:N Space; Space 1:1 Provider (aws|gcp|azure).
+#
+# Cross-tenant access is enforced STRUCTURALLY: the state proxy resolves through
+# the active tenant first, and any space whose tenant_id doesn't match falls
+# back to a non-persisted scratch dict — a handler literally cannot reach
+# another tenant's service_states even by mistake. Provider lock is enforced at
+# the API middleware (a provider-native request against a space of a different
+# provider returns 403).
+# ──────────────────────────────────────────────────────────────────────────────
+DEFAULT_TENANT_ID = "default"
+ALLOWED_PROVIDERS = ("aws", "gcp", "azure")
+
+REQUEST_TENANT: ContextVar[str] = ContextVar("cloudlearn_request_tenant", default="")
+
+
+def _tenants_state() -> dict:
+    return STATE.setdefault("tenants", {"active_tenant_id": "", "tenants": {}})
+
+
+def _active_tenant_id() -> str:
+    """Per-request tenant from `X-CloudLearn-Tenant` header if set, else the
+    globally-active tenant, falling back to DEFAULT_TENANT_ID."""
+    req_tid = (REQUEST_TENANT.get() or "").strip()
+    if req_tid:
+        return req_tid
+    return _tenants_state().get("active_tenant_id", "") or DEFAULT_TENANT_ID
+
+
+def _tenant_dict(tid: str) -> dict | None:
+    t = _tenants_state().get("tenants", {}).get(tid)
+    return t if isinstance(t, dict) else None
+
+
+def _ensure_default_tenant() -> None:
+    """Bootstrap: create the default tenant and tag every untagged space.
+    Idempotent — safe to call repeatedly (called once at startup)."""
+    ts = _tenants_state()
+    tenants = ts.setdefault("tenants", {})
+    if DEFAULT_TENANT_ID not in tenants:
+        tenants[DEFAULT_TENANT_ID] = {
+            "tenant_id": DEFAULT_TENANT_ID,
+            "name": "Default Tenant",
+            "license_tier": str((STATE.get("license") or {}).get("tier", "free")),
+            "created_at": time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime()),
+            "settings": {"max_spaces": 6},
+        }
+    if not ts.get("active_tenant_id"):
+        ts["active_tenant_id"] = DEFAULT_TENANT_ID
+    spaces_map = STATE.setdefault("spaces", {}).setdefault("spaces", {})
+    for sid, sp in spaces_map.items():
+        if isinstance(sp, dict) and not sp.get("tenant_id"):
+            sp["tenant_id"] = DEFAULT_TENANT_ID
+
+
+_ensure_default_tenant()
+
+
+def _tenant_scoped_bucket(name: str) -> str:
+    """Map a logical bucket name to a tenant+space-scoped physical name in the
+    global fake-gcs byte store, so same-named buckets in different tenants (or
+    different spaces within a tenant) don't collide. Closes the last data-plane
+    cross-tenant overlap. Stable hash → deterministic per (tenant, space, name)."""
+    if not name:
+        return name
+    tid = _active_tenant_id() or DEFAULT_TENANT_ID
+    sid = (_spaces_state().get("active_space_id") or "")
+    digest = hashlib.sha1(f"{tid}:{sid}:{name}".encode()).hexdigest()[:10]
+    safe = re.sub(r"[^a-z0-9-]+", "-", str(name).lower()).strip("-") or "b"
+    return f"cl-{safe[:32]}-{digest}"
+
 
 def _load_state() -> dict:
     return STATE
@@ -1806,6 +2898,13 @@ def _cloudsim_resource_state(resource: dict) -> str:
         value = resource.get(key)
         if value is not None and str(value).strip():
             return str(value)
+    # Azure (and other nested-state providers) carry lifecycle under properties.
+    props = resource.get("properties")
+    if isinstance(props, dict):
+        for key in ("provisioningState", "state", "status"):
+            value = props.get(key)
+            if value is not None and str(value).strip():
+                return str(value)
     return ""
 
 
@@ -1990,6 +3089,26 @@ def _cloudsim_collect_resources(space: dict | None) -> tuple[list[dict], dict[st
         if isinstance(policy, dict):
             add("gcp", "iam", "policy", policy_id, policy)
 
+    # Azure ARM resources (space-scoped under service_states["azure_arm"]["resources"]).
+    # Same DB-derived path as AWS/GCP: service + kind are mapped from the stored
+    # ARM type via the catalog (nested children fold to their parent service).
+    azure_state = service_states.get("azure_arm", {})
+    azure_resources = azure_state.get("resources", {}) if isinstance(azure_state, dict) else {}
+    if isinstance(azure_resources, dict) and azure_resources:
+        azure_type_to_key = {(c["namespace"] + "/" + c["type"]).lower(): c["key"]
+                             for c in provider_azure_services.RESOURCE_CATALOG}
+        for rid, rec in azure_resources.items():
+            if not isinstance(rec, dict):
+                continue
+            full_type = str(rec.get("_type", "")).lower()
+            service = azure_type_to_key.get(full_type)
+            if service is None:  # nested child → map to its parent service
+                segs = full_type.split("/")
+                if len(segs) >= 2:
+                    service = azure_type_to_key.get(segs[0] + "/" + segs[1])
+            kind = full_type.split("/")[-1] if full_type else "resource"
+            add("azure", service or "resource", kind, str(rec.get("id") or rid), rec)
+
     return nodes, counts, runtime_instances
 
 
@@ -2016,7 +3135,13 @@ def _cloudsim_refresh_bridge(reason: str, detail: dict | None = None) -> None:
             runtime_state_ref["sandbox_count"] = len(runtime_instances)
             active_cloudsim = active_space.setdefault("cloudsim", {"summary": {}, "events": [], "last_tick": ""})
             active_cloudsim["last_tick"] = now
-            active_cloudsim["summary"] = {
+            # CAPACITY layer (CloudSim Plus engine) owns active_cloudsim["summary"]
+            # — it is written ONLY by the bridge (create/reconcile). The inventory
+            # refresh must NOT clobber it; we only timestamp + tag provenance here.
+            active_cloudsim["_source"] = "cloudsim-plus-engine"
+            # INVENTORY layer (internal DB, authoritative): the resource graph +
+            # all DB-derived counts live under active_space["resources"].
+            inventory_summary = {
                 "space_id": active_space.get("space_id", ""),
                 "space_name": active_space.get("name", ""),
                 "provider": active_space.get("provider", "aws"),
@@ -2043,6 +3168,7 @@ def _cloudsim_refresh_bridge(reason: str, detail: dict | None = None) -> None:
                 "gcp_apigateway_count": len(_cloudsim_service_state(source_space, "gcp_apigateway").get("apis", {})),
                 "gcp_vpc_count": len(_cloudsim_service_state(source_space, "gcp_vpc").get("networks", {})),
                 "gcp_iam_count": len(_cloudsim_service_state(source_space, "gcp_iam").get("service_accounts", {})),
+                "azure_count": sum(v for k, v in counts.items() if k.startswith("azure.")),
                 "s3_bucket_count": len(_cloudsim_service_state(source_space, "s3").get("buckets", {})),
                 "vpc_count": len(_cloudsim_service_state(source_space, "vpc").get("vpcs", {})),
                 "apigateway_count": len(_cloudsim_service_state(source_space, "apigateway").get("apis", {})),
@@ -2054,8 +3180,13 @@ def _cloudsim_refresh_bridge(reason: str, detail: dict | None = None) -> None:
                 "sandbox_count": len(runtime_instances),
                 "sandbox_backend": runtime_preferred_backend,
                 "event_count": len(active_cloudsim.get("events", [])),
+                "_source": "internal-db",
             }
-            active_space["resources"] = {"nodes": copy.deepcopy(nodes), "count": len(nodes), "updated_at": now, "reason": reason}
+            active_space["resources"] = {
+                "nodes": copy.deepcopy(nodes), "count": len(nodes),
+                "summary": inventory_summary, "_source": "internal-db",
+                "updated_at": now, "reason": reason,
+            }
             active_space.setdefault("runtime", {}).setdefault("mode", "sandboxed")
             active_space["runtime"]["preferred_backend"] = runtime_preferred_backend
             active_space["runtime"]["host_os"] = runtime_host_os
@@ -2084,6 +3215,7 @@ def _cloudsim_refresh_bridge(reason: str, detail: dict | None = None) -> None:
                 "gcp_apigateway_count": len(_cloudsim_service_state(source_space, "gcp_apigateway").get("apis", {})) if isinstance(source_space, dict) else 0,
                 "gcp_vpc_count": len(_cloudsim_service_state(source_space, "gcp_vpc").get("networks", {})) if isinstance(source_space, dict) else 0,
                 "gcp_iam_count": len(_cloudsim_service_state(source_space, "gcp_iam").get("service_accounts", {})) if isinstance(source_space, dict) else 0,
+                "azure_count": sum(v for k, v in counts.items() if k.startswith("azure.")),
                 "s3_bucket_count": len(_cloudsim_service_state(source_space, "s3").get("buckets", {})) if isinstance(source_space, dict) else 0,
                 "vpc_count": len(_cloudsim_service_state(source_space, "vpc").get("vpcs", {})) if isinstance(source_space, dict) else 0,
                 "apigateway_count": len(_cloudsim_service_state(source_space, "apigateway").get("apis", {})) if isinstance(source_space, dict) else 0,
@@ -2142,8 +3274,14 @@ def _allowed_capabilities(tier: str) -> set[str]:
 
 
 def _check_license_for_pack(pack_id: str) -> None:
+    # PER-TENANT LICENSE: active tenant's tier is the source-of-truth (falls back
+    # to the deployment-level STATE["license"].tier for legacy callers).
     try:
-        PLATFORM.kernel.check_license_for_pack(pack_id)
+        tenant = _tenant_dict(_active_tenant_id())
+        tier = str((tenant or {}).get("license_tier")
+                   or (STATE.get("license") or {}).get("tier", "free"))
+        if pack_id not in PLATFORM.kernel.allowed_capabilities(tier):
+            raise PermissionError("CapabilityLockedByTier")
     except PermissionError:
         raise HTTPException(403, detail="CapabilityLockedByTier")
 
@@ -4246,7 +5384,7 @@ async def _capability_middleware(request: Request, call_next):
     auth = _iam_route_action_resource(request)
     # GCP-native requests are authorized by the GCP IAM PDP (in the provider
     # middleware), not the AWS action model — don't double-check them as S3/EC2.
-    if auth is not None and not identity.get("is_root") and not _is_gcp_native_path(request.url.path):
+    if auth is not None and not identity.get("is_root") and not _is_gcp_native_path(request.url.path) and not _is_azure_native_path(request.url.path):
         action, resource = auth
         allowed, reason = _iam_authorize(principal, action, resource, {
             "aws:PrincipalArn": identity.get("arn", ""),
@@ -4343,12 +5481,26 @@ class _SpaceScopedDictProxy(MutableMapping):
         spaces_state = STATE.setdefault("spaces", {"spaces": {}, "active_space_id": "", "settings": {"max_spaces": 6, "default_provider": "aws", "default_region": "us-east-1"}})
         active_id = spaces_state.get("active_space_id", "")
         space = spaces_state.get("spaces", {}).get(active_id, {}) if active_id else {}
-        if isinstance(space, dict):
+        req_provider = str(REQUEST_PROVIDER.get() or "aws").lower().strip()
+        # STRUCTURAL ISOLATION:
+        #   1. Cross-tenant access — space.tenant_id must equal active_tenant_id.
+        #   2. Cross-provider access — space.provider must equal REQUEST_PROVIDER
+        #      (Space 1:1 Provider rule).
+        # Either mismatch → fall through to a non-persisted scratch dict; a
+        # handler literally cannot reach another tenant's or another provider's
+        # resources even by mistake. The API-layer 403 fires first for good UX;
+        # this is the defense-in-depth.
+        if isinstance(space, dict) and space and active_id:
+            space_tid = space.get("tenant_id") or DEFAULT_TENANT_ID
+            space_provider = str(space.get("provider") or "aws").lower().strip()
+            if space_tid != _active_tenant_id() or space_provider != req_provider:
+                return self.default_factory()  # blocked, scratch (not persisted)
+        if isinstance(space, dict) and space:
             service_states = space.setdefault("service_states", {})
-            req_provider = str(REQUEST_PROVIDER.get() or "aws").lower().strip()
             service_key = self.service_key if req_provider == "aws" else f"{req_provider}_{self.service_key}"
             service_state = service_states.setdefault(service_key, self.default_factory())
         else:
+            # No active space at all → legacy deployment-level fallback.
             service_state = STATE.setdefault(self.service_key, self.default_factory())
         return service_state
 
@@ -4422,6 +5574,27 @@ gcp_functions_state = _SpaceScopedDictProxy("gcp_functions", lambda: {"functions
 gcp_apigw_state = _SpaceScopedDictProxy("gcp_apigateway", lambda: {"apis": {}, "api_configs": {}, "gateways": {}, "operations": [], "logs": []})
 gcp_vpc_state = _SpaceScopedDictProxy("gcp_vpc", lambda: {"networks": {}, "subnetworks": {}, "firewalls": {}, "routes": {}, "operations": []})
 gcp_iam_state = _SpaceScopedDictProxy("gcp_iam", lambda: {"policies": {}, "service_accounts": {}, "bindings": [], "operations": []})
+
+# Azure ARM resources are space-scoped + persisted exactly like AWS/GCP: with
+# REQUEST_PROVIDER="azure" the proxy resolves to the active space's
+# service_states["azure_arm"]["resources"] (a {resource-id: record} dict) which
+# lives in STATE and is written out by _persist_state(). We inject this proxy
+# as azure_services._state so every ARM handler reads/writes the active space.
+azure_arm_state = _SpaceScopedDictProxy("arm", lambda: {"resources": {}}, "resources")
+provider_azure_services._state = azure_arm_state
+
+
+def _azure_state_dict() -> dict:
+    """The active space's Azure ARM resources dict, read independent of
+    REQUEST_PROVIDER (cross-cutting consumers like the CloudSim graph inject and
+    the console summary run outside an azure-native request). Matches exactly
+    what the azure_arm_state proxy resolves to for an azure request."""
+    space = _gcp_active_space_dict()
+    if isinstance(space, dict) and space:
+        return (space.setdefault("service_states", {})
+                     .setdefault("azure_arm", {"resources": {}})
+                     .setdefault("resources", {}))
+    return STATE.setdefault("azure_arm", {"resources": {}}).setdefault("resources", {})
 
 # GCP service_state buckets and the record collections inside each, used by the
 # console summary (counter source-of-truth) and the project consolidation. Keys
@@ -4515,11 +5688,33 @@ def api_gcp_console_summary(project: str = ""):
             elif rec.get("collection"):
                 collections.add(str(rec.get("collection")))
 
+    # Firestore: when delegating to the emulator, count distinct root collections there.
+    try:
+        from core import gcp_firestore_emulator as _fe
+        if _fe.available():
+            collections = set()
+            for d in _fe.list_root(target or _gcp_project_name(""), "(default)"):
+                nm = str(d.get("name") or "")
+                if "/documents/" in nm:
+                    collections.add(nm.split("/documents/", 1)[1].split("/", 1)[0])
+    except Exception:
+        pass
+
+    def _pubsub_count() -> int:
+        # When delegating to the Pub/Sub emulator, topics live there, not in the DB.
+        try:
+            from core import gcp_pubsub_emulator as _pe
+            if _pe.available():
+                return len(_pe.list_topics(target or _gcp_project_name("")))
+        except Exception:
+            pass
+        return count("gcp_pubsub", "topics")
+
     services = {
         "gcp-compute": count("gcp_compute", "instances"),
         "gcp-storage": count("gcp_storage", "buckets"),
         "gcp-cloudsql": count("gcp_sql", "instances"),
-        "gcp-pubsub": count("gcp_pubsub", "topics"),
+        "gcp-pubsub": _pubsub_count(),
         "gcp-firestore": len(collections),
         "gcp-functions": count("gcp_functions", "functions"),
         "gcp-apigateway": count("gcp_apigateway", "apis"),
@@ -6391,6 +7586,35 @@ def _lxd_container_exists(ref: str) -> bool:
     return _lxd_status(ref) is not None
 
 
+def _lxd_container_ipv4(ref: str) -> str | None:
+    """Real global IPv4 of a container's eth0, via the runtime bridge.
+    This is the address instances actually reach each other on (lxdbr0)."""
+    completed = _lxd_run(["list", ref, "--format", "json"], timeout=30)
+    if completed.returncode != 0:
+        return None
+    try:
+        data = json.loads(completed.stdout or "[]")
+    except Exception:
+        return None
+    if not isinstance(data, list):
+        return None
+    for entry in data:
+        if not isinstance(entry, dict) or str(entry.get("name") or "") != str(ref):
+            continue
+        network = (entry.get("state") or {}).get("network") or {}
+        for iface_name, iface in network.items():
+            if iface_name == "lo" or not isinstance(iface, dict):
+                continue
+            for addr in (iface.get("addresses") or []):
+                if not isinstance(addr, dict):
+                    continue
+                if str(addr.get("family")) == "inet" and str(addr.get("scope")) == "global":
+                    ip = str(addr.get("address") or "").strip()
+                    if ip:
+                        return ip
+    return None
+
+
 def _allocate_host_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.bind(("127.0.0.1", 0))
@@ -6611,6 +7835,23 @@ def _ensure_container(instance: dict) -> str:
         instance["runtime_image"],
         instance["container_name"],
     ]
+    # Apply host-feasible limits derived from the chosen instance type. The
+    # catalog says (e.g.) m5.8xlarge = 32 vCPU / 128 GB; runtime_sizer tier-maps
+    # that into something the host can actually run, and we surface BOTH the
+    # requested and provisioned numbers on the instance record for transparency.
+    try:
+        from core import runtime_sizer as _sizer
+        provider = str(instance.get("provider") or "aws").lower()
+        itype = str(instance.get("instance_type") or instance.get("machine_type") or "")
+        sizing = _sizer.for_instance_type(itype, provider)
+    except Exception:
+        sizing = None
+    if sizing:
+        run_args.extend([
+            "-c", f"limits.cpu={sizing['cpu']}",
+            "-c", f"limits.memory={sizing['memory_mb']}MB",
+        ])
+        instance["runtime_sizing"] = sizing
     completed = _lxd_run_checked(run_args, timeout=120)
     instance["container_id"] = instance["container_name"]
     instance["container_status"] = "created"
@@ -6644,6 +7885,11 @@ def _sync_lxd_instance(instance: dict) -> None:
     instance["container_status"] = status
     if status == "running":
         instance["state"] = "running"
+        # Surface the container's real bridge IP as the instance internal IP.
+        real_ip = _lxd_container_ipv4(ref)
+        if real_ip:
+            instance["private_ip"] = real_ip
+            instance["runtime_internal_ip"] = real_ip
         if str(instance.get("launch_status") or "").strip().lower() in {"queued", "starting", "error", "pending"}:
             instance["launch_status"] = "ready"
             instance["launch_error"] = ""
@@ -6918,6 +8164,18 @@ def _ensure_multipass_instance(instance: dict) -> str:
             cloud_init_lines.append(user_data)
     cloud_init_payload = "\n".join(cloud_init_lines).strip() + "\n"
 
+    # Same host-aware sizing as the LXD path (m5.8xlarge → host-tier limits).
+    try:
+        from core import runtime_sizer as _sizer
+        provider = str(instance.get("provider") or "aws").lower()
+        itype = str(instance.get("instance_type") or instance.get("machine_type") or "")
+        sizing = _sizer.for_instance_type(itype, provider)
+    except Exception:
+        sizing = None
+    sizing_flags = ""
+    if sizing:
+        sizing_flags = f" --cpus {int(sizing['cpu'])} --memory {int(sizing['memory_mb'])}M"
+        instance["runtime_sizing"] = sizing
     launch_script = "\n".join(
         [
             "set -e",
@@ -6925,7 +8183,7 @@ def _ensure_multipass_instance(instance: dict) -> str:
             "cat > \"$tmp_cloudlearn_init\" <<'CLOUDLEARN_EOF'",
             cloud_init_payload.rstrip("\n"),
             "CLOUDLEARN_EOF",
-            f"multipass launch {shlex.quote(launch_image)} --name {shlex.quote(instance['container_name'])} --cloud-init \"$tmp_cloudlearn_init\"",
+            f"multipass launch {shlex.quote(launch_image)} --name {shlex.quote(instance['container_name'])}{sizing_flags} --cloud-init \"$tmp_cloudlearn_init\"",
             "status=$?",
             "rm -f \"$tmp_cloudlearn_init\"",
             "exit \"$status\"",
@@ -7023,6 +8281,277 @@ def _reboot_multipass_instance(instance: dict) -> dict:
         _start_instance_command(instance)
     instance["rebooted_at"] = _now()
     return instance
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Simulator host budget — clamp 30% .. 50% of host. Default 40% (the user
+# keeps the rest for their own apps). Every container launch must fit in what's
+# left after summing the runtime_sizing of all currently-live containers across
+# every space + every provider. Over-budget creates are REJECTED at the API
+# layer, before any state mutation — so the user gets an immediate 403 with a
+# clear "delete one or pick smaller" message instead of a silent partial
+# provision.
+# ──────────────────────────────────────────────────────────────────────────────
+SIMULATOR_BUDGET_PCT_MIN = 30
+SIMULATOR_BUDGET_PCT_MAX = 50
+
+# Runtime bypass switch — flip via POST /api/runtime/budget/{enable,disable}.
+# When True, _check_budget_for_launch is a no-op so EC2/GCP/Azure VM creates
+# don't hit the 30-50% host-clamp. The budget calc + chip still shows real
+# numbers so the bypass is visible.
+#
+# DEFAULT IS BYPASSED so simulator workflows don't trip on the clamp for
+# day-to-day testing. To restore production-like enforcement, either:
+#   • POST /api/runtime/budget/enable          (runtime toggle, resets on
+#                                                container restart)
+#   • Set env CLOUDLEARN_SIMULATOR_BUDGET_GATE=enabled  (sticky on boot)
+_BUDGET_BYPASSED: bool = (
+    os.environ.get("CLOUDLEARN_SIMULATOR_BUDGET_GATE", "").lower().strip()
+    not in ("enabled", "on", "true", "1")
+)
+
+
+def _simulator_budget_pct() -> int:
+    try:
+        v = int(os.environ.get("CLOUDLEARN_SIMULATOR_BUDGET_PCT", "40"))
+    except Exception:
+        v = 40
+    return max(SIMULATOR_BUDGET_PCT_MIN, min(SIMULATOR_BUDGET_PCT_MAX, v))
+
+
+def _host_cpu_memory() -> tuple[int, int]:
+    """Live host CPU count + total RAM (MB). Works inside the simulator
+    container: cpu_count is the cgroup quota; /proc/meminfo is the container's
+    visible memory (matches LXD's view too)."""
+    try:
+        host_cpu = os.cpu_count() or 2
+    except Exception:
+        host_cpu = 2
+    host_mem_mb = 4096
+    try:
+        with open("/proc/meminfo") as f:
+            for line in f:
+                if line.startswith("MemTotal:"):
+                    host_mem_mb = int(line.split()[1]) // 1024
+                    break
+    except Exception:
+        pass
+    return host_cpu, host_mem_mb
+
+
+def _simulator_budget() -> dict:
+    host_cpu, host_mem_mb = _host_cpu_memory()
+    pct = _simulator_budget_pct()
+    return {
+        "cpu": max(1, host_cpu * pct // 100),
+        "memory_mb": max(256, host_mem_mb * pct // 100),
+        "host_cpu": host_cpu,
+        "host_memory_mb": host_mem_mb,
+        "budget_pct": pct,
+        "clamp": [SIMULATOR_BUDGET_PCT_MIN, SIMULATOR_BUDGET_PCT_MAX],
+        "bypassed": _BUDGET_BYPASSED,
+    }
+
+
+def _simulator_used() -> dict:
+    """Sum runtime_sizing of every live container across ALL spaces/providers.
+    The host is one physical resource — budget is global, not per-tenant."""
+    cpu = 0
+    mem_mb = 0
+    spaces = (_spaces_state().get("spaces") or {}) if isinstance(_spaces_state().get("spaces"), dict) else {}
+    for sp in spaces.values():
+        if not isinstance(sp, dict):
+            continue
+        ss = sp.get("service_states") if isinstance(sp.get("service_states"), dict) else {}
+        if not ss:
+            continue
+        # AWS EC2 instances — count non-terminated.
+        for inst in ((ss.get("ec2") or {}).get("instances") or {}).values():
+            if isinstance(inst, dict) and str(inst.get("state") or "").lower() not in ("terminated",):
+                sz = inst.get("runtime_sizing") or {}
+                cpu += int(sz.get("cpu") or 0)
+                mem_mb += int(sz.get("memory_mb") or 0)
+        # GCP Compute instances.
+        for inst in ((ss.get("gcp_compute") or {}).get("instances") or {}).values():
+            if isinstance(inst, dict) and str(inst.get("status") or "").upper() not in ("TERMINATED",):
+                sz = inst.get("runtime_sizing") or {}
+                cpu += int(sz.get("cpu") or 0)
+                mem_mb += int(sz.get("memory_mb") or 0)
+        # Azure Microsoft.Compute/virtualMachines.
+        azure = (ss.get("azure_arm") or {}).get("resources") or {}
+        for rec in azure.values():
+            if not isinstance(rec, dict):
+                continue
+            if str(rec.get("_type") or "").lower() != "microsoft.compute/virtualmachines":
+                continue
+            props = rec.get("properties") if isinstance(rec.get("properties"), dict) else {}
+            rt = props.get("runtime") if isinstance(props.get("runtime"), dict) else {}
+            sz = rt.get("sizing") if isinstance(rt, dict) else None
+            if isinstance(sz, dict):
+                cpu += int(sz.get("cpu") or 0)
+                mem_mb += int(sz.get("memory_mb") or 0)
+    return {"cpu": cpu, "memory_mb": mem_mb}
+
+
+def _check_budget_for_launch(instance_type: str, provider: str) -> dict | None:
+    """Pre-launch gate. Computes the sizing for this instance_type via the
+    catalog → host-tier mapping, then refuses with HTTP 403 if the resulting
+    CPU/MEM would push total live-container usage past the simulator's budget.
+    Returns the sizing dict (so callers don't recompute) or None if the
+    instance_type isn't in the catalog (let LXD use its defaults; no
+    reservation accounted).
+
+    When the bypass flag is on (POST /api/runtime/budget/disable), returns
+    the sizing but skips the budget check — used for testing."""
+    from core import runtime_sizer as _sizer
+    sizing = _sizer.for_instance_type(instance_type or "", provider or "")
+    if not sizing:
+        return None
+    if _BUDGET_BYPASSED:
+        return sizing  # caller still gets sizing; just no 403
+    budget = _simulator_budget()
+    used = _simulator_used()
+    new_cpu = used["cpu"] + int(sizing.get("cpu") or 0)
+    new_mem = used["memory_mb"] + int(sizing.get("memory_mb") or 0)
+    if new_cpu > budget["cpu"]:
+        raise HTTPException(status_code=403, detail=(
+            f"SimulatorBudgetExceeded: launching this instance would use "
+            f"{new_cpu} CPU of {budget['cpu']} available (simulator allowed "
+            f"{budget['budget_pct']}% of {budget['host_cpu']} host CPUs). "
+            f"Delete an existing instance or pick a smaller type."))
+    if new_mem > budget["memory_mb"]:
+        raise HTTPException(status_code=403, detail=(
+            f"SimulatorBudgetExceeded: launching this instance would use "
+            f"{new_mem} MB of {budget['memory_mb']} MB available (simulator "
+            f"allowed {budget['budget_pct']}% of {budget['host_memory_mb']} MB host). "
+            f"Delete an existing instance or pick a smaller type."))
+    return sizing
+
+
+def provision_azure_vm_runtime(record: dict) -> None:
+    """Back an Azure Microsoft.Compute/virtualMachines record with a REAL
+    LXD/multipass container — parity with AWS EC2 and GCP Compute, which both
+    already do this. Idempotent: a record with an existing container_name is a
+    no-op. Failures are recorded on the record and never raised."""
+    if not isinstance(record, dict):
+        return
+    if str(record.get("_type", "")).lower() != "microsoft.compute/virtualmachines":
+        return
+    props = record.setdefault("properties", {})
+    if not isinstance(props, dict):
+        props = {}; record["properties"] = props
+    runtime = props.setdefault("runtime", {})
+    if not isinstance(runtime, dict):
+        runtime = {}; props["runtime"] = runtime
+    if runtime.get("containerName"):
+        return  # already provisioned
+
+    raw_name = str(record.get("name") or "vm").strip()
+    safe_name = re.sub(r"[^a-z0-9-]+", "-", raw_name.lower()).strip("-") or "vm"
+    digest = hashlib.sha1(str(record.get("id", raw_name)).encode()).hexdigest()[:8]
+    instance_id = f"az-{digest}-{safe_name[:24]}"
+
+    host_os = _resolved_host_os()
+    if host_os in {"darwin", "windows"} and _runtime_available("multipass"):
+        backend = "multipass"
+    elif _lxd_available():
+        backend = "lxd"
+    else:
+        runtime["status"] = "simulated"
+        runtime["backend"] = "simulated"
+        runtime["note"] = "No LXD/multipass runtime available on host — Azure VM is metadata-only here."
+        return
+
+    workspace = _instance_workspace(instance_id)
+    workspace.mkdir(parents=True, exist_ok=True)
+    runtime_image = LXD_RUNTIME_IMAGE if backend == "lxd" else MULTIPASS_RUNTIME_IMAGE
+    container_name = f"cloudlearn-{instance_id}"
+    vm_size = ""
+    hw = props.get("hardwareProfile") if isinstance(props.get("hardwareProfile"), dict) else {}
+    if isinstance(hw, dict):
+        vm_size = str(hw.get("vmSize") or "")
+    instance = {
+        "instance_id": instance_id,
+        "provider": "azure",
+        "name": raw_name,
+        "instance_type": vm_size,
+        "ami": "",
+        "runtime_image": runtime_image,
+        "runtime_backend": backend,
+        "container_name": container_name,
+        "container_id": "",
+        "container_port": LXD_CONSOLE_PORT,
+        "host_port": _allocate_host_port(),
+        "workspace": str(workspace),
+        "deployment_path": str(workspace),
+        "console_state": {"cwd": str(workspace)},
+        "console_log": [],
+        "state": "pending",
+        "launch_status": "queued",
+        "container_status": "created",
+        "container_download_state": "pending",
+        "command": "",
+        "user_data": "",
+        "console_backend": "lxd-exec" if backend == "lxd" else "multipass-ssh",
+    }
+    try:
+        if backend == "lxd":
+            _start_lxd_instance(instance)
+        else:
+            _start_multipass_instance(instance)
+    except Exception as exc:
+        runtime["status"] = "launch_failed"
+        runtime["error"] = str(exc)[:200]
+        runtime["backend"] = backend
+        return
+
+    runtime["status"] = "provisioned"
+    runtime["backend"] = backend
+    runtime["containerName"] = instance["container_name"]
+    runtime["containerId"] = instance.get("container_id", "")
+    runtime["endpointUrl"] = instance.get("endpoint_url", f"{backend}://{instance['container_name']}")
+    runtime["containerStatus"] = instance.get("container_status", "")
+    runtime["state"] = instance.get("state", "")
+    runtime["sizing"] = instance.get("runtime_sizing", {})
+    runtime["workspace"] = instance.get("workspace", "")
+    # Real container IP (if LXD has assigned one) — Azure consumers see it as
+    # the VM's private IP in the resource view.
+    if instance.get("private_ip"):
+        nics = props.setdefault("networkProfile", {}).setdefault("networkInterfaces", [])
+        if isinstance(nics, list) and not nics:
+            nics.append({"id": f"runtime/{instance['container_name']}",
+                         "properties": {"privateIPAddress": instance["private_ip"]}})
+
+
+def deprovision_azure_vm_runtime(record: dict) -> None:
+    """Tear down the LXD/multipass container backing an Azure VM (called on
+    ARM DELETE). Best-effort — Azure delete should not fail if cleanup hits an
+    error."""
+    try:
+        if not isinstance(record, dict):
+            return
+        props = record.get("properties") if isinstance(record.get("properties"), dict) else {}
+        runtime = props.get("runtime") if isinstance(props.get("runtime"), dict) else {}
+        container = runtime.get("containerName") if isinstance(runtime, dict) else None
+        backend = runtime.get("backend") if isinstance(runtime, dict) else None
+        if not container:
+            return
+        if backend == "lxd" and _lxd_available():
+            try:
+                _lxd_run_checked(["stop", container, "--force"], timeout=60)
+            except Exception:
+                pass
+            try:
+                _lxd_run_checked(["delete", container, "--force"], timeout=60)
+            except Exception:
+                pass
+        elif backend == "multipass" and _runtime_available("multipass"):
+            try:
+                _multipass_run(["delete", "--purge", container], timeout=60)
+            except Exception:
+                pass
+    except Exception:
+        pass
 
 
 def _terminate_multipass_instance(instance: dict) -> dict:
@@ -7926,18 +9455,41 @@ def _federation_space_summary() -> dict:
     }
 
 
+def _space_belongs_to_active_tenant(space: dict | None) -> bool:
+    if not isinstance(space, dict):
+        return False
+    return (space.get("tenant_id") or DEFAULT_TENANT_ID) == _active_tenant_id()
+
+
+def _require_tenant_space(space_id: str) -> dict:
+    """Return the space dict iff it belongs to the active tenant; 404 otherwise.
+    Cross-tenant ids are indistinguishable from non-existent ones (no leak)."""
+    spaces = _spaces_state().get("spaces", {})
+    space = spaces.get(space_id) if isinstance(spaces, dict) else None
+    if not isinstance(space, dict) or not _space_belongs_to_active_tenant(space):
+        raise HTTPException(status_code=404, detail="SimulationSpaceNotFound")
+    return space
+
+
 @app.get("/api/spaces")
 def api_list_spaces():
     _refresh_cloudsim_gcp_summary()
-    spaces = PLATFORM.list_spaces()
+    all_spaces = PLATFORM.list_spaces()
+    # TENANT FILTER: a tenant can only see its own spaces.
+    tid = _active_tenant_id()
+    spaces = [s for s in all_spaces if (s.get("tenant_id") or DEFAULT_TENANT_ID) == tid]
     spaces_state = _spaces_state()
     active_id = spaces_state.get("active_space_id", "")
+    active_space_dict = spaces_state.get("spaces", {}).get(active_id, {}) if active_id else {}
+    if not _space_belongs_to_active_tenant(active_space_dict):
+        active_id, active_space_dict = "", {}
     federation_summary = _federation_space_summary()
     return {
         "spaces": [_space_payload(space) for space in spaces],
         "count": len(spaces),
         "active_space_id": active_id,
-        "active_space": _space_payload(spaces_state.get("spaces", {}).get(active_id, {})) if active_id else None,
+        "active_space": _space_payload(active_space_dict) if active_id else None,
+        "active_tenant_id": tid,
         "settings": copy.deepcopy(spaces_state.get("settings", {})),
         "provider_counts": copy.deepcopy(federation_summary.get("provider_counts", {})),
         "resource_counts": copy.deepcopy(federation_summary.get("resource_counts", {})),
@@ -7959,26 +9511,57 @@ def api_active_space():
     spaces_state = _spaces_state()
     active_id = spaces_state.get("active_space_id", "")
     space = spaces_state.get("spaces", {}).get(active_id, {}) if active_id else {}
-    return {"active_space_id": active_id, "space": _space_payload(space)}
+    if not _space_belongs_to_active_tenant(space):  # foreign-tenant active = treat as none
+        return {"active_space_id": "", "space": None, "active_tenant_id": _active_tenant_id()}
+    return {"active_space_id": active_id, "space": _space_payload(space),
+            "active_tenant_id": _active_tenant_id()}
 
 
 @app.get("/api/spaces/{space_id}")
 def api_get_space(space_id: str):
     _refresh_cloudsim_gcp_summary()
-    space = _spaces_state().get("spaces", {}).get(space_id)
-    if not isinstance(space, dict):
-        raise HTTPException(status_code=404, detail="SimulationSpaceNotFound")
+    space = _require_tenant_space(space_id)
     return {"space": _space_payload(space)}
 
 
 @app.post("/api/spaces")
 def api_create_space(payload: dict[str, Any]):
     spec = dict(payload or {})
+    # PROVIDER LOCK (1:1): a space has exactly one provider, set at create,
+    # immutable thereafter.
+    provider = str(spec.get("provider") or "").strip().lower()
+    if provider not in ALLOWED_PROVIDERS:
+        raise HTTPException(status_code=400,
+            detail=f"provider must be one of {ALLOWED_PROVIDERS}; got '{spec.get('provider')}'")
+    spec["provider"] = provider
+    # TENANT ASSIGNMENT: every space belongs to exactly one tenant. Default to
+    # the active tenant; reject if the requested tenant doesn't exist.
+    requested_tid = str(spec.get("tenant_id") or "").strip() or _active_tenant_id()
+    tenant = _tenant_dict(requested_tid)
+    if not tenant:
+        raise HTTPException(status_code=400, detail=f"tenant '{requested_tid}' not found")
+    # PER-TENANT QUOTA: each tenant has its own max_spaces (set at create, can be
+    # raised by upgrading the tier). Count THIS tenant's spaces and reject if at
+    # cap — independent of the deployment-wide cap which still applies on top.
+    tenant_max = int((tenant.get("settings") or {}).get("max_spaces", 6))
+    tenant_spaces = sum(1 for s in (_spaces_state().get("spaces") or {}).values()
+                        if isinstance(s, dict) and (s.get("tenant_id") or DEFAULT_TENANT_ID) == requested_tid)
+    if tenant_spaces >= tenant_max:
+        raise HTTPException(status_code=403,
+            detail=f"Tenant '{requested_tid}' has reached its max_spaces quota "
+                   f"({tenant_spaces}/{tenant_max}) on the {tenant.get('license_tier','free')} tier")
     try:
         space = PLATFORM.create_space(spec)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
-    _record_usage("space.create", {"space_id": space.get("space_id"), "provider": space.get("provider"), "name": space.get("name")})
+    # Tag the new space with tenant_id (must happen post-create since the kernel
+    # doesn't know about tenants).
+    spaces_map = _spaces_state().setdefault("spaces", {})
+    if space.get("space_id") in spaces_map:
+        spaces_map[space["space_id"]]["tenant_id"] = requested_tid
+        space["tenant_id"] = requested_tid
+    _record_usage("space.create", {"space_id": space.get("space_id"), "provider": space.get("provider"),
+                                    "name": space.get("name"), "tenant_id": requested_tid})
     STATE.setdefault("cloudsim", {"summary": {}, "events": [], "last_reconcile_at": ""})["summary"]["spaces"] = len(_spaces_state().get("spaces", {}))
     _persist_state()
     return {"message": "Simulation space created", "space": _space_payload(space)}
@@ -7992,6 +9575,7 @@ def api_estimate_space(payload: dict[str, Any]):
 
 @app.post("/api/spaces/{space_id}/switch")
 def api_switch_space(space_id: str):
+    _require_tenant_space(space_id)  # 404 if cross-tenant — no leak
     try:
         space = PLATFORM.switch_space(space_id)
     except KeyError:
@@ -8002,6 +9586,7 @@ def api_switch_space(space_id: str):
 
 @app.post("/api/spaces/{space_id}/pause")
 def api_pause_space(space_id: str):
+    _require_tenant_space(space_id)
     try:
         space = PLATFORM.pause_space(space_id)
     except KeyError:
@@ -8012,6 +9597,7 @@ def api_pause_space(space_id: str):
 
 @app.post("/api/spaces/{space_id}/resume")
 def api_resume_space(space_id: str):
+    _require_tenant_space(space_id)
     try:
         space = PLATFORM.resume_space(space_id)
     except KeyError:
@@ -8022,6 +9608,7 @@ def api_resume_space(space_id: str):
 
 @app.post("/api/spaces/{space_id}/archive")
 def api_archive_space(space_id: str):
+    _require_tenant_space(space_id)
     try:
         space = PLATFORM.archive_space(space_id)
     except KeyError:
@@ -8032,6 +9619,7 @@ def api_archive_space(space_id: str):
 
 @app.delete("/api/spaces/{space_id}")
 def api_delete_space(space_id: str):
+    _require_tenant_space(space_id)
     try:
         PLATFORM.delete_space(space_id)
     except KeyError:
@@ -8040,6 +9628,213 @@ def api_delete_space(space_id: str):
     STATE.setdefault("cloudsim", {"summary": {}, "events": [], "last_reconcile_at": ""})["summary"]["spaces"] = len(_spaces_state().get("spaces", {}))
     _persist_state()
     return {"message": "Simulation space deleted", "space_id": space_id}
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Tenant CRUD — the licensing/isolation boundary above Space.
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _tenant_usage(tid: str) -> dict:
+    spaces = (_spaces_state().get("spaces") or {})
+    tenant = _tenant_dict(tid) or {}
+    spaces_count = sum(1 for s in spaces.values()
+                       if isinstance(s, dict) and (s.get("tenant_id") or DEFAULT_TENANT_ID) == tid)
+    max_spaces = int((tenant.get("settings") or {}).get("max_spaces", 6))
+    return {"spaces_count": spaces_count, "max_spaces": max_spaces,
+            "spaces_remaining": max(0, max_spaces - spaces_count)}
+
+
+@app.get("/api/runtime/budget")
+def api_runtime_budget():
+    """Simulator's container budget — clamp 30%-50% of host (default 40%). The
+    user keeps the rest. Returns budget / used / free / host + clamp limits so
+    UIs can show a quota meter and refuse over-budget launches up-front."""
+    b = _simulator_budget()
+    u = _simulator_used()
+    return {
+        "budget":     {"cpu": b["cpu"],       "memory_mb": b["memory_mb"]},
+        "used":       u,
+        "free":       {"cpu": max(0, b["cpu"] - u["cpu"]),
+                       "memory_mb": max(0, b["memory_mb"] - u["memory_mb"])},
+        "host":       {"cpu": b["host_cpu"],  "memory_mb": b["host_memory_mb"]},
+        "budget_pct": b["budget_pct"],
+        "clamp":      b["clamp"],
+        "bypassed":   b["bypassed"],
+    }
+
+
+@app.post("/api/runtime/budget/disable", include_in_schema=False)
+def api_runtime_budget_disable():
+    """Testing toggle: bypass the host-clamp gate. Subsequent VM/EC2/Compute
+    creates won't return 403 SimulatorBudgetExceeded. Real LXD/multipass limits
+    are still applied per-container; only the global host clamp is skipped.
+    Resets on container restart."""
+    global _BUDGET_BYPASSED
+    _BUDGET_BYPASSED = True
+    return {"bypassed": True, "message": "Budget gate disabled. Re-enable via POST /api/runtime/budget/enable."}
+
+
+@app.post("/api/runtime/budget/enable", include_in_schema=False)
+def api_runtime_budget_enable():
+    """Re-enable the host-clamp gate (undo /disable)."""
+    global _BUDGET_BYPASSED
+    _BUDGET_BYPASSED = False
+    return {"bypassed": False, "message": "Budget gate re-enabled."}
+
+
+@app.get("/api/instances/catalog")
+def api_instances_catalog(provider: str = "aws"):
+    """Single source-of-truth catalog of instance types the simulator understands
+    (same dict the bridge uses to map real EC2/Compute/Azure VMs into CloudSim
+    Plus shapes). Filter by provider so each console shows only its own SKUs
+    — matches the Space 1:1 Provider rule by construction.
+
+    Returned items: {name, family, vcpu, ram_mb, mips_per_vcpu}. Sorted by
+    (family, vcpu, ram_mb) for clean grouped rendering."""
+    from core import instance_catalog as cat
+    table = {"aws": cat.AWS, "gcp": cat.GCP, "azure": cat.AZURE}.get(str(provider).lower(), {})
+    # `**shape` first, then `"name": name` so the dict key wins over shape's
+    # default name=None (the _shape factory doesn't know its own catalog key).
+    items = [{**shape, "name": name} for name, shape in table.items()]
+    items.sort(key=lambda i: (i.get("family", ""), i.get("vcpu", 0), i.get("ram_mb", 0)))
+    return {"provider": str(provider).lower(), "count": len(items), "instances": items}
+
+
+@app.get("/api/tenants")
+def api_list_tenants():
+    ts = _tenants_state()
+    out = []
+    for tid, tenant in (ts.get("tenants") or {}).items():
+        if not isinstance(tenant, dict):
+            continue
+        out.append({**tenant, "usage": _tenant_usage(tid)})
+    return {"active_tenant_id": ts.get("active_tenant_id", ""),
+            "tenants": out,
+            "default_tenant_id": DEFAULT_TENANT_ID}
+
+
+@app.get("/api/tenants/active")
+def api_active_tenant():
+    tid = _active_tenant_id()
+    return {"tenant_id": tid, "tenant": _tenant_dict(tid)}
+
+
+@app.post("/api/tenants")
+def api_create_tenant(payload: dict[str, Any]):
+    spec = dict(payload or {})
+    name = str(spec.get("name") or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="name required")
+    ts = _tenants_state()
+    tenants = ts.setdefault("tenants", {})
+    tid = str(spec.get("tenant_id") or "").strip()
+    if not tid:
+        tid = re.sub(r"[^a-z0-9-]+", "-", name.lower()).strip("-") or uuid.uuid4().hex[:12]
+    if tid in tenants:
+        raise HTTPException(status_code=409, detail=f"tenant '{tid}' already exists")
+    tenant = {
+        "tenant_id": tid, "name": name,
+        "license_tier": str(spec.get("license_tier", "free")),
+        "created_at": time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime()),
+        "settings": {"max_spaces": int(spec.get("max_spaces", 6))},
+    }
+    tenants[tid] = tenant
+    _persist_state()
+    return {"message": "Tenant created", "tenant": tenant}
+
+
+@app.post("/api/tenants/{tid}/switch")
+def api_switch_tenant(tid: str):
+    ts = _tenants_state()
+    if tid not in (ts.get("tenants") or {}):
+        raise HTTPException(status_code=404, detail="TenantNotFound")
+    ts["active_tenant_id"] = tid
+    # If the currently-active space belongs to a different tenant, clear it —
+    # switching tenants must not leave a cross-tenant active space dangling.
+    spaces_state = _spaces_state()
+    active_sid = spaces_state.get("active_space_id", "")
+    if active_sid:
+        sp = spaces_state.get("spaces", {}).get(active_sid)
+        if isinstance(sp, dict) and (sp.get("tenant_id") or DEFAULT_TENANT_ID) != tid:
+            spaces_state["active_space_id"] = ""
+    _persist_state()
+    return {"message": "Active tenant switched", "tenant_id": tid,
+            "tenant": ts["tenants"][tid]}
+
+
+@app.delete("/api/tenants/{tid}")
+def api_delete_tenant(tid: str):
+    if tid == DEFAULT_TENANT_ID:
+        raise HTTPException(status_code=400, detail="cannot delete the default tenant")
+    ts = _tenants_state()
+    if tid not in (ts.get("tenants") or {}):
+        raise HTTPException(status_code=404, detail="TenantNotFound")
+    spaces = (_spaces_state().get("spaces") or {})
+    if any(isinstance(s, dict) and (s.get("tenant_id") or DEFAULT_TENANT_ID) == tid for s in spaces.values()):
+        raise HTTPException(status_code=400,
+            detail="tenant still owns spaces; delete or migrate them first")
+    del ts["tenants"][tid]
+    if ts.get("active_tenant_id") == tid:
+        ts["active_tenant_id"] = DEFAULT_TENANT_ID
+    _persist_state()
+    return {"message": "Tenant deleted", "tenant_id": tid}
+
+
+@app.get("/api/azure/console/summary")
+def api_azure_console_summary():
+    az = provider_azure_services
+    type_to_key = {(c["namespace"] + "/" + c["type"]).lower(): c["key"] for c in az.RESOURCE_CATALOG}
+    counts = {c["key"]: 0 for c in az.RESOURCE_CATALOG}
+    for rec in list(_azure_state_dict().values()):
+        ft = str(rec.get("_type", "")).lower()
+        if ft in type_to_key:  # count top-level resources only
+            counts[type_to_key[ft]] += 1
+    return {"subscription": az.DEFAULT_SUBSCRIPTION, "resourceGroup": az.DEFAULT_RG,
+            "counts": counts, "total": sum(counts.values())}
+
+
+# Fields the CloudSim Plus engine actually produces (org.cloudsimplus discrete-
+# event sim). The capacity block is restricted to these so DB-derived fields
+# left in a pre-engine space can't masquerade as engine output.
+_CLOUDSIM_CAPACITY_FIELDS = (
+    "datacenters", "hosts", "vms", "cloudlets", "finished_cloudlets",
+    "simulation_state", "cloudsim_engine", "cloudsim_runtime_id", "last_tick",
+    # Per-cloud aggregates the engine used to size capacity (L3) — surfaced so
+    # consumers can audit which cloud's resources contributed.
+    "aws_count", "gcp_count", "azure_count",
+    "gcp_functions_count", "azure_functionapp_count",
+    # Heterogeneous-VM facts (HW1-3): real CPU/RAM derived from actual
+    # instance types (t3.micro, m5.large, e2-medium, Standard_D8s_v5, …).
+    "total_vcpus", "total_ram_mb", "vm_shapes", "host_pes", "host_ram_mb",
+)
+
+
+def _cloudsim_layer_blocks() -> tuple[dict, dict]:
+    """The two layers as DISTINCT, provenance-tagged blocks read from the active
+    space's separated storage: inventory (internal DB, authoritative; under
+    space["resources"]) vs capacity (CloudSim Plus engine, derived; under
+    space["cloudsim"], written only by CloudSimBridge)."""
+    space = _gcp_active_space_dict()
+    resources = space.get("resources") if isinstance(space, dict) else None
+    cloudsim = space.get("cloudsim") if isinstance(space, dict) else None
+    inv = (resources or {}).get("summary") if isinstance(resources, dict) else None
+    cap = (cloudsim or {}).get("summary") if isinstance(cloudsim, dict) else None
+    capacity = {k: v for k, v in (cap or {}).items() if k in _CLOUDSIM_CAPACITY_FIELDS}
+    return ({**(inv or {}), "_source": "internal-db"},
+            {**capacity, "_source": "cloudsim-plus-engine"})
+
+
+def _cloudsim_compose_layers(payload: dict) -> None:
+    """Present inventory + capacity as separate sub-objects (not a fused
+    summary). Flat top-level summary keys are retained for backward compatibility."""
+    if not isinstance(payload, dict):
+        return
+    summary = payload.setdefault("summary", {})
+    if not isinstance(summary, dict):
+        return
+    inventory, capacity = _cloudsim_layer_blocks()
+    summary["inventory"] = inventory
+    summary["capacity"] = capacity
 
 
 @app.get("/api/cloudsim/current")
@@ -8052,6 +9847,7 @@ def api_cloudsim_current():
         active_space = spaces_state.get("spaces", {}).get(active_id, {}) if active_id else {}
         summary = payload.setdefault("summary", {})
         summary.update(_cloudsim_gcp_summary_counts(active_space if isinstance(active_space, dict) else None))
+        _cloudsim_compose_layers(payload)
     return payload
 
 
@@ -8064,6 +9860,7 @@ def api_cloudsim_summary():
         active_id = spaces_state.get("active_space_id", "")
         active_space = spaces_state.get("spaces", {}).get(active_id, {}) if active_id else {}
         payload.setdefault("summary", {}).update(_cloudsim_gcp_summary_counts(active_space if isinstance(active_space, dict) else None))
+        _cloudsim_compose_layers(payload)
     return payload
 
 
@@ -8713,6 +10510,10 @@ def api_ec2_list_instances():
 
 
 def api_ec2_create_instance(req: EC2InstanceRequest, *, auto_start: bool = True, host_os_hint: str = ""):
+    # Host-budget gate (clamp 30%-50% of host CPU+RAM): reject upfront if the
+    # chosen instance_type would push the simulator past its share of the host.
+    # Raises HTTPException(403) with a clear "delete one / pick smaller" message.
+    _check_budget_for_launch(getattr(req, "instance_type", "") or "", "aws")
     instance_id = _id("i")
     pack = _activate_pack("cloudlearn.ec2.basic")
     if req.vpc_id and req.vpc_id not in vpc_state["vpcs"]:
@@ -9359,7 +11160,10 @@ def _gcp_resource_name(value: Any, default: str = "") -> str:
 
 def _gcp_compute_numeric_id(value: str) -> str:
     token = hashlib.sha1(str(value or "").encode("utf-8")).hexdigest()[:16]
-    return str(int(token, 16))
+    # Mask to 63 bits so the value always fits a signed int64 — real Google
+    # clients (Apiary) parse numeric ids / generation / projectNumber as `long`,
+    # and an unmasked 16-hex value overflows ~half the time.
+    return str(int(token, 16) & 0x7FFFFFFFFFFFFFFF)
 
 
 def _gcp_compute_sync_runtime_instances() -> None:
@@ -9543,8 +11347,8 @@ def _gcp_compute_instance_json(instance: dict) -> dict:
             "name": "nic0",
             "network": f"{_gcp_compute_api_root()}/projects/{project}/global/networks/{instance.get('vpc_id') or 'default'}",
             "subnetwork": f"{_gcp_compute_api_root()}/projects/{project}/regions/{zone.rsplit('-', 1)[0] if '-' in zone else 'us-central1'}/subnetworks/{instance.get('subnet_id') or 'default'}",
-            "networkIP": instance.get("private_ip") or "",
-            "accessConfigs": ([{"name": "External NAT", "type": "ONE_TO_ONE_NAT", "natIP": instance.get("public_ip")}] if instance.get("public_ip") else []),
+            "networkIP": instance.get("runtime_internal_ip") or instance.get("private_ip") or "",
+            "accessConfigs": ([{"name": "External NAT", "type": "ONE_TO_ONE_NAT", "natIP": _gcp_public_ip_only()}] if instance.get("public_ip") else []),
             "stackType": "IPV4_ONLY",
         }
     ]
@@ -10074,6 +11878,8 @@ async def api_gcp_compute_create_instance(project: str, zone: str, request: Requ
         req = GCPComputeInstanceRequest(**payload)
     except Exception as exc:
         raise HTTPException(400, detail=f"InvalidComputeEngineRequest: {exc}")
+    # Host-budget gate (clamp 30%-50% of host CPU+RAM).
+    _check_budget_for_launch(str(getattr(req, "machineType", "") or payload.get("machineType") or ""), "gcp")
     instance = _gcp_compute_create_instance_instance(project, zone, req.dict())
     instance["runtime_bundle_id"] = _cloudsim_runtime_bundle("gcp_compute").get("id", "")
     instance["runtime_bundle_name"] = _cloudsim_runtime_bundle("gcp_compute").get("name", "")
@@ -10188,6 +11994,39 @@ def api_gcp_compute_reset_instance(project: str, zone: str, instance: str):
     _gcp_compute_sync_resource_links()
     _record_usage("gcp.compute.reset_instance", {"instance_id": instance.get("instance_id", ""), "project": project, "zone": zone})
     return _gcp_compute_operation_json(instance, "reset", "DONE")
+
+
+async def api_gcp_compute_set_metadata(project: str, zone: str, instance: str, request: Request):
+    """POST instances/{i}/setMetadata — update instance metadata items (Terraform/SDK update path)."""
+    inst = _gcp_compute_find_instance(project, zone, instance)
+    if not inst:
+        raise HTTPException(404, detail="NoSuchInstance")
+    payload = await request.json() if request is not None else {}
+    payload = payload if isinstance(payload, dict) else {}
+    items = payload.get("items")
+    md: dict[str, Any] = {}
+    if isinstance(items, list):
+        for it in items:
+            if isinstance(it, dict) and str(it.get("key") or "").strip():
+                md[str(it["key"])] = it.get("value", "")
+    elif isinstance(items, dict):
+        md = {str(k): v for k, v in items.items()}
+    inst["metadata_items"] = md
+    _record_usage("gcp.compute.set_metadata", {"instance_id": inst.get("instance_id", ""), "project": project, "zone": zone})
+    return _gcp_compute_operation_json(inst, "setMetadata", "DONE")
+
+
+async def api_gcp_compute_set_tags(project: str, zone: str, instance: str, request: Request):
+    """POST instances/{i}/setTags — replace network tags (Terraform/SDK update path)."""
+    inst = _gcp_compute_find_instance(project, zone, instance)
+    if not inst:
+        raise HTTPException(404, detail="NoSuchInstance")
+    payload = await request.json() if request is not None else {}
+    payload = payload if isinstance(payload, dict) else {}
+    items = payload.get("items")
+    inst["tags"] = [str(t) for t in items if str(t).strip()] if isinstance(items, list) else []
+    _record_usage("gcp.compute.set_tags", {"instance_id": inst.get("instance_id", ""), "project": project, "zone": zone})
+    return _gcp_compute_operation_json(inst, "setTags", "DONE")
 
 
 def api_gcp_compute_delete_instance(project: str, zone: str, instance: str):
@@ -10558,8 +12397,8 @@ def _gcp_storage_bucket_record(project: str, name: str, payload: dict[str, Any] 
         "metageneration": "1",
         "labels": payload.get("labels", {}) if isinstance(payload.get("labels"), dict) else {},
         "iamConfiguration": {
-            "uniformBucketLevelAccess": {"enabled": True, "lockedTime": ""},
-            "publicAccessPrevention": "enforced",
+            "uniformBucketLevelAccess": {"enabled": True},
+            "publicAccessPrevention": "inherited",
         },
     }
 
@@ -10944,7 +12783,10 @@ def _gcp_firestore_index_view(index: dict) -> dict:
 
 
 def _gcp_functions_record(project: str, location: str, payload: dict[str, Any]) -> dict:
-    name = str(payload.get("name") or payload.get("functionId") or "cloud-function")
+    # Clients (and the gapic/REST libraries) pass the full resource name
+    # projects/*/locations/*/functions/<id>; store/key by the short <id> so
+    # functions.get/{function} (last URL segment) resolves it.
+    name = str(payload.get("name") or payload.get("functionId") or "cloud-function").split("/")[-1]
     runtime = str(payload.get("runtime") or "python311")
     entry_point = str(payload.get("entryPoint") or payload.get("entry_point") or "handler")
     return {
@@ -11503,6 +13345,22 @@ async def api_gcp_pubsub_put_topic(project: str, topic: str, request: Request):
     topic_id = str(topic or payload.get("name") or "").split("/")[-1].strip()
     if not topic_id:
         raise HTTPException(400, detail="Topic id is required")
+    # Delegate to the emulator when active so PUT-create matches the delegated
+    # GET/list (otherwise Terraform writes in-proc, reads the emulator → 404 → retry loop).
+    try:
+        from core import gcp_pubsub_emulator as _pe
+        if _pe.available():
+            from google.api_core import exceptions as _gax
+            labels = payload.get("labels") if isinstance(payload.get("labels"), dict) else None
+            try:
+                t = _pe.create_topic(project, topic_id, labels)
+            except _gax.AlreadyExists:
+                t = _pe.get_topic(project, topic_id) or {"name": topic_id}
+            return _gcp_pubsub_topic_view(project, t)
+    except HTTPException:
+        raise
+    except Exception:
+        pass
     rec = _gcp_pubsub_topic_record(project, topic_id, payload)
     gcp_pubsub_state.setdefault("topics", {})[topic_id] = rec
     _record_usage("gcp.pubsub.create_topic", {"project": project, "topic": topic_id})
@@ -12572,33 +14430,54 @@ def _gcp_location_name(location: str | None, default: str = "us-central1") -> st
 
 
 _GCP_PUBLIC_BASE_ENV = os.environ.get("CLOUDLEARN_PUBLIC_URL", "").rstrip("/")
-_GCP_PUBLIC_BASE_DYNAMIC = ""
+_GCP_PUBLIC_BASE_DYNAMIC = ""  # last non-local origin seen, for non-request contexts
+_LOCAL_HOSTS = ("127.0.0.1", "localhost", "::1", "0.0.0.0")
 
 
 def _gcp_capture_public_base(request) -> None:
     """Remember the simulator's externally-visible origin so GCP resource
     metadata (selfLinks, URIs, hostnames) reflects the simulator rather than
-    *.googleapis.com. Captured from the incoming Host header; an explicit
-    CLOUDLEARN_PUBLIC_URL env var always wins."""
+    *.googleapis.com. Stored per-request (ContextVar) to avoid cross-request
+    races; a non-local value also seeds a global fallback for background
+    contexts. An explicit CLOUDLEARN_PUBLIC_URL env var always wins."""
     global _GCP_PUBLIC_BASE_DYNAMIC
     if _GCP_PUBLIC_BASE_ENV:
         return
     try:
         host = request.headers.get("host") or request.url.netloc
         scheme = request.headers.get("x-forwarded-proto") or request.url.scheme or "http"
-        if host:
-            _GCP_PUBLIC_BASE_DYNAMIC = f"{scheme}://{host}"
+        if not host:
+            return
+        base = f"{scheme}://{host}"
+        REQUEST_PUBLIC_BASE.set(base)
+        # Only let a non-local request seed the global fallback, so the
+        # container healthcheck (Host: 127.0.0.1) never pollutes it.
+        if not any(host.split(":", 1)[0] == h for h in _LOCAL_HOSTS):
+            _GCP_PUBLIC_BASE_DYNAMIC = base
     except Exception:
         pass
 
 
 def _gcp_public_base() -> str:
-    return _GCP_PUBLIC_BASE_ENV or _GCP_PUBLIC_BASE_DYNAMIC or "http://localhost:9000"
+    if _GCP_PUBLIC_BASE_ENV:
+        return _GCP_PUBLIC_BASE_ENV
+    req = REQUEST_PUBLIC_BASE.get()
+    # Prefer the current request's origin, unless it's a local/healthcheck call
+    # and we have a better non-local one remembered.
+    if req and not any(req.split("://", 1)[-1].split(":", 1)[0] == h for h in _LOCAL_HOSTS):
+        return req
+    return _GCP_PUBLIC_BASE_DYNAMIC or req or "http://localhost:9000"
 
 
 def _gcp_public_host() -> str:
     """Host:port portion of the simulator origin (no scheme)."""
     return _gcp_public_base().split("://", 1)[-1]
+
+
+def _gcp_public_ip_only() -> str:
+    """Just the host/IP of the simulator origin (no scheme, no port) — used as
+    the instance external IP (the appliance is the real ingress address)."""
+    return _gcp_public_host().split(":", 1)[0]
 
 
 def _gcp_gcs_root() -> str:
@@ -12607,6 +14486,33 @@ def _gcp_gcs_root() -> str:
 
 def _gcp_sql_root() -> str:
     return f"{_gcp_public_base()}/sql/v1beta4"
+
+
+def _gcp_sql_make_operation(project: str, instance_name: str, op_type: str = "CREATE", status: str = "DONE") -> dict:
+    """Build + store a sql#operation. Real Cloud SQL insert/delete/restart return
+    a long-running Operation that clients (and Terraform) poll via operations.get;
+    the simulator completes synchronously so the op is returned already DONE."""
+    op_name = f"op-{uuid.uuid4().hex}"
+    op = {
+        "kind": "sql#operation",
+        "name": op_name,
+        "status": status,
+        "operationType": op_type,
+        "targetId": instance_name,
+        "targetProject": project,
+        "targetLink": f"{_gcp_sql_root()}/projects/{project}/instances/{instance_name}",
+        "user": "cloudlearn@cloudlearn.iam.gserviceaccount.com",
+        "insertTime": _now(),
+        "startTime": _now(),
+        "endTime": _now() if status.upper() == "DONE" else "",
+        "selfLink": f"{_gcp_sql_root()}/projects/{project}/operations/{op_name}",
+    }
+    ops = gcp_sql_state.get("operation_records")
+    if not isinstance(ops, dict):
+        ops = {}
+        gcp_sql_state["operation_records"] = ops
+    ops[op_name] = op
+    return op
 
 
 def _gcp_pubsub_root() -> str:
@@ -12651,12 +14557,20 @@ def _gcp_storage_bucket_view(project: str, bucket: dict) -> dict:
         "defaultEventBasedHold": bool(bucket.get("defaultEventBasedHold", False)),
         "defaultObjectAcl": bucket.get("defaultObjectAcl", []),
         "labels": bucket.get("labels", {}),
-        "iamConfiguration": bucket.get("iamConfiguration", {
-            "uniformBucketLevelAccess": {"enabled": True, "lockedTime": ""},
-            "publicAccessPrevention": "enforced",
-        }),
+        "iamConfiguration": _gcp_storage_sanitize_iam_config(bucket.get("iamConfiguration")),
         "etag": bucket.get("etag", ""),
     }
+
+
+def _gcp_storage_sanitize_iam_config(conf: Any) -> dict:
+    """Real GCP clients (Apiary) parse uniformBucketLevelAccess.lockedTime as an
+    RFC3339 timestamp; an empty string throws. Drop it unless it has a real value."""
+    conf = dict(conf) if isinstance(conf, dict) else {"publicAccessPrevention": "inherited"}
+    ubla = dict(conf.get("uniformBucketLevelAccess") or {"enabled": True})
+    if not ubla.get("lockedTime"):
+        ubla.pop("lockedTime", None)
+    conf["uniformBucketLevelAccess"] = ubla
+    return conf
 
 
 def _gcp_storage_object_view(project: str, bucket: str, name: str, obj: dict) -> dict:
@@ -12726,7 +14640,7 @@ def _gcp_sql_instance_view(project: str, instance: dict) -> dict:
 
 def _gcp_pubsub_topic_view(project: str, topic: dict) -> dict:
     name = str(topic.get("name") or "")
-    return {
+    view = {
         "name": f"projects/{project}/topics/{name}",
         "labels": topic.get("labels", {}),
         "messageStoragePolicy": topic.get("messageStoragePolicy", {
@@ -12734,13 +14648,18 @@ def _gcp_pubsub_topic_view(project: str, topic: dict) -> dict:
             "enforceInTransit": False,
         }),
         "kmsKeyName": topic.get("kmsKeyName", ""),
-        "messageRetentionDuration": topic.get("messageRetentionDuration", "604800s"),
         "schemaSettings": topic.get("schemaSettings", {}),
         "satisfiesPzs": bool(topic.get("satisfiesPzs", False)),
         "state": topic.get("state", "ACTIVE"),
         "ingestionDataSourceSettings": topic.get("ingestionDataSourceSettings", {}),
         "messageTransforms": topic.get("messageTransforms", []),
     }
+    # Topics have no default retention (unlike subscriptions); only emit it when
+    # explicitly set, else Terraform sees drift ("604800s" -> null).
+    retention = topic.get("messageRetentionDuration")
+    if retention:
+        view["messageRetentionDuration"] = retention
+    return view
 
 
 def _gcp_pubsub_subscription_view(project: str, subscription: dict) -> dict:
@@ -12771,6 +14690,44 @@ def _gcp_firestore_document_view(project: str, database: str, collection: str, d
     }
 
 
+def _gcp_duration_str(value) -> str:
+    """Render a Duration field as a protobuf duration string (e.g. '60s'). Real
+    Google clients parse Cloud Functions `timeout` (and similar) as strings."""
+    if isinstance(value, str):
+        v = value.strip()
+        return v if (v.endswith("s") or not v) else f"{v}s"
+    try:
+        return f"{int(value)}s"
+    except (TypeError, ValueError):
+        return "60s"
+
+
+def _gcp_functions_make_operation(project: str, location: str, fn_view: dict, op_type: str = "CREATE_FUNCTION", done: bool = True) -> dict:
+    """google.longrunning.Operation for a Cloud Functions mutation. Real Functions
+    create/update/delete return an LRO that clients poll via operations.get; the
+    simulator completes synchronously so the op is returned already done."""
+    op_id = uuid.uuid4().hex
+    op = {
+        "name": f"operations/{op_id}",
+        "metadata": {
+            "@type": "type.googleapis.com/google.cloud.functions.v1.OperationMetadataV1",
+            "target": fn_view.get("name", ""),
+            "type": op_type,
+        },
+        "done": done,
+    }
+    if done:
+        resp = dict(fn_view)
+        resp["@type"] = "type.googleapis.com/google.cloud.functions.v1.CloudFunction"
+        op["response"] = resp
+    recs = gcp_functions_state.get("operation_records")
+    if not isinstance(recs, dict):
+        recs = {}
+        gcp_functions_state["operation_records"] = recs
+    recs[op_id] = op
+    return op
+
+
 def _gcp_functions_view(project: str, location: str, function: dict) -> dict:
     name = str(function.get("name") or "")
     # Trigger URL points at the simulator (this is where the function actually runs).
@@ -12788,7 +14745,7 @@ def _gcp_functions_view(project: str, location: str, function: dict) -> dict:
         "runtime": function.get("runtime", "python311"),
         "code": function.get("code", ""),
         "role": function.get("role", ""),
-        "timeout": function.get("timeout", function.get("serviceConfig", {}).get("timeoutSeconds", 60)),
+        "timeout": _gcp_duration_str(function.get("timeout", function.get("serviceConfig", {}).get("timeoutSeconds", 60))),
         "memory_size": function.get("memory_size", int(str(function.get("serviceConfig", {}).get("availableMemory", "256M")).rstrip("MmIi")) if str(function.get("serviceConfig", {}).get("availableMemory", "256M")).rstrip("MmIi").isdigit() else 256),
         "buildConfig": function.get("buildConfig", {
             "runtime": function.get("runtime", "python311"),
@@ -17652,6 +19609,18 @@ async def s3_get_object(bucket: str, key: str, request: Request) -> Response:
     params = dict(request.query_params)
 
     if not _bucket_exists(bucket):
+        # GCS XML-style media download: real google-cloud-storage (Go) and the
+        # GCS XML API fetch objects at GET /{bucket}/{object}. When this isn't an
+        # S3 bucket, fall back to the GCS byte store (fake-gcs-server is global,
+        # not space-scoped), so unmodified Google clients can read objects.
+        if key and not ({"uploadId", "tagging", "acl", "versions", "uploads"} & set(params)):
+            try:
+                from core import gcp_gcs_store as _gcs
+                if _gcs.available():
+                    data, ctype = _gcs.download(_tenant_scoped_bucket(bucket), key)
+                    return Response(content=data, media_type=ctype or "application/octet-stream")
+            except Exception:
+                pass
         return _error_xml("NoSuchBucket", "The specified bucket does not exist.", f"/{bucket}", 404)
 
     # ListParts

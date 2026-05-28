@@ -40,6 +40,16 @@ def register(app, h) -> None:
     def api_gcp_compute_reset_instance(project: str, zone: str, instance: str):
         return _server().api_gcp_compute_reset_instance(project, zone, instance)
 
+    @app.post("/compute/v1/projects/{project}/zones/{zone}/instances/{instance}/setMetadata")
+    @app.post("/api/gcp/compute/v1/projects/{project}/zones/{zone}/instances/{instance}/setMetadata")
+    async def api_gcp_compute_set_metadata(project: str, zone: str, instance: str, request: Request):
+        return await _server().api_gcp_compute_set_metadata(project, zone, instance, request)
+
+    @app.post("/compute/v1/projects/{project}/zones/{zone}/instances/{instance}/setTags")
+    @app.post("/api/gcp/compute/v1/projects/{project}/zones/{zone}/instances/{instance}/setTags")
+    async def api_gcp_compute_set_tags(project: str, zone: str, instance: str, request: Request):
+        return await _server().api_gcp_compute_set_tags(project, zone, instance, request)
+
     @app.delete("/compute/v1/projects/{project}/zones/{zone}/instances/{instance}")
     @app.delete("/api/gcp/compute/v1/projects/{project}/zones/{zone}/instances/{instance}")
     @app.post("/compute/v1/projects/{project}/zones/{zone}/instances/{instance}/delete")
