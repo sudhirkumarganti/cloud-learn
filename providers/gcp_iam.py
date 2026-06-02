@@ -8,6 +8,13 @@ from typing import Any
 
 from fastapi import HTTPException
 
+from core.app_context import (
+    gcp_iam_state,
+    gcp_project_name as _gcp_project_name,
+    id_gen as _id,
+    now as _now,
+)
+
 
 def _server():
     import server as server_module
@@ -26,14 +33,14 @@ def _strip_action_suffix(value: str, *suffixes: str) -> str:
 def api_gcp_iam_get_policy(project: str):
     s = _server()
     project = _strip_action_suffix(project, ":getIamPolicy", ":setIamPolicy", ":testIamPermissions")
-    project = s._gcp_project_name(project)
+    project = _gcp_project_name(project)
     return s._gcp_iam_policy_view(project)
 
 
 async def api_gcp_iam_set_policy(project: str, request):
     s = _server()
     project = _strip_action_suffix(project, ":getIamPolicy", ":setIamPolicy", ":testIamPermissions")
-    project = s._gcp_project_name(project)
+    project = _gcp_project_name(project)
     payload = {}
     try:
         payload = await request.json()
@@ -48,7 +55,7 @@ async def api_gcp_iam_set_policy(project: str, request):
 async def api_gcp_iam_test_permissions(project: str, request):
     s = _server()
     project = _strip_action_suffix(project, ":getIamPolicy", ":setIamPolicy", ":testIamPermissions")
-    project = s._gcp_project_name(project)
+    project = _gcp_project_name(project)
     payload = {}
     try:
         payload = await request.json()
@@ -62,7 +69,7 @@ async def api_gcp_iam_test_permissions(project: str, request):
         from core import gcp_iam_policy
         space = s._gcp_active_space_dict()
         principal = request.headers.get("x-cloudlearn-principal") or str(space.get("active_principal") or "root")
-        policies = s.gcp_iam_state.get("policies", {}) if isinstance(s.gcp_iam_state.get("policies"), dict) else {}
+        policies = gcp_iam_state.get("policies", {}) if isinstance(gcp_iam_state.get("policies"), dict) else {}
         policy = policies.get(project) or {}
         bindings = policy.get("bindings", []) if isinstance(policy, dict) else []
         granted = [p for p in permissions if gcp_iam_policy.authorize(principal, p, bindings)]
@@ -73,9 +80,9 @@ async def api_gcp_iam_test_permissions(project: str, request):
 
 def api_gcp_iam_list_service_accounts(project: str):
     s = _server()
-    project = s._gcp_project_name(project)
+    project = _gcp_project_name(project)
     sas = []
-    for sa in s.gcp_iam_state.setdefault("service_accounts", {}).get(project, {}).values():
+    for sa in gcp_iam_state.setdefault("service_accounts", {}).get(project, {}).values():
         sas.append({
             "name": sa["name"],
             "projectId": project,
@@ -85,7 +92,7 @@ def api_gcp_iam_list_service_accounts(project: str):
             "description": sa.get("description", ""),
             "oauth2ClientId": sa.get("oauth2ClientId", ""),
             "disabled": bool(sa.get("disabled", False)),
-            "createTime": sa.get("createTime", s._now()),
+            "createTime": sa.get("createTime", _now()),
             "etag": sa.get("etag", ""),
         })
     return {"accounts": sas, "nextPageToken": "", "kind": "iam#serviceAccountList"}
@@ -93,7 +100,7 @@ def api_gcp_iam_list_service_accounts(project: str):
 
 async def api_gcp_iam_create_service_account(project: str, request):
     s = _server()
-    project = s._gcp_project_name(project)
+    project = _gcp_project_name(project)
     payload = {}
     try:
         payload = await request.json()
@@ -101,18 +108,17 @@ async def api_gcp_iam_create_service_account(project: str, request):
         payload = {}
     if not isinstance(payload, dict):
         payload = {}
-    sa_id = str(payload.get("accountId") or payload.get("serviceAccountId") or payload.get("name") or s._id("sa")).split("/")[-1].strip()
+    sa_id = str(payload.get("accountId") or payload.get("serviceAccountId") or payload.get("name") or _id("sa")).split("/")[-1].strip()
     display_name = str(payload.get("displayName") or payload.get("display_name") or sa_id)
     email = f"{sa_id}@{project}.iam.gserviceaccount.com"
-    rec = {"name": sa_id, "project": project, "uniqueId": s._gcp_compute_numeric_id(f"{project}:{sa_id}"), "email": email, "displayName": display_name, "description": str(payload.get("description") or ""), "oauth2ClientId": s._id("oauth"), "disabled": bool(payload.get("disabled", False)), "createTime": s._now(), "etag": s._id("etag")}
-    s.gcp_iam_state.setdefault("service_accounts", {}).setdefault(project, {})[sa_id] = rec
+    rec = {"name": sa_id, "project": project, "uniqueId": s._gcp_compute_numeric_id(f"{project}:{sa_id}"), "email": email, "displayName": display_name, "description": str(payload.get("description") or ""), "oauth2ClientId": _id("oauth"), "disabled": bool(payload.get("disabled", False)), "createTime": _now(), "etag": _id("etag")}
+    gcp_iam_state.setdefault("service_accounts", {}).setdefault(project, {})[sa_id] = rec
     return {"name": f"projects/{project}/serviceAccounts/{email}", "projectId": project, "uniqueId": rec["uniqueId"], "email": email, "displayName": display_name, "description": rec["description"], "oauth2ClientId": rec["oauth2ClientId"], "disabled": rec["disabled"], "etag": rec["etag"]}
 
 
 def api_gcp_iam_delete_service_account(project: str, account: str):
-    s = _server()
-    project = s._gcp_project_name(project)
-    accounts = s.gcp_iam_state.setdefault("service_accounts", {}).setdefault(project, {})
+    project = _gcp_project_name(project)
+    accounts = gcp_iam_state.setdefault("service_accounts", {}).setdefault(project, {})
     target = None
     for key, rec in accounts.items():
         if account in {key, rec.get("email", ""), rec.get("name", "")}:
@@ -126,9 +132,8 @@ def api_gcp_iam_delete_service_account(project: str, account: str):
 
 async def api_gcp_iam_patch_service_account(project: str, account: str, request):
     """PATCH .../serviceAccounts/{account} — update displayName/description/disabled."""
-    s = _server()
-    project = s._gcp_project_name(project)
-    accounts = s.gcp_iam_state.setdefault("service_accounts", {}).setdefault(project, {})
+    project = _gcp_project_name(project)
+    accounts = gcp_iam_state.setdefault("service_accounts", {}).setdefault(project, {})
     target = None
     for key, rec in accounts.items():
         if account in {key, rec.get("email", ""), rec.get("name", "")}:
@@ -157,15 +162,14 @@ async def api_gcp_iam_patch_service_account(project: str, account: str, request)
 
 
 def api_gcp_iam_list_users():
-    s = _server()
-    project = s._gcp_project_name(None)
-    users = list(s.gcp_iam_state.setdefault("users", {}).get(project, {}).values())
+    project = _gcp_project_name(None)
+    users = list(gcp_iam_state.setdefault("users", {}).get(project, {}).values())
     return {"users": users, "count": len(users)}
 
 
 async def api_gcp_iam_create_user(request):
     s = _server()
-    project = s._gcp_project_name(None)
+    project = _gcp_project_name(None)
     payload = {}
     try:
         payload = await request.json()
@@ -176,15 +180,14 @@ async def api_gcp_iam_create_user(request):
     name = str(payload.get("user_name") or payload.get("name") or "").strip()
     if not name:
         raise HTTPException(400, detail="User name is required")
-    rec = {"user_id": s._id("user"), "user_name": name, "arn": f"{s._gcp_iam_root()}/projects/{project}/users/{name}", "policies": [], "groups": [], "created": s._now()}
-    s.gcp_iam_state.setdefault("users", {}).setdefault(project, {})[rec["user_id"]] = rec
+    rec = {"user_id": _id("user"), "user_name": name, "arn": f"{s._gcp_iam_root()}/projects/{project}/users/{name}", "policies": [], "groups": [], "created": _now()}
+    gcp_iam_state.setdefault("users", {}).setdefault(project, {})[rec["user_id"]] = rec
     return rec
 
 
 def api_gcp_iam_delete_user(user_id: str):
-    s = _server()
-    project = s._gcp_project_name(None)
-    users = s.gcp_iam_state.setdefault("users", {}).setdefault(project, {})
+    project = _gcp_project_name(None)
+    users = gcp_iam_state.setdefault("users", {}).setdefault(project, {})
     if user_id not in users:
         raise HTTPException(404, detail="User not found")
     del users[user_id]
@@ -192,15 +195,13 @@ def api_gcp_iam_delete_user(user_id: str):
 
 
 def api_gcp_iam_list_groups():
-    s = _server()
-    project = s._gcp_project_name(None)
-    groups = list(s.gcp_iam_state.setdefault("groups", {}).get(project, {}).values())
+    project = _gcp_project_name(None)
+    groups = list(gcp_iam_state.setdefault("groups", {}).get(project, {}).values())
     return {"groups": groups, "count": len(groups)}
 
 
 async def api_gcp_iam_create_group(request):
-    s = _server()
-    project = s._gcp_project_name(None)
+    project = _gcp_project_name(None)
     payload = {}
     try:
         payload = await request.json()
@@ -211,15 +212,14 @@ async def api_gcp_iam_create_group(request):
     name = str(payload.get("group_name") or payload.get("name") or "").strip()
     if not name:
         raise HTTPException(400, detail="Group name is required")
-    rec = {"group_id": s._id("group"), "group_name": name, "path": str(payload.get("path") or "/"), "users": [], "policies": [], "created": s._now()}
-    s.gcp_iam_state.setdefault("groups", {}).setdefault(project, {})[rec["group_id"]] = rec
+    rec = {"group_id": _id("group"), "group_name": name, "path": str(payload.get("path") or "/"), "users": [], "policies": [], "created": _now()}
+    gcp_iam_state.setdefault("groups", {}).setdefault(project, {})[rec["group_id"]] = rec
     return rec
 
 
 def api_gcp_iam_delete_group(group_id: str):
-    s = _server()
-    project = s._gcp_project_name(None)
-    groups = s.gcp_iam_state.setdefault("groups", {}).setdefault(project, {})
+    project = _gcp_project_name(None)
+    groups = gcp_iam_state.setdefault("groups", {}).setdefault(project, {})
     if group_id not in groups:
         raise HTTPException(404, detail="Group not found")
     del groups[group_id]
@@ -227,15 +227,13 @@ def api_gcp_iam_delete_group(group_id: str):
 
 
 def api_gcp_iam_list_roles():
-    s = _server()
-    project = s._gcp_project_name(None)
-    roles = list(s.gcp_iam_state.setdefault("roles", {}).get(project, {}).values())
+    project = _gcp_project_name(None)
+    roles = list(gcp_iam_state.setdefault("roles", {}).get(project, {}).values())
     return {"roles": roles, "count": len(roles)}
 
 
 async def api_gcp_iam_create_role(request):
-    s = _server()
-    project = s._gcp_project_name(None)
+    project = _gcp_project_name(None)
     payload = {}
     try:
         payload = await request.json()
@@ -246,15 +244,14 @@ async def api_gcp_iam_create_role(request):
     name = str(payload.get("role_name") or payload.get("name") or "").strip()
     if not name:
         raise HTTPException(400, detail="Role name is required")
-    rec = {"role_id": s._id("role"), "role_name": name, "policies": [], "created": s._now()}
-    s.gcp_iam_state.setdefault("roles", {}).setdefault(project, {})[rec["role_id"]] = rec
+    rec = {"role_id": _id("role"), "role_name": name, "policies": [], "created": _now()}
+    gcp_iam_state.setdefault("roles", {}).setdefault(project, {})[rec["role_id"]] = rec
     return rec
 
 
 def api_gcp_iam_delete_role(role_id: str):
-    s = _server()
-    project = s._gcp_project_name(None)
-    roles = s.gcp_iam_state.setdefault("roles", {}).setdefault(project, {})
+    project = _gcp_project_name(None)
+    roles = gcp_iam_state.setdefault("roles", {}).setdefault(project, {})
     if role_id not in roles:
         raise HTTPException(404, detail="Role not found")
     del roles[role_id]
@@ -262,15 +259,13 @@ def api_gcp_iam_delete_role(role_id: str):
 
 
 def api_gcp_iam_list_policies():
-    s = _server()
-    project = s._gcp_project_name(None)
-    policies = list(s.gcp_iam_state.setdefault("policies", {}).get(project, {}).values())
+    project = _gcp_project_name(None)
+    policies = list(gcp_iam_state.setdefault("policies", {}).get(project, {}).values())
     return {"policies": policies, "count": len(policies)}
 
 
 async def api_gcp_iam_create_policy(request):
-    s = _server()
-    project = s._gcp_project_name(None)
+    project = _gcp_project_name(None)
     payload = {}
     try:
         payload = await request.json()
@@ -281,15 +276,14 @@ async def api_gcp_iam_create_policy(request):
     name = str(payload.get("policy_name") or payload.get("name") or "").strip()
     if not name:
         raise HTTPException(400, detail="Policy name is required")
-    rec = {"policy_id": s._id("policy"), "policy_name": name, "document": payload.get("document") or {}, "created": s._now()}
-    s.gcp_iam_state.setdefault("policies", {}).setdefault(project, {})[rec["policy_id"]] = rec
+    rec = {"policy_id": _id("policy"), "policy_name": name, "document": payload.get("document") or {}, "created": _now()}
+    gcp_iam_state.setdefault("policies", {}).setdefault(project, {})[rec["policy_id"]] = rec
     return rec
 
 
 def api_gcp_iam_delete_policy(policy_id: str):
-    s = _server()
-    project = s._gcp_project_name(None)
-    policies = s.gcp_iam_state.setdefault("policies", {}).setdefault(project, {})
+    project = _gcp_project_name(None)
+    policies = gcp_iam_state.setdefault("policies", {}).setdefault(project, {})
     if policy_id not in policies:
         raise HTTPException(404, detail="Policy not found")
     del policies[policy_id]
@@ -297,15 +291,13 @@ def api_gcp_iam_delete_policy(policy_id: str):
 
 
 def api_gcp_iam_get_account_settings():
-    s = _server()
-    project = s._gcp_project_name(None)
-    account_settings = s.gcp_iam_state.setdefault("account_settings", {}).setdefault(project, {"password_policy": {"minimum_length": 8, "require_symbols": True, "require_numbers": True, "require_uppercase": True, "require_lowercase": True}})
+    project = _gcp_project_name(None)
+    account_settings = gcp_iam_state.setdefault("account_settings", {}).setdefault(project, {"password_policy": {"minimum_length": 8, "require_symbols": True, "require_numbers": True, "require_uppercase": True, "require_lowercase": True}})
     return {"account_settings": account_settings}
 
 
 async def api_gcp_iam_update_account_settings(request):
-    s = _server()
-    project = s._gcp_project_name(None)
+    project = _gcp_project_name(None)
     payload = {}
     try:
         payload = await request.json()
@@ -314,20 +306,18 @@ async def api_gcp_iam_update_account_settings(request):
     if not isinstance(payload, dict):
         payload = {}
     account_settings = payload.get("account_settings") if isinstance(payload.get("account_settings"), dict) else payload
-    s.gcp_iam_state.setdefault("account_settings", {})[project] = account_settings
+    gcp_iam_state.setdefault("account_settings", {})[project] = account_settings
     return {"account_settings": account_settings}
 
 
 def api_gcp_iam_list_identity_providers():
-    s = _server()
-    project = s._gcp_project_name(None)
-    providers = list(s.gcp_iam_state.setdefault("identity_providers", {}).get(project, {}).values())
+    project = _gcp_project_name(None)
+    providers = list(gcp_iam_state.setdefault("identity_providers", {}).get(project, {}).values())
     return {"identity_providers": providers, "count": len(providers)}
 
 
 async def api_gcp_iam_create_identity_provider(request):
-    s = _server()
-    project = s._gcp_project_name(None)
+    project = _gcp_project_name(None)
     payload = {}
     try:
         payload = await request.json()
@@ -338,23 +328,22 @@ async def api_gcp_iam_create_identity_provider(request):
     name = str(payload.get("provider_name") or payload.get("name") or "").strip()
     if not name:
         raise HTTPException(400, detail="Provider name is required")
-    rec = {"provider_id": s._id("idp"), "provider_name": name, "provider_type": str(payload.get("provider_type") or "SAML"), "url": str(payload.get("url") or ""), "created": s._now()}
-    s.gcp_iam_state.setdefault("identity_providers", {}).setdefault(project, {})[rec["provider_id"]] = rec
+    rec = {"provider_id": _id("idp"), "provider_name": name, "provider_type": str(payload.get("provider_type") or "SAML"), "url": str(payload.get("url") or ""), "created": _now()}
+    gcp_iam_state.setdefault("identity_providers", {}).setdefault(project, {})[rec["provider_id"]] = rec
     return rec
 
 
 def api_gcp_iam_delete_identity_provider(provider_id: str):
-    s = _server()
-    project = s._gcp_project_name(None)
-    providers = s.gcp_iam_state.setdefault("identity_providers", {}).setdefault(project, {})
+    project = _gcp_project_name(None)
+    providers = gcp_iam_state.setdefault("identity_providers", {}).setdefault(project, {})
     if provider_id not in providers:
         raise HTTPException(404, detail="Identity provider not found")
     del providers[provider_id]
     return {"deleted": True, "provider_id": provider_id}
 
 
-def _iam_find_sa(s, project: str, account: str):
-    accounts = s.gcp_iam_state.setdefault("service_accounts", {}).setdefault(project, {})
+def _iam_find_sa(project: str, account: str):
+    accounts = gcp_iam_state.setdefault("service_accounts", {}).setdefault(project, {})
     for rec in accounts.values():
         if isinstance(rec, dict) and account in {rec.get("name", ""), rec.get("email", ""), str(rec.get("uniqueId", ""))}:
             return rec
@@ -363,9 +352,8 @@ def _iam_find_sa(s, project: str, account: str):
 
 async def api_gcp_iam_create_service_account_key(project: str, account: str, request=None):
     """POST serviceAccounts/{account}/keys — mint a user-managed key (google_service_account_key)."""
-    s = _server()
-    project = s._gcp_project_name(project)
-    sa = _iam_find_sa(s, project, account)
+    project = _gcp_project_name(project)
+    sa = _iam_find_sa(project, account)
     if not sa:
         raise HTTPException(404, detail="Service account not found")
     key_id = uuid.uuid4().hex
@@ -379,7 +367,7 @@ async def api_gcp_iam_create_service_account_key(project: str, account: str, req
     }
     rec = {
         "name": name, "keyAlgorithm": "KEY_ALG_RSA_2048", "keyType": "USER_MANAGED",
-        "keyOrigin": "GOOGLE_PROVIDED", "validAfterTime": s._now(), "validBeforeTime": "2099-12-31T23:59:59Z",
+        "keyOrigin": "GOOGLE_PROVIDED", "validAfterTime": _now(), "validBeforeTime": "2099-12-31T23:59:59Z",
         "privateKeyType": "TYPE_GOOGLE_CREDENTIALS_FILE",
         "privateKeyData": base64.b64encode(json.dumps(keyfile).encode()).decode("ascii"),
         "_key_id": key_id,
@@ -393,18 +381,16 @@ def _key_public_view(rec: dict) -> dict:
 
 
 def api_gcp_iam_list_service_account_keys(project: str, account: str):
-    s = _server()
-    project = s._gcp_project_name(project)
-    sa = _iam_find_sa(s, project, account)
+    project = _gcp_project_name(project)
+    sa = _iam_find_sa(project, account)
     if not sa:
         raise HTTPException(404, detail="Service account not found")
     return {"keys": [_key_public_view(k) for k in sa.get("keys", {}).values()]}
 
 
 def api_gcp_iam_get_service_account_key(project: str, account: str, key: str):
-    s = _server()
-    project = s._gcp_project_name(project)
-    sa = _iam_find_sa(s, project, account)
+    project = _gcp_project_name(project)
+    sa = _iam_find_sa(project, account)
     if not sa:
         raise HTTPException(404, detail="Service account not found")
     rec = sa.get("keys", {}).get(str(key).split("/")[-1])
@@ -414,9 +400,8 @@ def api_gcp_iam_get_service_account_key(project: str, account: str, key: str):
 
 
 def api_gcp_iam_delete_service_account_key(project: str, account: str, key: str):
-    s = _server()
-    project = s._gcp_project_name(project)
-    sa = _iam_find_sa(s, project, account)
+    project = _gcp_project_name(project)
+    sa = _iam_find_sa(project, account)
     if not sa:
         raise HTTPException(404, detail="Service account not found")
     sa.setdefault("keys", {}).pop(str(key).split("/")[-1], None)

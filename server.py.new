@@ -10,92 +10,16 @@ This module wires together the extracted subsystems:
   - providers/*        — provider-specific dispatchers & helpers
 
 All business-logic helper functions that are still lazily imported by
-provider and route modules (``import server``) remain here.
+provider and route modules (``import server``) remain here. Only the
+@app route registrations, Pydantic model classes, middleware definitions,
+constants, state-proxy instantiation, and PLATFORM bootstrap code have
+been moved to the modules above.
 """
 
-import base64
-import copy
-import asyncio
-import fnmatch
-import ipaddress
-import hashlib
-import io
-import hmac
-import json
-import os
-import re
-import shlex
-import platform
-import secrets
-import select
-import pty
-import shutil
-import signal
-import subprocess
-import sys
-import threading
-import time
-import socket
-import uuid
-import textwrap
-import traceback
-from functools import partial
-from collections import deque
-from collections.abc import MutableMapping
-from pathlib import Path
-from datetime import datetime, timezone, timedelta
-from contextvars import ContextVar
-from urllib.parse import parse_qsl
-from urllib.error import HTTPError, URLError
-from urllib.request import Request as URLRequest, urlopen
-from http.server import BaseHTTPRequestHandler, SimpleHTTPRequestHandler, ThreadingHTTPServer
-from typing import Any, Dict, Optional
-from xml.etree import ElementTree as ET
+# ── Re-exports for backward compatibility ─────────────────────────────────
+# Other modules do ``import server; server.PLATFORM`` or
+# ``from server import _now`` — re-export every symbol they expect.
 
-import uvicorn
-from html import escape as xml_escape
-from fastapi import FastAPI, File, HTTPException, Query, Request, UploadFile, WebSocket, WebSocketDisconnect
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, Response, StreamingResponse
-from fastapi.staticfiles import StaticFiles
-from fastapi.routing import APIRouter
-from pydantic import BaseModel
-
-from core.cloudlearn_platform import CloudLearnPlatform
-from core.pack_catalog import default_packs as load_default_packs
-from core.pack_catalog import fragment_for_pack
-from core.pack_catalog import PROVIDER_PACK_GROUPS
-from core.pack_catalog import packs_for_provider
-from core.terraform_export import export_space_to_terraform_json
-from core.terraform_workflow import (
-    build_plan_summary as terraform_build_plan_summary,
-    terraform_import_bundle as terraform_import_bundle,
-    run_terraform_cli as terraform_run_cli,
-    stage_workflow_bundle as terraform_stage_workflow_bundle,
-    terraform_cli_available as terraform_cli_available,
-    terraform_cli_path as terraform_cli_path,
-    terraform_space_dir as terraform_space_dir,
-    terraform_workspace_root as terraform_workspace_root,
-)
-from core.provider_registry import get_provider, list_providers, normalize_provider as normalize_provider_key, provider_matrix
-from providers.aws import tool_response as aws_tool_response
-from providers import aws_iam as provider_aws_iam
-from providers import aws_services as provider_aws_services
-from providers.aws_routes import register as register_aws_routes
-from providers.aws_ec2_routes import register as register_aws_ec2_routes
-from providers.capabilities import provider_capabilities, provider_services
-from providers.gcp import tool_response as gcp_tool_response
-from providers.gcp_compute_routes import register as register_gcp_compute_routes
-from providers.gcp_routes import gcloud_resolve as gcp_gcloud_resolve
-from providers.gcp_routes import gcutil_resolve as gcp_gcutil_resolve
-from providers.gcp_routes import sdk_go_snippet as gcp_sdk_go_snippet
-from providers.gcp_routes import sdk_java_snippet as gcp_sdk_java_snippet
-from providers.gcp_routes import register as register_gcp_routes
-from providers import azure_services as provider_azure_services
-from providers.azure_services import register as register_azure_routes
-from core.tooling_simulators import aws_cli_resolve, sdk_snippet
-
-# ── Re-exports for backward compatibility ─────────────────────────────
 from core.app_context import (
     PLATFORM, STATE, STATE_LOCK, REQUEST_TENANT, REQUEST_PROVIDER, REQUEST_PUBLIC_BASE,
     AWS_ACCOUNT_ID, DEFAULT_TENANT_ID, ALLOWED_PROVIDERS,
@@ -140,17 +64,21 @@ from core.app_context import (
     init_azure_state,
 )
 
-from core.models import *  # noqa: F401,F403  — backward compat
+# Re-export Pydantic models for backward compatibility
+from core.models import *  # noqa: F401,F403
 
-# ── App creation ──────────────────────────────────────────────────────
-app = FastAPI(title="CloudLearn Cloud Simulator", version="2.0.0", docs_url=None, redoc_url=None)
 
-# ── Backend route registration (EARLY) ───────────────────────────────
+
+# MVP P0: register backend-backed routes EARLY (before the S3 catch-all on
+# /{bucket} grabs /v1/projects/... or /azure-data/...). All three modules
+# follow the same shape: REST routes for GCP+Azure get mounted here; AWS
+# X-Amz-Target dispatchers are collected in _aws_xamz_dispatchers and
+# consumed by aws_query_root.
 _aws_xamz_dispatchers: dict = {}
 try:
     from core import vault_routes as _vault_routes
     _vault_routes.register(app, aws_dispatchers=_aws_xamz_dispatchers)
-except Exception:
+except Exception:  # never break startup
     pass
 try:
     from core import nats_routes as _nats_routes
@@ -163,44 +91,6 @@ try:
 except Exception:
     pass
 
-# ── Provider route registration ──────────────────────────────────────
-register_aws_ec2_routes(app, None)
-register_gcp_compute_routes(app, None)
-register_aws_routes(app, None)
-register_gcp_routes(app, None)
-register_azure_routes(app, None)
-
-# ── Route module registration ────────────────────────────────────────
-from routes import console, aws_extras, gcp_extras, tenants, config, licensing
-from routes import terraform, azure_console, cloudsim, spaces, gcp_console, runtime
-from routes import aws_apigw, aws_ec2, aws_lambda, aws_sqs, aws_vpc, aws_rds, aws_dynamodb
-
-for mod in [console, aws_extras, gcp_extras, tenants, config, licensing,
-            terraform, azure_console, cloudsim, spaces, gcp_console, runtime,
-            aws_apigw, aws_ec2, aws_lambda, aws_sqs, aws_vpc, aws_rds, aws_dynamodb]:
-    mod.register(app)
-
-# ── Middleware registration ──────────────────────────────────────────
-from core.middleware import register_middleware
-register_middleware(app)
-
-# ── Azure state injection ────────────────────────────────────────────
-init_azure_state()
-
-# ── Static files mount ───────────────────────────────────────────────
-STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
-os.makedirs(STATIC_DIR, exist_ok=True)
-_UI_HTML = os.path.join(STATIC_DIR, "index.html")
-app.mount("/assets", StaticFiles(directory=STATIC_DIR), name="assets")
-
-# ── S3 catch-all routes — LAST ──────────────────────────────────────
-from routes import aws_s3
-aws_s3.register(app, aws_xamz_dispatchers=_aws_xamz_dispatchers)
-
-
-# ═══════════════════════════════════════════════════════════════════════
-# Business-logic helper functions still referenced by lazy import server
-# ═══════════════════════════════════════════════════════════════════════
 
 
 
@@ -8832,6 +8722,7 @@ def api_switch_tenant(tid: str):
             "tenant": ts["tenants"][tid]}
 
 
+@app.delete("/api/tenants/{tid}")
 def api_delete_tenant(tid: str):
     if tid == DEFAULT_TENANT_ID:
         raise HTTPException(status_code=400, detail="cannot delete the default tenant")
@@ -11220,6 +11111,8 @@ def _ec2_query_state_change_response(root_name: str, changes: list[tuple[dict, s
     return _ec2_success_response(root_name, build)
 
 
+@app.api_route("/ec2", methods=["GET", "POST"], include_in_schema=False)
+@app.api_route("/api/ec2/aws", methods=["GET", "POST"], include_in_schema=False)
 async def api_ec2_query(request: Request):
     params = await _ec2_query_params(request)
     action = str(params.get("Action", "")).strip()
@@ -17809,6 +17702,8 @@ def _ddb_error_response(code: str, message: str, status: int = 400) -> Response:
     return _ddb_json_response({"__type": code, "message": message}, status=status)
 
 
+@app.api_route("/api/dynamodb/aws", methods=["POST"], include_in_schema=False)
+@app.api_route("/dynamodb", methods=["POST"], include_in_schema=False)
 async def api_dynamodb_aws(request: Request):
     # MVP P0: proxy to amazon/dynamodb-local for real DDB semantics (PartiQL,
     # secondary indexes, Streams, etc.). Fall back to the legacy in-memory
@@ -18385,9 +18280,16 @@ def api_action_router(payload: ServiceActionRequest):
         return provider_aws_iam.api_iam_create_user(IAMUserRequest(**payload.payload))
     raise HTTPException(400, detail="UnsupportedAction")
 
+# ── Serve React UI — explicit routes registered BEFORE /{bucket} ─────────────
+STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
+os.makedirs(STATIC_DIR, exist_ok=True)
+_UI_HTML = os.path.join(STATIC_DIR, "index.html")
+app.mount("/assets", StaticFiles(directory=STATIC_DIR), name="assets")
 
-# (Static files mount and serve_ui are now in the orchestrator preamble
-# and routes/console.py respectively.)
+
+async def serve_ui(path: str = "") -> Response:
+    with open(_UI_HTML, "rb") as f:
+        return Response(content=f.read(), media_type="text/html", headers={"Cache-Control": "no-store, max-age=0"})
 
 
 # ── AWS query-protocol root dispatch (real SDK / CLI entrypoint) ──────────────
@@ -18678,6 +18580,7 @@ async def s3_list_buckets(request: Request) -> Response:
 
 # ── S3 REST API — bucket level ───────────────────────────────────────────────
 
+@app.head("/{bucket}")
 async def s3_head_bucket(bucket: str, request: Request) -> Response:
     """HEAD /{bucket} → HeadBucket"""
     if not _bucket_exists(bucket):
@@ -18979,6 +18882,7 @@ async def s3_delete_bucket(bucket: str, request: Request) -> Response:
 
 # ── S3 REST API — object level ───────────────────────────────────────────────
 
+@app.head("/{bucket}/{key:path}")
 async def s3_head_object(bucket: str, key: str, request: Request) -> Response:
     """HEAD /{bucket}/{key} → HeadObject"""
     if not _bucket_exists(bucket):

@@ -46,7 +46,7 @@ def _active_space_id(request: Request) -> str:
     Kept dependency-free of server.py to avoid an import cycle.
     """
     try:
-        from server import PLATFORM  # local import to dodge cycles
+        from core.app_context import PLATFORM  # local import to dodge cycles
         spaces_state = PLATFORM.kernel.state.setdefault(
             "spaces", {"spaces": {}, "active_space_id": "", "settings": {}}
         )

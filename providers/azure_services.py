@@ -378,8 +378,8 @@ def _record_usage(event: str, detail: dict | None = None) -> None:
     graph + summary rebuild from the DB (same hook AWS/GCP handlers use). Never
     breaks the request."""
     try:
-        import server
-        server._record_usage(event, detail or {})
+        from core.app_context import record_usage
+        record_usage(event, detail or {})
     except Exception:
         pass
 
@@ -512,8 +512,8 @@ async def handle_arm(request: Request, rest: str) -> JSONResponse:
             if isinstance(hw, dict):
                 vm_size = str(hw.get("vmSize") or "")
             try:
-                import server as _srv
-                _srv._check_budget_for_launch(vm_size, "azure")  # raises HTTPException(403)
+                from server import _check_budget_for_launch
+                _check_budget_for_launch(vm_size, "azure")  # raises HTTPException(403)
             except Exception as exc:
                 # Re-raise HTTPException; surface other failures as 500.
                 if isinstance(exc, HTTPException):
@@ -525,8 +525,8 @@ async def handle_arm(request: Request, rest: str) -> JSONResponse:
         # don't get blocked.
         if key not in _state and method == "PUT":
             try:
-                import server as _srv2
-                _enforce_azure_quantity_cap(_srv2, full_type, method)
+                import server as _srv_qty
+                _enforce_azure_quantity_cap(_srv_qty, full_type, method)
             except HTTPException:
                 raise
             except Exception:
@@ -536,14 +536,14 @@ async def handle_arm(request: Request, rest: str) -> JSONResponse:
         if (method == "PUT" and key not in _state
                 and full_type.lower() == "microsoft.compute/virtualmachines"):
             try:
-                import server as _srv3
+                from core.app_context import enforce_size_cap
                 vm_size = ""
                 props = payload.get("properties") if isinstance(payload.get("properties"), dict) else {}
                 hw = props.get("hardwareProfile") if isinstance(props, dict) and isinstance(props.get("hardwareProfile"), dict) else {}
                 if isinstance(hw, dict):
                     vm_size = str(hw.get("vmSize") or "")
                 if vm_size:
-                    _srv3._enforce_size_cap("vm", "azure", vm_size)
+                    enforce_size_cap("vm", "azure", vm_size)
             except HTTPException:
                 raise
             except Exception:
@@ -619,19 +619,15 @@ def _arm_action(action: str, type_chain: list[str], resource_name: str,
             rt["containerStatus"] = new_status
             props["powerState"] = f"PowerState/{new_status}"
             # Activity log: record even the metadata-only transition.
-            try:
-                import server as _srv
-                _srv._record_usage(f"azure.vm.{action}",
-                                   {"vm": resource_name, "container": "(simulated)",
-                                    "resource_id": parent_rid})
-            except Exception:
-                pass
+            _record_usage(f"azure.vm.{action}",
+                          {"vm": resource_name, "container": "(simulated)",
+                           "resource_id": parent_rid})
             return JSONResponse({"status": "Succeeded", "action": action,
                                  "containerStatus": new_status,
                                  "note": "metadata-only (no runtime backing); logical state updated"})
         try:
-            import server as _srv
-            run = _srv._lxd_run_checked if backend == "lxd" else _srv._multipass_run_checked
+            import server as _srv_rt
+            run = _srv_rt._lxd_run_checked if backend == "lxd" else _srv_rt._multipass_run_checked
             cmd_map = {"start": "start", "poweroff": "stop", "restart": "restart", "deallocate": "stop"}
             run([cmd_map[action], container], timeout=120)
         except Exception as exc:
@@ -641,12 +637,8 @@ def _arm_action(action: str, type_chain: list[str], resource_name: str,
         rt["containerStatus"] = new_status
         props["powerState"] = f"PowerState/{new_status}"
         # Trigger graph + summary refresh + persist.
-        try:
-            import server as _srv
-            _srv._record_usage(f"azure.vm.{action}",
-                               {"vm": resource_name, "container": container, "resource_id": parent_rid})
-        except Exception:
-            pass
+        _record_usage(f"azure.vm.{action}",
+                      {"vm": resource_name, "container": container, "resource_id": parent_rid})
         return JSONResponse({"status": "Succeeded", "action": action,
                              "container": container, "containerStatus": new_status})
 
@@ -700,13 +692,14 @@ _AZURE_TYPE_TO_QUANTITY_KEY = {
 }
 
 
-def _enforce_azure_quantity_cap(srv_mod, full_type: str, method: str) -> None:
-    """Call into server._enforce_quantity_cap for Azure ARM create/PATCH ops."""
+def _enforce_azure_quantity_cap(_srv_mod_unused, full_type: str, method: str) -> None:
+    """Call into enforce_quantity_cap for Azure ARM create/PATCH ops."""
     if method not in ("PUT", "PATCH"):
         return
     rt = _AZURE_TYPE_TO_QUANTITY_KEY.get(full_type.lower())
     if rt:
-        srv_mod._enforce_quantity_cap(rt)
+        from core.app_context import enforce_quantity_cap
+        enforce_quantity_cap(rt)
 
 
 def _upsert(rid: str, key: str, full_type: str, name: str, catalog: dict,

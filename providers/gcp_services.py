@@ -9,6 +9,18 @@ from fastapi import HTTPException, Request
 
 from core import gcp_pubsub_emulator as _ps_emu
 from core import gcp_firestore_emulator as _fs_emu
+from core.app_context import (
+    gcp_apigw_state,
+    gcp_firestore_state,
+    gcp_functions_state,
+    gcp_project_name as _gcp_project_name,
+    gcp_pubsub_state,
+    gcp_storage_state,
+    gcp_sql_state,
+    gcp_vpc_state,
+    id_gen as _id,
+    now as _now,
+)
 
 
 def _server():
@@ -127,9 +139,9 @@ TARGETS = [
 
 def api_gcp_storage_list_buckets(request: Request):
     s = _server()
-    project = s._gcp_project_name(request.query_params.get("project"))
+    project = _gcp_project_name(request.query_params.get("project"))
     buckets = []
-    for bucket in s.gcp_storage_state.get("buckets", {}).values():
+    for bucket in gcp_storage_state.get("buckets", {}).values():
         if str(bucket.get("project") or project) != project:
             continue
         buckets.append(s._gcp_storage_bucket_view(project, bucket))
@@ -141,13 +153,13 @@ async def api_gcp_storage_create_bucket(request: Request):
     s = _server()
     payload = await request.json() if request is not None else {}
     payload = payload if isinstance(payload, dict) else {}
-    project = s._gcp_project_name(request.query_params.get("project") or payload.get("project") or payload.get("projectId"))
+    project = _gcp_project_name(request.query_params.get("project") or payload.get("project") or payload.get("projectId"))
     name = str(payload.get("name") or payload.get("bucket") or "").strip()
     if not name:
         raise HTTPException(400, detail="Bucket name is required")
     bucket = s._gcp_storage_bucket_record(project, name, payload)
-    s.gcp_storage_state.setdefault("buckets", {})[name] = bucket
-    s.gcp_storage_state.setdefault("objects", {}).setdefault(name, {})
+    gcp_storage_state.setdefault("buckets", {})[name] = bucket
+    gcp_storage_state.setdefault("objects", {}).setdefault(name, {})
     # Mirror the bucket into the byte store so object uploads have a home.
     try:
         from core import gcp_gcs_store as gcs
@@ -160,7 +172,7 @@ async def api_gcp_storage_create_bucket(request: Request):
 
 def api_gcp_storage_get_bucket(bucket: str):
     s = _server()
-    bucket_rec = s.gcp_storage_state.get("buckets", {}).get(bucket)
+    bucket_rec = gcp_storage_state.get("buckets", {}).get(bucket)
     if not bucket_rec:
         raise HTTPException(404, detail="Bucket not found")
     project = str(bucket_rec.get("project") or "cloudlearn")
@@ -170,7 +182,7 @@ def api_gcp_storage_get_bucket(bucket: str):
 async def api_gcp_storage_patch_bucket(bucket: str, request: Request):
     """PATCH/PUT /storage/v1/b/{bucket} — update bucket metadata (Terraform/SDK)."""
     s = _server()
-    rec = s.gcp_storage_state.get("buckets", {}).get(bucket)
+    rec = gcp_storage_state.get("buckets", {}).get(bucket)
     if not rec:
         raise HTTPException(404, detail="Bucket not found")
     payload = await request.json() if request is not None else {}
@@ -183,28 +195,28 @@ async def api_gcp_storage_patch_bucket(bucket: str, request: Request):
             rec[key] = payload[key]
     if "defaultEventBasedHold" in payload:
         rec["defaultEventBasedHold"] = bool(payload.get("defaultEventBasedHold"))
-    rec["updated"] = s._now()
+    rec["updated"] = _now()
     project = str(rec.get("project") or "cloudlearn")
     return s._gcp_storage_bucket_view(project, rec)
 
 
 def api_gcp_storage_delete_bucket(bucket: str):
     s = _server()
-    if bucket not in s.gcp_storage_state.get("buckets", {}):
+    if bucket not in gcp_storage_state.get("buckets", {}):
         raise HTTPException(404, detail="Bucket not found")
-    s.gcp_storage_state.setdefault("buckets", {}).pop(bucket, None)
-    s.gcp_storage_state.setdefault("objects", {}).pop(bucket, None)
+    gcp_storage_state.setdefault("buckets", {}).pop(bucket, None)
+    gcp_storage_state.setdefault("objects", {}).pop(bucket, None)
     return {"kind": "storage#empty", "deleted": True, "bucket": bucket}
 
 
 def api_gcp_storage_list_objects(bucket: str, request: Request):
     s = _server()
-    bucket_rec = s.gcp_storage_state.get("buckets", {}).get(bucket)
+    bucket_rec = gcp_storage_state.get("buckets", {}).get(bucket)
     if not bucket_rec:
         raise HTTPException(404, detail="Bucket not found")
     prefix = str(request.query_params.get("prefix") or "")
     objects = []
-    for name, obj in s.gcp_storage_state.get("objects", {}).get(bucket, {}).items():
+    for name, obj in gcp_storage_state.get("objects", {}).get(bucket, {}).items():
         if prefix and not name.startswith(prefix):
             continue
         objects.append(s._gcp_storage_object_view(str(bucket_rec.get("project") or "cloudlearn"), bucket, name, obj))
@@ -214,7 +226,7 @@ def api_gcp_storage_list_objects(bucket: str, request: Request):
 
 async def api_gcp_storage_create_object(bucket: str, request: Request):
     s = _server()
-    bucket_rec = s.gcp_storage_state.get("buckets", {}).get(bucket)
+    bucket_rec = gcp_storage_state.get("buckets", {}).get(bucket)
     if not bucket_rec:
         raise HTTPException(404, detail="Bucket not found")
     project = str(bucket_rec.get("project") or "cloudlearn")
@@ -266,13 +278,13 @@ async def api_gcp_storage_create_object(bucket: str, request: Request):
         "md5Hash": meta.get("md5Hash", ""),
         "crc32c": meta.get("crc32c", ""),
     })
-    s.gcp_storage_state.setdefault("objects", {}).setdefault(bucket, {})[name] = rec
+    gcp_storage_state.setdefault("objects", {}).setdefault(bucket, {})[name] = rec
     return s._gcp_storage_object_view(project, bucket, name, rec)
 
 
 def api_gcp_storage_get_object(bucket: str, object_name: str, request: Request = None):
     s = _server()
-    bucket_rec = s.gcp_storage_state.get("buckets", {}).get(bucket)
+    bucket_rec = gcp_storage_state.get("buckets", {}).get(bucket)
     if not bucket_rec:
         raise HTTPException(404, detail="Object not found")
     qp = request.query_params if request is not None else {}
@@ -285,7 +297,7 @@ def api_gcp_storage_get_object(bucket: str, object_name: str, request: Request =
             return Response(content=data, media_type=ctype)
         except Exception as exc:
             raise HTTPException(404, detail=f"Object media not available: {str(exc)[:120]}")
-    obj = s.gcp_storage_state.get("objects", {}).get(bucket, {}).get(object_name)
+    obj = gcp_storage_state.get("objects", {}).get(bucket, {}).get(object_name)
     if not obj:
         raise HTTPException(404, detail="Object not found")
     return s._gcp_storage_object_view(str(bucket_rec.get("project") or "cloudlearn"), bucket, object_name, obj)
@@ -293,22 +305,22 @@ def api_gcp_storage_get_object(bucket: str, object_name: str, request: Request =
 
 def api_gcp_storage_delete_object(bucket: str, object_name: str):
     s = _server()
-    if bucket not in s.gcp_storage_state.get("objects", {}) or object_name not in s.gcp_storage_state["objects"][bucket]:
+    if bucket not in gcp_storage_state.get("objects", {}) or object_name not in gcp_storage_state["objects"][bucket]:
         raise HTTPException(404, detail="Object not found")
     try:
         from core import gcp_gcs_store as gcs
         gcs.delete(s._tenant_scoped_bucket(bucket), object_name)
     except Exception:
         pass
-    del s.gcp_storage_state["objects"][bucket][object_name]
+    del gcp_storage_state["objects"][bucket][object_name]
     return {"kind": "storage#empty", "deleted": True, "bucket": bucket, "object": object_name}
 
 
 def api_gcp_sql_list_instances(project: str, request: Request):
     s = _server()
-    project = s._gcp_project_name(project)
+    project = _gcp_project_name(project)
     instances = []
-    for inst in s.gcp_sql_state.get("instances", {}).values():
+    for inst in gcp_sql_state.get("instances", {}).values():
         if str(inst.get("project") or project) != project:
             continue
         instances.append(s._gcp_sql_instance_view(project, inst))
@@ -318,11 +330,11 @@ def api_gcp_sql_list_instances(project: str, request: Request):
 
 async def api_gcp_sql_create_instance(project: str, request: Request):
     s = _server()
-    project = s._gcp_project_name(project)
+    project = _gcp_project_name(project)
     payload = await request.json() if request is not None else {}
     payload = payload if isinstance(payload, dict) else {}
     instance = s._gcp_sql_instance_record(project, payload)
-    if instance["name"] in s.gcp_sql_state.get("instances", {}):
+    if instance["name"] in gcp_sql_state.get("instances", {}):
         raise HTTPException(409, detail="Instance already exists")
     # Provision a real database on the backing OSS engine so applications can
     # connect over the normal wire protocol. Degrade to metadata-only if the
@@ -342,7 +354,7 @@ async def api_gcp_sql_create_instance(project: str, request: Request):
     except Exception as exc:
         instance["_backend"] = None
         instance["_backend_error"] = str(exc)[:200]
-    s.gcp_sql_state.setdefault("instances", {})[instance["name"]] = instance
+    gcp_sql_state.setdefault("instances", {})[instance["name"]] = instance
     # Real Cloud SQL insert returns a long-running Operation (clients/Terraform
     # poll operations.get until DONE), not the instance — so does the simulator.
     return s._gcp_sql_make_operation(project, instance["name"], "CREATE")
@@ -350,8 +362,8 @@ async def api_gcp_sql_create_instance(project: str, request: Request):
 
 def api_gcp_sql_get_instance(project: str, instance: str):
     s = _server()
-    project = s._gcp_project_name(project)
-    rec = s.gcp_sql_state.get("instances", {}).get(instance)
+    project = _gcp_project_name(project)
+    rec = gcp_sql_state.get("instances", {}).get(instance)
     if not rec or str(rec.get("project") or project) != project:
         raise HTTPException(404, detail="Instance not found")
     return s._gcp_sql_instance_view(project, rec)
@@ -360,8 +372,8 @@ def api_gcp_sql_get_instance(project: str, instance: str):
 async def api_gcp_sql_patch_instance(project: str, instance: str, request: Request):
     """PATCH/PUT .../instances/{i} — update settings; returns an LRO (Terraform/SDK)."""
     s = _server()
-    project = s._gcp_project_name(project)
-    rec = s.gcp_sql_state.get("instances", {}).get(instance)
+    project = _gcp_project_name(project)
+    rec = gcp_sql_state.get("instances", {}).get(instance)
     if not rec or str(rec.get("project") or project) != project:
         raise HTTPException(404, detail="Instance not found")
     payload = await request.json() if request is not None else {}
@@ -373,14 +385,14 @@ async def api_gcp_sql_patch_instance(project: str, instance: str, request: Reque
     for key in ("databaseVersion", "region"):
         if payload.get(key):
             rec[key] = str(payload[key])
-    rec["updateTime"] = s._now()
+    rec["updateTime"] = _now()
     return s._gcp_sql_make_operation(project, instance, "UPDATE")
 
 
 def api_gcp_sql_delete_instance(project: str, instance: str):
     s = _server()
-    project = s._gcp_project_name(project)
-    rec = s.gcp_sql_state.get("instances", {}).get(instance)
+    project = _gcp_project_name(project)
+    rec = gcp_sql_state.get("instances", {}).get(instance)
     if not rec or str(rec.get("project") or project) != project:
         raise HTTPException(404, detail="Instance not found")
     try:
@@ -389,23 +401,23 @@ def api_gcp_sql_delete_instance(project: str, instance: str):
         gcp_sql_engine.deprovision(space_id, project, instance, rec.get("databaseVersion", ""))
     except Exception:
         pass
-    del s.gcp_sql_state["instances"][instance]
+    del gcp_sql_state["instances"][instance]
     return s._gcp_sql_make_operation(project, instance, "DELETE")
 
 
 def api_gcp_sql_restart_instance(project: str, instance: str):
     s = _server()
-    project = s._gcp_project_name(project)
-    rec = s.gcp_sql_state.get("instances", {}).get(instance)
+    project = _gcp_project_name(project)
+    rec = gcp_sql_state.get("instances", {}).get(instance)
     if not rec or str(rec.get("project") or project) != project:
         raise HTTPException(404, detail="Instance not found")
     rec["state"] = "RUNNABLE"
-    rec["updateTime"] = s._now()
+    rec["updateTime"] = _now()
     return s._gcp_sql_make_operation(project, instance, "RESTART")
 
 
 def _sql_instance_or_404(s, project: str, instance: str) -> dict:
-    rec = s.gcp_sql_state.get("instances", {}).get(instance)
+    rec = gcp_sql_state.get("instances", {}).get(instance)
     if not rec or str(rec.get("project") or project) != project:
         raise HTTPException(404, detail="Instance not found")
     return rec
@@ -413,7 +425,7 @@ def _sql_instance_or_404(s, project: str, instance: str) -> dict:
 
 def api_gcp_sql_list_users(project: str, instance: str):
     s = _server()
-    project = s._gcp_project_name(project)
+    project = _gcp_project_name(project)
     rec = _sql_instance_or_404(s, project, instance)
     users = rec.get("users") if isinstance(rec.get("users"), list) else []
     return {"kind": "sql#usersList", "items": [
@@ -424,7 +436,7 @@ def api_gcp_sql_list_users(project: str, instance: str):
 
 async def api_gcp_sql_create_user(project: str, instance: str, request: Request):
     s = _server()
-    project = s._gcp_project_name(project)
+    project = _gcp_project_name(project)
     rec = _sql_instance_or_404(s, project, instance)
     payload = await request.json() if request is not None else {}
     payload = payload if isinstance(payload, dict) else {}
@@ -440,7 +452,7 @@ async def api_gcp_sql_create_user(project: str, instance: str, request: Request)
 
 def api_gcp_sql_delete_user(project: str, instance: str, name: str = "", host: str = ""):
     s = _server()
-    project = s._gcp_project_name(project)
+    project = _gcp_project_name(project)
     rec = _sql_instance_or_404(s, project, instance)
     rec["users"] = [u for u in rec.get("users", []) if not (u.get("name") == name and u.get("host", "") == host)]
     return s._gcp_sql_make_operation(project, instance, "DELETE_USER")
@@ -448,7 +460,7 @@ def api_gcp_sql_delete_user(project: str, instance: str, name: str = "", host: s
 
 def api_gcp_sql_list_databases(project: str, instance: str):
     s = _server()
-    project = s._gcp_project_name(project)
+    project = _gcp_project_name(project)
     rec = _sql_instance_or_404(s, project, instance)
     dbs = rec.get("databases") if isinstance(rec.get("databases"), list) else []
     return {"kind": "sql#databasesList", "items": [
@@ -460,7 +472,7 @@ def api_gcp_sql_list_databases(project: str, instance: str):
 
 def api_gcp_sql_get_database(project: str, instance: str, database: str):
     s = _server()
-    project = s._gcp_project_name(project)
+    project = _gcp_project_name(project)
     rec = _sql_instance_or_404(s, project, instance)
     for d in rec.get("databases", []):
         if d.get("name") == database:
@@ -472,7 +484,7 @@ def api_gcp_sql_get_database(project: str, instance: str, database: str):
 
 async def api_gcp_sql_create_database(project: str, instance: str, request: Request):
     s = _server()
-    project = s._gcp_project_name(project)
+    project = _gcp_project_name(project)
     rec = _sql_instance_or_404(s, project, instance)
     payload = await request.json() if request is not None else {}
     payload = payload if isinstance(payload, dict) else {}
@@ -487,7 +499,7 @@ async def api_gcp_sql_create_database(project: str, instance: str, request: Requ
 
 def api_gcp_sql_delete_database(project: str, instance: str, database: str):
     s = _server()
-    project = s._gcp_project_name(project)
+    project = _gcp_project_name(project)
     rec = _sql_instance_or_404(s, project, instance)
     rec["databases"] = [d for d in rec.get("databases", []) if d.get("name") != database]
     return s._gcp_sql_make_operation(project, instance, "DELETE_DATABASE")
@@ -495,19 +507,19 @@ def api_gcp_sql_delete_database(project: str, instance: str, database: str):
 
 def api_gcp_pubsub_list_topics(project: str):
     s = _server()
-    project = s._gcp_project_name(project)
+    project = _gcp_project_name(project)
     if _ps_emu.available():
         topics = [s._gcp_pubsub_topic_view(project, t) for t in _ps_emu.list_topics(project)]
         topics.sort(key=lambda item: item.get("name", ""))
         return {"topics": topics, "nextPageToken": "", "kind": "pubsub#topicList"}
-    topics = [s._gcp_pubsub_topic_view(project, topic) for topic in s.gcp_pubsub_state.get("topics", {}).values() if str(topic.get("project") or project) == project]
+    topics = [s._gcp_pubsub_topic_view(project, topic) for topic in gcp_pubsub_state.get("topics", {}).values() if str(topic.get("project") or project) == project]
     topics.sort(key=lambda item: item.get("topicId", ""))
     return {"topics": topics, "nextPageToken": "", "kind": "pubsub#topicList"}
 
 
 async def api_gcp_pubsub_create_topic(project: str, request: Request):
     s = _server()
-    project = s._gcp_project_name(project)
+    project = _gcp_project_name(project)
     payload = await request.json() if request is not None else {}
     payload = payload if isinstance(payload, dict) else {}
     topic_id = str(payload.get("topicId") or payload.get("name") or payload.get("topic") or "").split("/")[-1].strip()
@@ -522,24 +534,24 @@ async def api_gcp_pubsub_create_topic(project: str, request: Request):
             raise HTTPException(409, detail="Topic already exists")
         return s._gcp_pubsub_topic_view(project, t)
     topic = s._gcp_pubsub_topic_record(project, topic_id, payload)
-    s.gcp_pubsub_state.setdefault("topics", {})[topic_id] = topic
+    gcp_pubsub_state.setdefault("topics", {})[topic_id] = topic
     default_sub_id = str(payload.get("subscriptionId") or topic_id).split("/")[-1].strip()
-    if default_sub_id and default_sub_id not in s.gcp_pubsub_state.setdefault("subscriptions", {}):
+    if default_sub_id and default_sub_id not in gcp_pubsub_state.setdefault("subscriptions", {}):
         default_sub = s._gcp_pubsub_subscription_record(project, default_sub_id, {"topic": f"projects/{project}/topics/{topic_id}", "labels": payload.get("labels", {}) if isinstance(payload.get("labels"), dict) else {}, "ackDeadlineSeconds": payload.get("ackDeadlineSeconds", 10)})
-        s.gcp_pubsub_state.setdefault("subscriptions", {})[default_sub_id] = default_sub
+        gcp_pubsub_state.setdefault("subscriptions", {})[default_sub_id] = default_sub
     return s._gcp_pubsub_topic_view(project, topic)
 
 
 def api_gcp_pubsub_get_topic(project: str, topic: str):
     s = _server()
-    project = s._gcp_project_name(project)
+    project = _gcp_project_name(project)
     topic = _strip_action_suffix(topic, ":publish")
     if _ps_emu.available():
         t = _ps_emu.get_topic(project, topic)
         if not t:
             raise HTTPException(404, detail="Topic not found")
         return s._gcp_pubsub_topic_view(project, t)
-    rec = s.gcp_pubsub_state.get("topics", {}).get(topic)
+    rec = gcp_pubsub_state.get("topics", {}).get(topic)
     if not rec or str(rec.get("project") or project) != project:
         raise HTTPException(404, detail="Topic not found")
     return s._gcp_pubsub_topic_view(project, rec)
@@ -547,9 +559,9 @@ def api_gcp_pubsub_get_topic(project: str, topic: str):
 
 async def api_gcp_pubsub_update_topic(project: str, topic: str, request: Request):
     s = _server()
-    project = s._gcp_project_name(project)
+    project = _gcp_project_name(project)
     topic = _strip_action_suffix(topic, ":publish")
-    rec = s.gcp_pubsub_state.get("topics", {}).get(topic)
+    rec = gcp_pubsub_state.get("topics", {}).get(topic)
     if not rec or str(rec.get("project") or project) != project:
         raise HTTPException(404, detail="Topic not found")
     payload = await request.json() if request is not None else {}
@@ -560,45 +572,45 @@ async def api_gcp_pubsub_update_topic(project: str, topic: str, request: Request
         rec["messageRetentionDuration"] = str(payload.get("messageRetentionDuration") or rec.get("messageRetentionDuration") or "604800s")
     if "kmsKeyName" in payload:
         rec["kmsKeyName"] = str(payload.get("kmsKeyName") or "")
-    rec["updateTime"] = s._now()
-    s.gcp_pubsub_state.setdefault("topics", {})[topic] = rec
+    rec["updateTime"] = _now()
+    gcp_pubsub_state.setdefault("topics", {})[topic] = rec
     return s._gcp_pubsub_topic_view(project, rec)
 
 
 def api_gcp_pubsub_list_topic_messages(project: str, topic: str):
     s = _server()
-    project = s._gcp_project_name(project)
+    project = _gcp_project_name(project)
     topic = _strip_action_suffix(topic, ":publish")
-    rec = s.gcp_pubsub_state.get("topics", {}).get(topic)
+    rec = gcp_pubsub_state.get("topics", {}).get(topic)
     if not rec or str(rec.get("project") or project) != project:
         raise HTTPException(404, detail="Topic not found")
-    messages = list(s.gcp_pubsub_state.setdefault("messages", {}).get(topic, []))
+    messages = list(gcp_pubsub_state.setdefault("messages", {}).get(topic, []))
     return {"messages": messages, "kind": "pubsub#messageList"}
 
 
 def api_gcp_pubsub_delete_topic(project: str, topic: str):
     s = _server()
-    project = s._gcp_project_name(project)
+    project = _gcp_project_name(project)
     topic = _strip_action_suffix(topic, ":publish")
     if _ps_emu.available():
         if not _ps_emu.delete_topic(project, topic):
             raise HTTPException(404, detail="Topic not found")
         return {"done": True}
-    rec = s.gcp_pubsub_state.get("topics", {}).get(topic)
+    rec = gcp_pubsub_state.get("topics", {}).get(topic)
     if not rec or str(rec.get("project") or project) != project:
         raise HTTPException(404, detail="Topic not found")
-    del s.gcp_pubsub_state["topics"][topic]
-    for sub_id, sub in list(s.gcp_pubsub_state.get("subscriptions", {}).items()):
+    del gcp_pubsub_state["topics"][topic]
+    for sub_id, sub in list(gcp_pubsub_state.get("subscriptions", {}).items()):
         if str(sub.get("project") or project) == project and str(sub.get("topic") or "") == f"projects/{project}/topics/{topic}":
-            del s.gcp_pubsub_state["subscriptions"][sub_id]
-            s.gcp_pubsub_state.get("messages", {}).pop(sub_id, None)
-    s.gcp_pubsub_state.get("messages", {}).pop(topic, None)
+            del gcp_pubsub_state["subscriptions"][sub_id]
+            gcp_pubsub_state.get("messages", {}).pop(sub_id, None)
+    gcp_pubsub_state.get("messages", {}).pop(topic, None)
     return {"done": True}
 
 
 async def api_gcp_pubsub_publish(project: str, topic: str, request: Request):
     s = _server()
-    project = s._gcp_project_name(project)
+    project = _gcp_project_name(project)
     topic = _strip_action_suffix(topic, ":publish")
     payload = await request.json() if request is not None else {}
     payload = payload if isinstance(payload, dict) else {}
@@ -623,39 +635,39 @@ async def api_gcp_pubsub_publish(project: str, topic: str, request: Request):
             mid = await asyncio.to_thread(_ps_emu.publish, project, topic, data, attrs, str(message.get("orderingKey") or ""))
             ids.append(mid)
         return {"messageIds": ids}
-    rec = s.gcp_pubsub_state.get("topics", {}).get(topic)
+    rec = gcp_pubsub_state.get("topics", {}).get(topic)
     if not rec or str(rec.get("project") or project) != project:
         raise HTTPException(404, detail="Topic not found")
     message_ids = []
     for message in messages:
         if not isinstance(message, dict):
             continue
-        message_id = s._id("msg")
-        entry = {"messageId": message_id, "data": str(message.get("data") or ""), "attributes": message.get("attributes", {}) if isinstance(message.get("attributes"), dict) else {}, "publishTime": s._now(), "topic": topic, "orderingKey": str(message.get("orderingKey") or ""), "_publishedAt": time.time()}
+        message_id = _id("msg")
+        entry = {"messageId": message_id, "data": str(message.get("data") or ""), "attributes": message.get("attributes", {}) if isinstance(message.get("attributes"), dict) else {}, "publishTime": _now(), "topic": topic, "orderingKey": str(message.get("orderingKey") or ""), "_publishedAt": time.time()}
         message_ids.append(message_id)
-        s.gcp_pubsub_state.setdefault("messages", {}).setdefault(topic, []).append(entry)
-        for sub in s.gcp_pubsub_state.get("subscriptions", {}).values():
+        gcp_pubsub_state.setdefault("messages", {}).setdefault(topic, []).append(entry)
+        for sub in gcp_pubsub_state.get("subscriptions", {}).values():
             if str(sub.get("project") or project) != project or str(sub.get("topic") or "") != f"projects/{project}/topics/{topic}":
                 continue
-            s.gcp_pubsub_state.setdefault("messages", {}).setdefault(str(sub.get("subscriptionId")), []).append({**entry, "ackId": s._id("ack"), "subscription": str(sub.get("subscriptionId"))})
+            gcp_pubsub_state.setdefault("messages", {}).setdefault(str(sub.get("subscriptionId")), []).append({**entry, "ackId": _id("ack"), "subscription": str(sub.get("subscriptionId"))})
     return {"messageIds": message_ids}
 
 
 def api_gcp_pubsub_list_subscriptions(project: str):
     s = _server()
-    project = s._gcp_project_name(project)
+    project = _gcp_project_name(project)
     if _ps_emu.available():
         subs = [s._gcp_pubsub_subscription_view(project, sub) for sub in _ps_emu.list_subscriptions(project)]
         subs.sort(key=lambda item: item.get("name", ""))
         return {"subscriptions": subs, "nextPageToken": "", "kind": "pubsub#subscriptionList"}
-    subs = [s._gcp_pubsub_subscription_view(project, sub) for sub in s.gcp_pubsub_state.get("subscriptions", {}).values() if str(sub.get("project") or project) == project]
+    subs = [s._gcp_pubsub_subscription_view(project, sub) for sub in gcp_pubsub_state.get("subscriptions", {}).values() if str(sub.get("project") or project) == project]
     subs.sort(key=lambda item: item.get("subscriptionId", ""))
     return {"subscriptions": subs, "nextPageToken": "", "kind": "pubsub#subscriptionList"}
 
 
 async def api_gcp_pubsub_create_subscription(project: str, request: Request, queue_name: str = ""):
     s = _server()
-    project = s._gcp_project_name(project)
+    project = _gcp_project_name(project)
     payload = await request.json() if request is not None else {}
     payload = payload if isinstance(payload, dict) else {}
     sub_id = str(payload.get("subscriptionId") or payload.get("name") or queue_name or "").split("/")[-1].strip()
@@ -682,20 +694,20 @@ async def api_gcp_pubsub_create_subscription(project: str, request: Request, que
     sub = s._gcp_pubsub_subscription_record(project, sub_id, payload)
     if not sub.get("topic"):
         raise HTTPException(400, detail="Topic is required")
-    s.gcp_pubsub_state.setdefault("subscriptions", {})[sub_id] = sub
+    gcp_pubsub_state.setdefault("subscriptions", {})[sub_id] = sub
     return s._gcp_pubsub_subscription_view(project, sub)
 
 
 def api_gcp_pubsub_get_subscription(project: str, subscription: str):
     s = _server()
-    project = s._gcp_project_name(project)
+    project = _gcp_project_name(project)
     subscription = _strip_action_suffix(subscription, ":purge", ":pull", ":acknowledge", ":modifyAckDeadline")
     if _ps_emu.available():
         sub = _ps_emu.get_subscription(project, subscription)
         if not sub:
             raise HTTPException(404, detail="Subscription not found")
         return s._gcp_pubsub_subscription_view(project, sub)
-    rec = s.gcp_pubsub_state.get("subscriptions", {}).get(subscription)
+    rec = gcp_pubsub_state.get("subscriptions", {}).get(subscription)
     if not rec or str(rec.get("project") or project) != project:
         raise HTTPException(404, detail="Subscription not found")
     return s._gcp_pubsub_subscription_view(project, rec)
@@ -704,7 +716,7 @@ def api_gcp_pubsub_get_subscription(project: str, subscription: str):
 async def api_gcp_pubsub_patch_subscription(project: str, subscription: str, request: Request):
     """PATCH .../subscriptions/{sub} — update delivery settings on an existing subscription."""
     s = _server()
-    project = s._gcp_project_name(project)
+    project = _gcp_project_name(project)
     subscription = _strip_action_suffix(subscription, ":purge", ":pull", ":acknowledge", ":modifyAckDeadline")
     if _ps_emu.available():
         # Best-effort under the emulator: confirm it exists and return its view.
@@ -712,7 +724,7 @@ async def api_gcp_pubsub_patch_subscription(project: str, subscription: str, req
         if not sub:
             raise HTTPException(404, detail="Subscription not found")
         return s._gcp_pubsub_subscription_view(project, sub)
-    rec = s.gcp_pubsub_state.get("subscriptions", {}).get(subscription)
+    rec = gcp_pubsub_state.get("subscriptions", {}).get(subscription)
     if not rec or str(rec.get("project") or project) != project:
         raise HTTPException(404, detail="Subscription not found")
     payload = await request.json() if request is not None else {}
@@ -730,46 +742,46 @@ async def api_gcp_pubsub_patch_subscription(project: str, subscription: str, req
         rec["retainAckedMessages"] = bool(body.get("retainAckedMessages"))
     if isinstance(body.get("labels"), dict):
         rec["labels"] = body["labels"]
-    rec["updateTime"] = s._now()
-    s.gcp_pubsub_state.setdefault("subscriptions", {})[subscription] = rec
+    rec["updateTime"] = _now()
+    gcp_pubsub_state.setdefault("subscriptions", {})[subscription] = rec
     return s._gcp_pubsub_subscription_view(project, rec)
 
 
 def api_gcp_pubsub_list_subscription_messages(project: str, subscription: str):
     s = _server()
-    project = s._gcp_project_name(project)
+    project = _gcp_project_name(project)
     subscription = _strip_action_suffix(subscription, ":purge", ":pull", ":acknowledge", ":modifyAckDeadline")
-    rec = s.gcp_pubsub_state.get("subscriptions", {}).get(subscription)
+    rec = gcp_pubsub_state.get("subscriptions", {}).get(subscription)
     if not rec or str(rec.get("project") or project) != project:
         raise HTTPException(404, detail="Subscription not found")
-    messages = list(s.gcp_pubsub_state.setdefault("messages", {}).get(subscription, []))
+    messages = list(gcp_pubsub_state.setdefault("messages", {}).get(subscription, []))
     return {"receivedMessages": messages, "kind": "pubsub#receivedMessageList"}
 
 
 def api_gcp_pubsub_purge_subscription(project: str, subscription: str):
     s = _server()
-    project = s._gcp_project_name(project)
+    project = _gcp_project_name(project)
     subscription = _strip_action_suffix(subscription, ":purge", ":pull", ":acknowledge", ":modifyAckDeadline")
-    rec = s.gcp_pubsub_state.get("subscriptions", {}).get(subscription)
+    rec = gcp_pubsub_state.get("subscriptions", {}).get(subscription)
     if not rec or str(rec.get("project") or project) != project:
         raise HTTPException(404, detail="Subscription not found")
-    s.gcp_pubsub_state.setdefault("messages", {})[subscription] = []
+    gcp_pubsub_state.setdefault("messages", {})[subscription] = []
     return {"done": True}
 
 
 def api_gcp_pubsub_delete_subscription(project: str, subscription: str):
     s = _server()
-    project = s._gcp_project_name(project)
+    project = _gcp_project_name(project)
     subscription = _strip_action_suffix(subscription, ":purge", ":pull", ":acknowledge", ":modifyAckDeadline")
     if _ps_emu.available():
         if not _ps_emu.delete_subscription(project, subscription):
             raise HTTPException(404, detail="Subscription not found")
         return {"done": True}
-    rec = s.gcp_pubsub_state.get("subscriptions", {}).get(subscription)
+    rec = gcp_pubsub_state.get("subscriptions", {}).get(subscription)
     if not rec or str(rec.get("project") or project) != project:
         raise HTTPException(404, detail="Subscription not found")
-    del s.gcp_pubsub_state["subscriptions"][subscription]
-    s.gcp_pubsub_state.get("messages", {}).pop(subscription, None)
+    del gcp_pubsub_state["subscriptions"][subscription]
+    gcp_pubsub_state.get("messages", {}).pop(subscription, None)
     return {"done": True}
 
 
@@ -790,7 +802,7 @@ def _gcp_pubsub_retention_seconds(s, sub_rec: dict) -> int:
     if not dur:
         topic_path = str(sub_rec.get("topic") or "")
         topic_id = topic_path.split("/")[-1]
-        topics = s.gcp_pubsub_state.get("topics", {})
+        topics = gcp_pubsub_state.get("topics", {})
         topic = topics.get(topic_id) or topics.get(topic_path) or {}
         dur = str(topic.get("messageRetentionDuration") or "")
     return _parse_duration_seconds(dur)
@@ -798,7 +810,7 @@ def _gcp_pubsub_retention_seconds(s, sub_rec: dict) -> int:
 
 async def api_gcp_pubsub_pull(project: str, subscription: str, request: Request):
     s = _server()
-    project = s._gcp_project_name(project)
+    project = _gcp_project_name(project)
     subscription = _strip_action_suffix(subscription, ":purge", ":pull", ":acknowledge", ":modifyAckDeadline")
     payload = await request.json() if request is not None else {}
     payload = payload if isinstance(payload, dict) else {}
@@ -806,7 +818,7 @@ async def api_gcp_pubsub_pull(project: str, subscription: str, request: Request)
     if _ps_emu.available():
         received = await asyncio.to_thread(_ps_emu.pull, project, subscription, max_messages)
         return {"receivedMessages": received}
-    rec = s.gcp_pubsub_state.get("subscriptions", {}).get(subscription)
+    rec = gcp_pubsub_state.get("subscriptions", {}).get(subscription)
     if not rec or str(rec.get("project") or project) != project:
         raise HTTPException(404, detail="Subscription not found")
     # Lease messages for the ack deadline: a pulled-but-unacked message is hidden
@@ -815,7 +827,7 @@ async def api_gcp_pubsub_pull(project: str, subscription: str, request: Request)
     # delivery with deadline-based redelivery instead of returning the same set.
     now = time.time()
     deadline = int(rec.get("ackDeadlineSeconds") or 10)
-    queue = s.gcp_pubsub_state.get("messages", {}).get(subscription, [])
+    queue = gcp_pubsub_state.get("messages", {}).get(subscription, [])
     # Retention: drop messages older than the topic's messageRetentionDuration.
     retention = _gcp_pubsub_retention_seconds(s, rec)
     if retention > 0:
@@ -841,12 +853,12 @@ async def api_gcp_pubsub_pull(project: str, subscription: str, request: Request)
         if key:
             blocked_keys.add(key)
         received.append({
-            "ackId": item.get("ackId") or s._id("ack"),
+            "ackId": item.get("ackId") or _id("ack"),
             "deliveryAttempt": item["_deliveryAttempt"],
             "message": {
                 "data": item.get("data", ""),
-                "messageId": item.get("messageId") or s._id("msg"),
-                "publishTime": item.get("publishTime") or s._now(),
+                "messageId": item.get("messageId") or _id("msg"),
+                "publishTime": item.get("publishTime") or _now(),
                 "attributes": item.get("attributes", {}),
                 "orderingKey": key,
             },
@@ -856,7 +868,7 @@ async def api_gcp_pubsub_pull(project: str, subscription: str, request: Request)
 
 async def api_gcp_pubsub_ack(project: str, subscription: str, request: Request, receipt_handle: str = ""):
     s = _server()
-    project = s._gcp_project_name(project)
+    project = _gcp_project_name(project)
     subscription = _strip_action_suffix(subscription, ":purge", ":pull", ":acknowledge", ":modifyAckDeadline")
     body = await request.json() if request is not None else {}
     body = body if isinstance(body, dict) else {}
@@ -867,18 +879,18 @@ async def api_gcp_pubsub_ack(project: str, subscription: str, request: Request, 
         ids = [str(a) for a in ack_ids] + ([receipt_handle] if receipt_handle else [])
         await asyncio.to_thread(_ps_emu.acknowledge, project, subscription, ids)
         return {"acknowledged": True}
-    if subscription not in s.gcp_pubsub_state.get("subscriptions", {}):
+    if subscription not in gcp_pubsub_state.get("subscriptions", {}):
         raise HTTPException(404, detail="Subscription not found")
-    queue = s.gcp_pubsub_state.setdefault("messages", {}).get(subscription, [])
-    s.gcp_pubsub_state.setdefault("messages", {})[subscription] = [item for item in queue if item.get("ackId") not in set(map(str, ack_ids)) and item.get("ackId") != receipt_handle]
+    queue = gcp_pubsub_state.setdefault("messages", {}).get(subscription, [])
+    gcp_pubsub_state.setdefault("messages", {})[subscription] = [item for item in queue if item.get("ackId") not in set(map(str, ack_ids)) and item.get("ackId") != receipt_handle]
     return {"acknowledged": True}
 
 
 async def api_gcp_pubsub_modify_ack_deadline(project: str, subscription: str, request: Request):
     s = _server()
-    project = s._gcp_project_name(project)
+    project = _gcp_project_name(project)
     subscription = _strip_action_suffix(subscription, ":purge", ":pull", ":acknowledge", ":modifyAckDeadline")
-    if subscription not in s.gcp_pubsub_state.get("subscriptions", {}):
+    if subscription not in gcp_pubsub_state.get("subscriptions", {}):
         raise HTTPException(404, detail="Subscription not found")
     payload = await request.json() if request is not None else {}
     payload = payload if isinstance(payload, dict) else {}
@@ -887,7 +899,7 @@ async def api_gcp_pubsub_modify_ack_deadline(project: str, subscription: str, re
         ack_ids = []
     ack_ids = [str(ack_id) for ack_id in ack_ids if ack_id]
     deadline = int(payload.get("ackDeadlineSeconds") or 0) if isinstance(payload, dict) else 0
-    queue = s.gcp_pubsub_state.setdefault("messages", {}).get(subscription, [])
+    queue = gcp_pubsub_state.setdefault("messages", {}).get(subscription, [])
     # Re-lease the named messages: deadline>0 extends the lease, deadline==0 makes
     # them immediately visible again (nack -> instant redelivery).
     now = time.time()
@@ -899,14 +911,14 @@ async def api_gcp_pubsub_modify_ack_deadline(project: str, subscription: str, re
 
 def api_gcp_pubsub_list_topic_subscriptions(project: str, topic: str):
     s = _server()
-    project = s._gcp_project_name(project)
+    project = _gcp_project_name(project)
     if _ps_emu.available():
         subs = [f"projects/{project}/subscriptions/{sid}" for sid in _ps_emu.topic_subscriptions(project, topic)]
         subs.sort()
         return {"subscriptions": subs, "nextPageToken": ""}
     topic_name = f"projects/{project}/topics/{topic}"
     subscriptions = []
-    for sub in s.gcp_pubsub_state.get("subscriptions", {}).values():
+    for sub in gcp_pubsub_state.get("subscriptions", {}).values():
         if str(sub.get("project") or project) != project:
             continue
         if str(sub.get("topic") or "") != topic_name:
@@ -930,7 +942,7 @@ def api_gcp_pubsub_delete_schema(project: str, schema: str):
 
 def api_gcp_firestore_list_root_documents(project: str, database: str):
     s = _server()
-    project = s._gcp_project_name(project)
+    project = _gcp_project_name(project)
     database = str(database or "(default)")
     if _fs_emu.available():
         return {"documents": _fs_emu.list_root(project, database), "nextPageToken": "", "kind": "firestore#documents"}
@@ -940,7 +952,7 @@ def api_gcp_firestore_list_root_documents(project: str, database: str):
 
 def api_gcp_firestore_list_documents(project: str, database: str, collection: str):
     s = _server()
-    project = s._gcp_project_name(project)
+    project = _gcp_project_name(project)
     database = str(database or "(default)")
     if _fs_emu.available():
         return {"documents": _fs_emu.list_collection(project, database, collection), "nextPageToken": "", "kind": "firestore#documents"}
@@ -950,12 +962,12 @@ def api_gcp_firestore_list_documents(project: str, database: str, collection: st
 
 async def api_gcp_firestore_create_document(project: str, database: str, collection: str, request: Request):
     s = _server()
-    project = s._gcp_project_name(project)
+    project = _gcp_project_name(project)
     database = str(database or "(default)")
     payload = await request.json() if request is not None else {}
     payload = payload if isinstance(payload, dict) else {}
     query_doc_id = request.query_params.get("documentId") if request is not None else ""
-    doc_id = str(payload.get("name") or payload.get("documentId") or query_doc_id or s._id("doc"))
+    doc_id = str(payload.get("name") or payload.get("documentId") or query_doc_id or _id("doc"))
     if "/" in doc_id:
         doc_id = doc_id.rsplit("/", 1)[-1]
     fields = payload.get("fields", {}) if isinstance(payload.get("fields"), dict) else {}
@@ -966,7 +978,7 @@ async def api_gcp_firestore_create_document(project: str, database: str, collect
 
 def api_gcp_firestore_get_document(project: str, database: str, collection: str, doc_id: str):
     s = _server()
-    project = s._gcp_project_name(project)
+    project = _gcp_project_name(project)
     database = str(database or "(default)")
     if _fs_emu.available():
         doc = _fs_emu.get(project, database, collection, doc_id)
@@ -981,7 +993,7 @@ def api_gcp_firestore_get_document(project: str, database: str, collection: str,
 
 def api_gcp_firestore_delete_document(project: str, database: str, collection: str, doc_id: str):
     s = _server()
-    project = s._gcp_project_name(project)
+    project = _gcp_project_name(project)
     database = str(database or "(default)")
     if _fs_emu.available():
         _fs_emu.delete(project, database, collection, doc_id)
@@ -995,7 +1007,7 @@ def api_gcp_firestore_delete_document(project: str, database: str, collection: s
 
 async def api_gcp_firestore_update_document(project: str, database: str, collection: str, doc_id: str, request: Request):
     s = _server()
-    project = s._gcp_project_name(project)
+    project = _gcp_project_name(project)
     database = str(database or "(default)")
     payload = await request.json() if request is not None else {}
     payload = payload if isinstance(payload, dict) else {}
@@ -1054,7 +1066,7 @@ async def api_gcp_firestore_doc_put(project: str, database: str, fs_path: str, r
 
 async def api_gcp_firestore_run_query(project: str, database: str, request: Request, collection: str = ""):
     s = _server()
-    project = s._gcp_project_name(project)
+    project = _gcp_project_name(project)
     database = str(database or "(default)")
     payload = await request.json() if request is not None else {}
     payload = payload if isinstance(payload, dict) else {}
@@ -1099,7 +1111,7 @@ async def api_gcp_firestore_run_query(project: str, database: str, request: Requ
                                                  filters=filters, order_by=order_by, order_dir=order_dir)
     if collection_id and field_name:
         index_key = f"{project}:{database}:{collection_id}:{field_name}:{query.get('orderBy', 'ASCENDING')}"
-        s.gcp_firestore_state.setdefault("indexes", {}).setdefault(index_key, s._gcp_firestore_index_record(project, database, collection_id, {
+        gcp_firestore_state.setdefault("indexes", {}).setdefault(index_key, s._gcp_firestore_index_record(project, database, collection_id, {
             "name": index_key.split(":")[-1],
             "fields": [{"fieldPath": field_name, "order": str(query.get("orderBy") or "ASCENDING")}],
             "queryScope": "COLLECTION",
@@ -1110,10 +1122,10 @@ async def api_gcp_firestore_run_query(project: str, database: str, request: Requ
 
 def api_gcp_firestore_list_indexes(project: str, database: str, collection: str = ""):
     s = _server()
-    project = s._gcp_project_name(project)
+    project = _gcp_project_name(project)
     database = str(database or "(default)")
     indexes = []
-    for index in s.gcp_firestore_state.get("indexes", {}).values():
+    for index in gcp_firestore_state.get("indexes", {}).values():
         if str(index.get("project") or project) != project or str(index.get("database") or database) != database:
             continue
         if collection and str(index.get("collection") or "") != collection:
@@ -1125,32 +1137,32 @@ def api_gcp_firestore_list_indexes(project: str, database: str, collection: str 
 
 async def api_gcp_firestore_create_index(project: str, database: str, collection: str, request: Request):
     s = _server()
-    project = s._gcp_project_name(project)
+    project = _gcp_project_name(project)
     database = str(database or "(default)")
     payload = await request.json() if request is not None else {}
     payload = payload if isinstance(payload, dict) else {}
     index = s._gcp_firestore_index_record(project, database, collection, payload)
-    s.gcp_firestore_state.setdefault("indexes", {})[f"{project}:{database}:{collection}:{index['name']}"] = index
+    gcp_firestore_state.setdefault("indexes", {})[f"{project}:{database}:{collection}:{index['name']}"] = index
     return s._gcp_firestore_index_view(index)
 
 
 def api_gcp_firestore_delete_index(project: str, database: str, collection: str, index_name: str):
     s = _server()
-    project = s._gcp_project_name(project)
+    project = _gcp_project_name(project)
     database = str(database or "(default)")
     key = f"{project}:{database}:{collection}:{index_name}"
-    if key not in s.gcp_firestore_state.get("indexes", {}):
+    if key not in gcp_firestore_state.get("indexes", {}):
         raise HTTPException(404, detail="Index not found")
-    del s.gcp_firestore_state["indexes"][key]
+    del gcp_firestore_state["indexes"][key]
     return {"kind": "firestore#index", "deleted": True, "name": index_name}
 
 
 def api_gcp_functions_list(project: str, location: str = "us-central1"):
     s = _server()
-    project = s._gcp_project_name(project)
+    project = _gcp_project_name(project)
     location = s._gcp_location_name(location)
     functions = []
-    for fn in s.gcp_functions_state.get("functions", {}).values():
+    for fn in gcp_functions_state.get("functions", {}).values():
         if str(fn.get("project") or project) != project or str(fn.get("location") or location) != location:
             continue
         functions.append(s._gcp_functions_view(project, location, fn))
@@ -1160,12 +1172,12 @@ def api_gcp_functions_list(project: str, location: str = "us-central1"):
 
 async def api_gcp_functions_create(project: str, request: Request, location: str = "us-central1"):
     s = _server()
-    project = s._gcp_project_name(project)
+    project = _gcp_project_name(project)
     location = s._gcp_location_name(location)
     payload = await request.json() if request is not None else {}
     payload = payload if isinstance(payload, dict) else {}
     fn = s._gcp_functions_record(project, location, payload)
-    s.gcp_functions_state.setdefault("functions", {})[fn["name"]] = fn
+    gcp_functions_state.setdefault("functions", {})[fn["name"]] = fn
     # Real Cloud Functions create returns a google.longrunning.Operation (clients
     # and Terraform poll operations.get to done), not the function directly.
     return s._gcp_functions_make_operation(project, location, s._gcp_functions_view(project, location, fn), "CREATE_FUNCTION")
@@ -1173,9 +1185,9 @@ async def api_gcp_functions_create(project: str, request: Request, location: str
 
 async def api_gcp_functions_update(project: str, location: str, function: str, request: Request):
     s = _server()
-    project = s._gcp_project_name(project)
+    project = _gcp_project_name(project)
     location = s._gcp_location_name(location)
-    fn = s.gcp_functions_state.get("functions", {}).get(function)
+    fn = gcp_functions_state.get("functions", {}).get(function)
     if not fn or str(fn.get("project") or project) != project or str(fn.get("location") or location) != location:
         raise HTTPException(404, detail="Function not found")
     payload = await request.json() if request is not None else {}
@@ -1204,37 +1216,37 @@ async def api_gcp_functions_update(project: str, location: str, function: str, r
         fn["environmentVariables"] = payload["environmentVariables"]
     if isinstance(payload.get("labels"), dict):
         fn["labels"] = payload["labels"]
-    fn["updateTime"] = s._now()
-    s.gcp_functions_state.setdefault("functions", {})[function] = fn
+    fn["updateTime"] = _now()
+    gcp_functions_state.setdefault("functions", {})[function] = fn
     return s._gcp_functions_view(project, location, fn)
 
 
 async def api_gcp_functions_publish_version(project: str, location: str, function: str, request: Request):
     s = _server()
-    project = s._gcp_project_name(project)
+    project = _gcp_project_name(project)
     location = s._gcp_location_name(location)
-    fn = s.gcp_functions_state.get("functions", {}).get(function)
+    fn = gcp_functions_state.get("functions", {}).get(function)
     if not fn or str(fn.get("project") or project) != project or str(fn.get("location") or location) != location:
         raise HTTPException(404, detail="Function not found")
     payload = await request.json() if request is not None else {}
     payload = payload if isinstance(payload, dict) else {}
     version_id = str(len(fn.get("versions", [])) + 1)
-    version = {"version": version_id, "state": "Active", "description": str(payload.get("description") or ""), "created": s._now(), "code_sha256": s._id("sha"), "is_latest": True}
+    version = {"version": version_id, "state": "Active", "description": str(payload.get("description") or ""), "created": _now(), "code_sha256": _id("sha"), "is_latest": True}
     versions = [v for v in fn.get("versions", []) if isinstance(v, dict)]
     for item in versions:
         item["is_latest"] = False
     versions.append(version)
     fn["versions"] = versions
-    fn["updateTime"] = s._now()
-    s.gcp_functions_state.setdefault("functions", {})[function] = fn
+    fn["updateTime"] = _now()
+    gcp_functions_state.setdefault("functions", {})[function] = fn
     return {"version": version}
 
 
 def api_gcp_functions_list_versions(project: str, location: str, function: str):
     s = _server()
-    project = s._gcp_project_name(project)
+    project = _gcp_project_name(project)
     location = s._gcp_location_name(location)
-    fn = s.gcp_functions_state.get("functions", {}).get(function)
+    fn = gcp_functions_state.get("functions", {}).get(function)
     if not fn or str(fn.get("project") or project) != project or str(fn.get("location") or location) != location:
         raise HTTPException(404, detail="Function not found")
     return {"versions": list(fn.get("versions", []) if isinstance(fn.get("versions"), list) else [])}
@@ -1242,9 +1254,9 @@ def api_gcp_functions_list_versions(project: str, location: str, function: str):
 
 def api_gcp_functions_list_invocations(project: str, location: str, function: str):
     s = _server()
-    project = s._gcp_project_name(project)
+    project = _gcp_project_name(project)
     location = s._gcp_location_name(location)
-    fn = s.gcp_functions_state.get("functions", {}).get(function)
+    fn = gcp_functions_state.get("functions", {}).get(function)
     if not fn or str(fn.get("project") or project) != project or str(fn.get("location") or location) != location:
         raise HTTPException(404, detail="Function not found")
     return {"invocations": list(fn.get("invocations", []) if isinstance(fn.get("invocations"), list) else [])}
@@ -1252,10 +1264,10 @@ def api_gcp_functions_list_invocations(project: str, location: str, function: st
 
 def api_gcp_functions_get_policy(project: str, location: str, function: str):
     s = _server()
-    project = s._gcp_project_name(project)
+    project = _gcp_project_name(project)
     location = s._gcp_location_name(location)
     function = _strip_action_suffix(function, ":getIamPolicy", ":setIamPolicy", ":call")
-    fn = s.gcp_functions_state.get("functions", {}).get(function)
+    fn = gcp_functions_state.get("functions", {}).get(function)
     if not fn or str(fn.get("project") or project) != project or str(fn.get("location") or location) != location:
         raise HTTPException(404, detail="Function not found")
     return {"version": 1, "etag": "", "bindings": fn.get("permissions", []) if isinstance(fn.get("permissions"), list) else []}
@@ -1263,26 +1275,26 @@ def api_gcp_functions_get_policy(project: str, location: str, function: str):
 
 async def api_gcp_functions_set_policy(project: str, location: str, function: str, request: Request):
     s = _server()
-    project = s._gcp_project_name(project)
+    project = _gcp_project_name(project)
     location = s._gcp_location_name(location)
     function = _strip_action_suffix(function, ":getIamPolicy", ":setIamPolicy", ":call")
-    fn = s.gcp_functions_state.get("functions", {}).get(function)
+    fn = gcp_functions_state.get("functions", {}).get(function)
     if not fn or str(fn.get("project") or project) != project or str(fn.get("location") or location) != location:
         raise HTTPException(404, detail="Function not found")
     payload = await request.json() if request is not None else {}
     payload = payload if isinstance(payload, dict) else {}
     bindings = payload.get("bindings", []) if isinstance(payload.get("bindings"), list) else []
     fn["permissions"] = bindings
-    fn["updateTime"] = s._now()
+    fn["updateTime"] = _now()
     return {"version": int(payload.get("version") or 1), "etag": str(payload.get("etag") or ""), "bindings": bindings}
 
 
 def api_gcp_functions_get(project: str, location: str, function: str):
     s = _server()
-    project = s._gcp_project_name(project)
+    project = _gcp_project_name(project)
     location = s._gcp_location_name(location)
     function = _strip_action_suffix(function, ":getIamPolicy", ":setIamPolicy", ":call")
-    fn = s.gcp_functions_state.get("functions", {}).get(function)
+    fn = gcp_functions_state.get("functions", {}).get(function)
     if not fn or str(fn.get("project") or project) != project or str(fn.get("location") or location) != location:
         raise HTTPException(404, detail="Function not found")
     return s._gcp_functions_view(project, location, fn)
@@ -1290,22 +1302,22 @@ def api_gcp_functions_get(project: str, location: str, function: str):
 
 def api_gcp_functions_delete(project: str, location: str, function: str):
     s = _server()
-    project = s._gcp_project_name(project)
+    project = _gcp_project_name(project)
     location = s._gcp_location_name(location)
     function = _strip_action_suffix(function, ":getIamPolicy", ":setIamPolicy", ":call")
-    fn = s.gcp_functions_state.get("functions", {}).get(function)
+    fn = gcp_functions_state.get("functions", {}).get(function)
     if not fn or str(fn.get("project") or project) != project or str(fn.get("location") or location) != location:
         raise HTTPException(404, detail="Function not found")
-    del s.gcp_functions_state["functions"][function]
+    del gcp_functions_state["functions"][function]
     return {"done": True}
 
 
 async def api_gcp_functions_call(project: str, location: str, function: str, request: Request):
     s = _server()
-    project = s._gcp_project_name(project)
+    project = _gcp_project_name(project)
     location = s._gcp_location_name(location)
     function = _strip_action_suffix(function, ":getIamPolicy", ":setIamPolicy", ":call")
-    fn = s.gcp_functions_state.get("functions", {}).get(function)
+    fn = gcp_functions_state.get("functions", {}).get(function)
     if not fn or str(fn.get("project") or project) != project or str(fn.get("location") or location) != location:
         raise HTTPException(404, detail="Function not found")
     payload = await request.json() if request is not None else {}
@@ -1332,7 +1344,7 @@ async def api_gcp_functions_call(project: str, location: str, function: str, req
     except Exception as exc:
         outcome = {"status": "ERROR", "error": str(exc)[:300], "result": None, "logs": ""}
     invocation = {
-        "id": s._id("inv"), "timestamp": s._now(), "request": payload,
+        "id": _id("inv"), "timestamp": _now(), "request": payload,
         "response": outcome.get("result"), "status": outcome.get("status", "SUCCESS"),
         "error": outcome.get("error", ""), "logs": outcome.get("logs", ""),
     }
@@ -1343,29 +1355,29 @@ async def api_gcp_functions_call(project: str, location: str, function: str, req
 
 def api_gcp_apigw_list_apis(project: str, location: str = "global"):
     s = _server()
-    project = s._gcp_project_name(project)
+    project = _gcp_project_name(project)
     location = s._gcp_location_name(location, "global")
-    apis = [s._gcp_apigateway_api_view(project, location, api) for api in s.gcp_apigw_state.get("apis", {}).values() if str(api.get("project") or project) == project and str(api.get("location") or location) == location]
+    apis = [s._gcp_apigateway_api_view(project, location, api) for api in gcp_apigw_state.get("apis", {}).values() if str(api.get("project") or project) == project and str(api.get("location") or location) == location]
     apis.sort(key=lambda item: item.get("name", ""))
     return {"apis": apis, "nextPageToken": "", "kind": "apigateway#listApisResponse"}
 
 
 async def api_gcp_apigw_create_api(project: str, request: Request, location: str = "global"):
     s = _server()
-    project = s._gcp_project_name(project)
+    project = _gcp_project_name(project)
     location = s._gcp_location_name(location, "global")
     payload = await request.json() if request is not None else {}
     payload = payload if isinstance(payload, dict) else {}
     api = s._gcp_apigw_api_record(project, location, payload)
-    s.gcp_apigw_state.setdefault("apis", {})[api["name"]] = api
+    gcp_apigw_state.setdefault("apis", {})[api["name"]] = api
     return s._gcp_apigateway_api_view(project, location, api)
 
 
 def api_gcp_apigw_get_api(project: str, location: str, api: str):
     s = _server()
-    project = s._gcp_project_name(project)
+    project = _gcp_project_name(project)
     location = s._gcp_location_name(location, "global")
-    rec = s.gcp_apigw_state.get("apis", {}).get(api)
+    rec = gcp_apigw_state.get("apis", {}).get(api)
     if not rec or str(rec.get("project") or project) != project or str(rec.get("location") or location) != location:
         raise HTTPException(404, detail="API not found")
     return s._gcp_apigateway_api_view(project, location, rec)
@@ -1373,148 +1385,148 @@ def api_gcp_apigw_get_api(project: str, location: str, api: str):
 
 def api_gcp_apigw_delete_api(project: str, location: str, api: str):
     s = _server()
-    project = s._gcp_project_name(project)
+    project = _gcp_project_name(project)
     location = s._gcp_location_name(location, "global")
-    rec = s.gcp_apigw_state.get("apis", {}).get(api)
+    rec = gcp_apigw_state.get("apis", {}).get(api)
     if not rec or str(rec.get("project") or project) != project or str(rec.get("location") or location) != location:
         raise HTTPException(404, detail="API not found")
-    del s.gcp_apigw_state["apis"][api]
+    del gcp_apigw_state["apis"][api]
     return {"done": True}
 
 
 def api_gcp_apigw_list_configs(project: str, location: str = "global", api: str = ""):
     s = _server()
-    project = s._gcp_project_name(project)
+    project = _gcp_project_name(project)
     location = s._gcp_location_name(location, "global")
-    cfgs = [s._gcp_apigateway_config_view(project, location, cfg) for cfg in s.gcp_apigw_state.get("configs", {}).values() if str(cfg.get("project") or project) == project and str(cfg.get("location") or location) == location and (not api or str(cfg.get("api") or "") == api)]
+    cfgs = [s._gcp_apigateway_config_view(project, location, cfg) for cfg in gcp_apigw_state.get("configs", {}).values() if str(cfg.get("project") or project) == project and str(cfg.get("location") or location) == location and (not api or str(cfg.get("api") or "") == api)]
     cfgs.sort(key=lambda item: item.get("name", ""))
     return {"apiConfigs": cfgs, "nextPageToken": ""}
 
 
 async def api_gcp_apigw_create_config(project: str, request: Request, location: str = "global", api: str = ""):
     s = _server()
-    project = s._gcp_project_name(project)
+    project = _gcp_project_name(project)
     location = s._gcp_location_name(location, "global")
     payload = await request.json() if request is not None else {}
     payload = payload if isinstance(payload, dict) else {}
     if api and not payload.get("api"):
         payload["api"] = api
     cfg = s._gcp_apigw_cfg_record(project, location, payload)
-    s.gcp_apigw_state.setdefault("configs", {})[cfg["name"]] = cfg
+    gcp_apigw_state.setdefault("configs", {})[cfg["name"]] = cfg
     return s._gcp_apigateway_config_view(project, location, cfg)
 
 
 def api_gcp_apigw_list_gateways(project: str, location: str = "global", api: str = ""):
     s = _server()
-    project = s._gcp_project_name(project)
+    project = _gcp_project_name(project)
     location = s._gcp_location_name(location, "global")
-    gws = [s._gcp_apigateway_gateway_view(project, location, gw) for gw in s.gcp_apigw_state.get("gateways", {}).values() if str(gw.get("project") or project) == project and str(gw.get("location") or location) == location and (not api or str(gw.get("apiConfig") or "") == api)]
+    gws = [s._gcp_apigateway_gateway_view(project, location, gw) for gw in gcp_apigw_state.get("gateways", {}).values() if str(gw.get("project") or project) == project and str(gw.get("location") or location) == location and (not api or str(gw.get("apiConfig") or "") == api)]
     gws.sort(key=lambda item: item.get("name", ""))
     return {"gateways": gws, "nextPageToken": ""}
 
 
 async def api_gcp_apigw_create_gateway(project: str, request: Request, location: str = "global", api: str = ""):
     s = _server()
-    project = s._gcp_project_name(project)
+    project = _gcp_project_name(project)
     location = s._gcp_location_name(location, "global")
     payload = await request.json() if request is not None else {}
     payload = payload if isinstance(payload, dict) else {}
     if api and not payload.get("apiConfig"):
         payload["apiConfig"] = api
     gw = s._gcp_apigw_gateway_record(project, location, payload)
-    s.gcp_apigw_state.setdefault("gateways", {})[gw["name"]] = gw
+    gcp_apigw_state.setdefault("gateways", {})[gw["name"]] = gw
     return s._gcp_apigateway_gateway_view(project, location, gw)
 
 
 def api_gcp_vpc_list_networks(project: str):
     s = _server()
-    project = s._gcp_project_name(project)
+    project = _gcp_project_name(project)
     networks = []
-    for network in s.gcp_vpc_state.get("networks", {}).values():
+    for network in gcp_vpc_state.get("networks", {}).values():
         if str(network.get("project") or project) != project:
             continue
         network_name = str(network.get("name") or "")
-        networks.append({"kind": "compute#network", "id": str(network.get("id") or s._gcp_compute_numeric_id(f"{project}:{network_name}")), "creationTimestamp": network.get("createTime", s._now()), "name": network_name, "description": network.get("description", ""), "IPv4Range": network.get("IPv4Range", ""), "gatewayIPv4": network.get("gatewayIPv4", ""), "selfLink": f"{s._gcp_compute_network_root()}/projects/{project}/global/networks/{network_name}", "selfLinkWithId": network.get("selfLinkWithId", f"{s._gcp_compute_network_root()}/projects/{project}/global/networks/{network_name}?id={network.get('id') or s._gcp_compute_numeric_id(f'{project}:{network_name}')}"), "autoCreateSubnetworks": bool(network.get("autoCreateSubnetworks", True)), "subnetworks": network.get("subnetworks", []), "peerings": network.get("peerings", []), "routingConfig": {"routingMode": network.get("routingMode", "REGIONAL")}})
+        networks.append({"kind": "compute#network", "id": str(network.get("id") or s._gcp_compute_numeric_id(f"{project}:{network_name}")), "creationTimestamp": network.get("createTime", _now()), "name": network_name, "description": network.get("description", ""), "IPv4Range": network.get("IPv4Range", ""), "gatewayIPv4": network.get("gatewayIPv4", ""), "selfLink": f"{s._gcp_compute_network_root()}/projects/{project}/global/networks/{network_name}", "selfLinkWithId": network.get("selfLinkWithId", f"{s._gcp_compute_network_root()}/projects/{project}/global/networks/{network_name}?id={network.get('id') or s._gcp_compute_numeric_id(f'{project}:{network_name}')}"), "autoCreateSubnetworks": bool(network.get("autoCreateSubnetworks", True)), "subnetworks": network.get("subnetworks", []), "peerings": network.get("peerings", []), "routingConfig": {"routingMode": network.get("routingMode", "REGIONAL")}})
     return {"kind": "compute#networkList", "items": networks}
 
 
 async def api_gcp_vpc_create_network(project: str, request: Request):
     s = _server()
-    project = s._gcp_project_name(project)
+    project = _gcp_project_name(project)
     payload = await request.json() if request is not None else {}
     payload = payload if isinstance(payload, dict) else {}
     name = str(payload.get("name") or payload.get("network") or "").strip()
     if not name:
         raise HTTPException(400, detail="Network name is required")
-    rec = {"id": s._gcp_compute_numeric_id(f"{project}:{name}"), "name": name, "project": project, "description": str(payload.get("description") or ""), "IPv4Range": str(payload.get("IPv4Range") or ""), "gatewayIPv4": str(payload.get("gatewayIPv4") or ""), "autoCreateSubnetworks": bool(payload.get("autoCreateSubnetworks", True)), "routingMode": str(payload.get("routingMode") or "REGIONAL"), "subnetworks": payload.get("subnetworks", []) if isinstance(payload.get("subnetworks"), list) else [], "peerings": payload.get("peerings", []) if isinstance(payload.get("peerings"), list) else [], "createTime": s._now()}
-    s.gcp_vpc_state.setdefault("networks", {})[name] = rec
+    rec = {"id": s._gcp_compute_numeric_id(f"{project}:{name}"), "name": name, "project": project, "description": str(payload.get("description") or ""), "IPv4Range": str(payload.get("IPv4Range") or ""), "gatewayIPv4": str(payload.get("gatewayIPv4") or ""), "autoCreateSubnetworks": bool(payload.get("autoCreateSubnetworks", True)), "routingMode": str(payload.get("routingMode") or "REGIONAL"), "subnetworks": payload.get("subnetworks", []) if isinstance(payload.get("subnetworks"), list) else [], "peerings": payload.get("peerings", []) if isinstance(payload.get("peerings"), list) else [], "createTime": _now()}
+    gcp_vpc_state.setdefault("networks", {})[name] = rec
     return {"kind": "compute#network", "id": rec["id"], "creationTimestamp": rec["createTime"], "name": name, "description": rec["description"], "IPv4Range": rec["IPv4Range"], "gatewayIPv4": rec["gatewayIPv4"], "selfLink": f"{s._gcp_compute_network_root()}/projects/{project}/global/networks/{name}", "selfLinkWithId": f"{s._gcp_compute_network_root()}/projects/{project}/global/networks/{name}?id={rec['id']}", "autoCreateSubnetworks": rec["autoCreateSubnetworks"], "subnetworks": rec["subnetworks"], "peerings": rec["peerings"], "routingConfig": {"routingMode": rec["routingMode"]}}
 
 
 def api_gcp_vpc_get_network(project: str, network: str):
     s = _server()
-    project = s._gcp_project_name(project)
-    rec = s.gcp_vpc_state.get("networks", {}).get(network)
+    project = _gcp_project_name(project)
+    rec = gcp_vpc_state.get("networks", {}).get(network)
     if not rec or str(rec.get("project") or project) != project:
         raise HTTPException(404, detail="Network not found")
-    return {"kind": "compute#network", "id": rec.get("id", s._gcp_compute_numeric_id(f"{project}:{network}")), "creationTimestamp": rec.get("createTime", s._now()), "name": rec["name"], "description": rec.get("description", ""), "IPv4Range": rec.get("IPv4Range", ""), "gatewayIPv4": rec.get("gatewayIPv4", ""), "selfLink": f"{s._gcp_compute_network_root()}/projects/{project}/global/networks/{network}", "selfLinkWithId": f"{s._gcp_compute_network_root()}/projects/{project}/global/networks/{network}?id={rec.get('id', s._gcp_compute_numeric_id(f'{project}:{network}'))}", "autoCreateSubnetworks": bool(rec.get("autoCreateSubnetworks", True)), "subnetworks": rec.get("subnetworks", []), "peerings": rec.get("peerings", []), "routingConfig": {"routingMode": rec.get("routingMode", "REGIONAL")}}
+    return {"kind": "compute#network", "id": rec.get("id", s._gcp_compute_numeric_id(f"{project}:{network}")), "creationTimestamp": rec.get("createTime", _now()), "name": rec["name"], "description": rec.get("description", ""), "IPv4Range": rec.get("IPv4Range", ""), "gatewayIPv4": rec.get("gatewayIPv4", ""), "selfLink": f"{s._gcp_compute_network_root()}/projects/{project}/global/networks/{network}", "selfLinkWithId": f"{s._gcp_compute_network_root()}/projects/{project}/global/networks/{network}?id={rec.get('id', s._gcp_compute_numeric_id(f'{project}:{network}'))}", "autoCreateSubnetworks": bool(rec.get("autoCreateSubnetworks", True)), "subnetworks": rec.get("subnetworks", []), "peerings": rec.get("peerings", []), "routingConfig": {"routingMode": rec.get("routingMode", "REGIONAL")}}
 
 
 def api_gcp_vpc_delete_network(project: str, network: str):
     s = _server()
-    project = s._gcp_project_name(project)
-    rec = s.gcp_vpc_state.get("networks", {}).get(network)
+    project = _gcp_project_name(project)
+    rec = gcp_vpc_state.get("networks", {}).get(network)
     if not rec or str(rec.get("project") or project) != project:
         raise HTTPException(404, detail="Network not found")
-    del s.gcp_vpc_state["networks"][network]
+    del gcp_vpc_state["networks"][network]
     return {"done": True}
 
 
 def api_gcp_vpc_list_subnetworks(project: str, region: str):
     s = _server()
-    project = s._gcp_project_name(project)
+    project = _gcp_project_name(project)
     subnetworks = []
-    for subnet in s.gcp_vpc_state.get("subnetworks", {}).values():
+    for subnet in gcp_vpc_state.get("subnetworks", {}).values():
         if str(subnet.get("project") or project) != project or str(subnet.get("region") or region) != region:
             continue
-        subnetworks.append({"kind": "compute#subnetwork", "id": str(subnet.get("id") or s._gcp_compute_numeric_id(f"{project}:{subnet['name']}")), "creationTimestamp": subnet.get("createTime", s._now()), "name": subnet["name"], "description": subnet.get("description", ""), "region": region, "network": f"{s._gcp_compute_network_root()}/projects/{project}/global/networks/{subnet.get('network','default')}", "ipCidrRange": subnet.get("ipCidrRange", "10.0.0.0/24"), "reservedInternalRange": subnet.get("reservedInternalRange", ""), "gatewayAddress": subnet.get("gatewayAddress", ""), "privateIpGoogleAccess": bool(subnet.get("privateIpGoogleAccess", False)), "secondaryIpRanges": subnet.get("secondaryIpRanges", []), "purpose": subnet.get("purpose", ""), "role": subnet.get("role", ""), "stackType": subnet.get("stackType", "IPV4_ONLY"), "state": subnet.get("state", "READY"), "selfLink": f"{s._gcp_compute_network_root()}/projects/{project}/regions/{region}/subnetworks/{subnet['name']}"})
+        subnetworks.append({"kind": "compute#subnetwork", "id": str(subnet.get("id") or s._gcp_compute_numeric_id(f"{project}:{subnet['name']}")), "creationTimestamp": subnet.get("createTime", _now()), "name": subnet["name"], "description": subnet.get("description", ""), "region": region, "network": f"{s._gcp_compute_network_root()}/projects/{project}/global/networks/{subnet.get('network','default')}", "ipCidrRange": subnet.get("ipCidrRange", "10.0.0.0/24"), "reservedInternalRange": subnet.get("reservedInternalRange", ""), "gatewayAddress": subnet.get("gatewayAddress", ""), "privateIpGoogleAccess": bool(subnet.get("privateIpGoogleAccess", False)), "secondaryIpRanges": subnet.get("secondaryIpRanges", []), "purpose": subnet.get("purpose", ""), "role": subnet.get("role", ""), "stackType": subnet.get("stackType", "IPV4_ONLY"), "state": subnet.get("state", "READY"), "selfLink": f"{s._gcp_compute_network_root()}/projects/{project}/regions/{region}/subnetworks/{subnet['name']}"})
     return {"kind": "compute#subnetworkList", "items": subnetworks}
 
 
 async def api_gcp_vpc_create_subnetwork(project: str, region: str, request: Request):
     s = _server()
-    project = s._gcp_project_name(project)
+    project = _gcp_project_name(project)
     payload = await request.json() if request is not None else {}
     payload = payload if isinstance(payload, dict) else {}
     name = str(payload.get("name") or "").strip()
     if not name:
         raise HTTPException(400, detail="Subnetwork name is required")
-    rec = {"id": s._gcp_compute_numeric_id(f"{project}:{name}"), "name": name, "description": str(payload.get("description") or ""), "project": project, "region": region, "network": str(payload.get("network") or "default").split("/")[-1], "ipCidrRange": str(payload.get("ipCidrRange") or "10.0.0.0/24"), "reservedInternalRange": str(payload.get("reservedInternalRange") or ""), "gatewayAddress": str(payload.get("gatewayAddress") or ""), "privateIpGoogleAccess": bool(payload.get("privateIpGoogleAccess", False)), "secondaryIpRanges": payload.get("secondaryIpRanges", []) if isinstance(payload.get("secondaryIpRanges"), list) else [], "purpose": str(payload.get("purpose") or ""), "role": str(payload.get("role") or ""), "stackType": str(payload.get("stackType") or "IPV4_ONLY"), "state": str(payload.get("state") or "READY"), "createTime": s._now()}
-    s.gcp_vpc_state.setdefault("subnetworks", {})[name] = rec
+    rec = {"id": s._gcp_compute_numeric_id(f"{project}:{name}"), "name": name, "description": str(payload.get("description") or ""), "project": project, "region": region, "network": str(payload.get("network") or "default").split("/")[-1], "ipCidrRange": str(payload.get("ipCidrRange") or "10.0.0.0/24"), "reservedInternalRange": str(payload.get("reservedInternalRange") or ""), "gatewayAddress": str(payload.get("gatewayAddress") or ""), "privateIpGoogleAccess": bool(payload.get("privateIpGoogleAccess", False)), "secondaryIpRanges": payload.get("secondaryIpRanges", []) if isinstance(payload.get("secondaryIpRanges"), list) else [], "purpose": str(payload.get("purpose") or ""), "role": str(payload.get("role") or ""), "stackType": str(payload.get("stackType") or "IPV4_ONLY"), "state": str(payload.get("state") or "READY"), "createTime": _now()}
+    gcp_vpc_state.setdefault("subnetworks", {})[name] = rec
     return {"kind": "compute#subnetwork", "id": rec["id"], "creationTimestamp": rec["createTime"], "name": name, "description": rec["description"], "region": region, "network": f"{s._gcp_compute_network_root()}/projects/{project}/global/networks/{rec['network']}", "ipCidrRange": rec["ipCidrRange"], "reservedInternalRange": rec["reservedInternalRange"], "gatewayAddress": rec["gatewayAddress"], "privateIpGoogleAccess": rec["privateIpGoogleAccess"], "secondaryIpRanges": rec["secondaryIpRanges"], "purpose": rec["purpose"], "role": rec["role"], "stackType": rec["stackType"], "state": rec["state"], "selfLink": f"{s._gcp_compute_network_root()}/projects/{project}/regions/{region}/subnetworks/{name}"}
 
 
 def api_gcp_vpc_list_firewalls(project: str):
     s = _server()
-    project = s._gcp_project_name(project)
+    project = _gcp_project_name(project)
     firewalls = []
-    for fw in s.gcp_vpc_state.get("firewalls", {}).values():
+    for fw in gcp_vpc_state.get("firewalls", {}).values():
         if str(fw.get("project") or project) != project:
             continue
-        firewalls.append({"kind": "compute#firewall", "id": str(fw.get("id") or s._gcp_compute_numeric_id(f"{project}:{fw['name']}")), "creationTimestamp": fw.get("createTime", s._now()), "name": fw["name"], "description": fw.get("description", ""), "network": f"{s._gcp_compute_network_root()}/projects/{project}/global/networks/{fw.get('network','default')}", "priority": int(fw.get("priority") or 1000), "direction": fw.get("direction", "INGRESS"), "allowed": fw.get("allowed", [{"IPProtocol": "tcp", "ports": ["22"]}]), "denied": fw.get("denied", []), "sourceRanges": fw.get("sourceRanges", ["0.0.0.0/0"]), "destinationRanges": fw.get("destinationRanges", []), "sourceTags": fw.get("sourceTags", []), "targetTags": fw.get("targetTags", []), "sourceServiceAccounts": fw.get("sourceServiceAccounts", []), "targetServiceAccounts": fw.get("targetServiceAccounts", []), "disabled": bool(fw.get("disabled", False)), "logConfig": fw.get("logConfig", {}), "selfLink": f"{s._gcp_compute_network_root()}/projects/{project}/global/firewalls/{fw['name']}"})
+        firewalls.append({"kind": "compute#firewall", "id": str(fw.get("id") or s._gcp_compute_numeric_id(f"{project}:{fw['name']}")), "creationTimestamp": fw.get("createTime", _now()), "name": fw["name"], "description": fw.get("description", ""), "network": f"{s._gcp_compute_network_root()}/projects/{project}/global/networks/{fw.get('network','default')}", "priority": int(fw.get("priority") or 1000), "direction": fw.get("direction", "INGRESS"), "allowed": fw.get("allowed", [{"IPProtocol": "tcp", "ports": ["22"]}]), "denied": fw.get("denied", []), "sourceRanges": fw.get("sourceRanges", ["0.0.0.0/0"]), "destinationRanges": fw.get("destinationRanges", []), "sourceTags": fw.get("sourceTags", []), "targetTags": fw.get("targetTags", []), "sourceServiceAccounts": fw.get("sourceServiceAccounts", []), "targetServiceAccounts": fw.get("targetServiceAccounts", []), "disabled": bool(fw.get("disabled", False)), "logConfig": fw.get("logConfig", {}), "selfLink": f"{s._gcp_compute_network_root()}/projects/{project}/global/firewalls/{fw['name']}"})
     return {"kind": "compute#firewallList", "items": firewalls}
 
 
 async def api_gcp_vpc_create_firewall(project: str, request: Request):
     s = _server()
-    project = s._gcp_project_name(project)
+    project = _gcp_project_name(project)
     payload = await request.json() if request is not None else {}
     payload = payload if isinstance(payload, dict) else {}
     name = str(payload.get("name") or "").strip()
     if not name:
         raise HTTPException(400, detail="Firewall name is required")
-    rec = {"id": s._gcp_compute_numeric_id(f"{project}:{name}"), "name": name, "description": str(payload.get("description") or ""), "project": project, "network": str(payload.get("network") or "default").split("/")[-1], "priority": int(payload.get("priority") or 1000), "direction": str(payload.get("direction") or "INGRESS"), "allowed": payload.get("allowed") if isinstance(payload.get("allowed"), list) else [{"IPProtocol": "tcp", "ports": ["22"]}], "denied": payload.get("denied") if isinstance(payload.get("denied"), list) else [], "sourceRanges": payload.get("sourceRanges") if isinstance(payload.get("sourceRanges"), list) else ["0.0.0.0/0"], "destinationRanges": payload.get("destinationRanges") if isinstance(payload.get("destinationRanges"), list) else [], "sourceTags": payload.get("sourceTags") if isinstance(payload.get("sourceTags"), list) else [], "targetTags": payload.get("targetTags") if isinstance(payload.get("targetTags"), list) else [], "sourceServiceAccounts": payload.get("sourceServiceAccounts") if isinstance(payload.get("sourceServiceAccounts"), list) else [], "targetServiceAccounts": payload.get("targetServiceAccounts") if isinstance(payload.get("targetServiceAccounts"), list) else [], "disabled": bool(payload.get("disabled", False)), "logConfig": payload.get("logConfig") if isinstance(payload.get("logConfig"), dict) else {}, "createTime": s._now()}
-    s.gcp_vpc_state.setdefault("firewalls", {})[name] = rec
+    rec = {"id": s._gcp_compute_numeric_id(f"{project}:{name}"), "name": name, "description": str(payload.get("description") or ""), "project": project, "network": str(payload.get("network") or "default").split("/")[-1], "priority": int(payload.get("priority") or 1000), "direction": str(payload.get("direction") or "INGRESS"), "allowed": payload.get("allowed") if isinstance(payload.get("allowed"), list) else [{"IPProtocol": "tcp", "ports": ["22"]}], "denied": payload.get("denied") if isinstance(payload.get("denied"), list) else [], "sourceRanges": payload.get("sourceRanges") if isinstance(payload.get("sourceRanges"), list) else ["0.0.0.0/0"], "destinationRanges": payload.get("destinationRanges") if isinstance(payload.get("destinationRanges"), list) else [], "sourceTags": payload.get("sourceTags") if isinstance(payload.get("sourceTags"), list) else [], "targetTags": payload.get("targetTags") if isinstance(payload.get("targetTags"), list) else [], "sourceServiceAccounts": payload.get("sourceServiceAccounts") if isinstance(payload.get("sourceServiceAccounts"), list) else [], "targetServiceAccounts": payload.get("targetServiceAccounts") if isinstance(payload.get("targetServiceAccounts"), list) else [], "disabled": bool(payload.get("disabled", False)), "logConfig": payload.get("logConfig") if isinstance(payload.get("logConfig"), dict) else {}, "createTime": _now()}
+    gcp_vpc_state.setdefault("firewalls", {})[name] = rec
     _gcp_vpc_enforce_reconcile(s)
     return _gcp_firewall_view(s, project, rec)
 
@@ -1527,7 +1539,7 @@ def _gcp_firewall_view(s, project: str, rec: dict) -> dict:
 def _gcp_firewall_lookup(s, project: str, firewall: str):
     """Resolve a firewall record in the active project by name (last path segment)."""
     fw_id = str(firewall or "").split("/")[-1].strip()
-    firewalls = s.gcp_vpc_state.setdefault("firewalls", {})
+    firewalls = gcp_vpc_state.setdefault("firewalls", {})
     rec = firewalls.get(fw_id)
     if rec and str(rec.get("project") or project) == project:
         return fw_id, rec, firewalls
@@ -1536,7 +1548,7 @@ def _gcp_firewall_lookup(s, project: str, firewall: str):
 
 def api_gcp_vpc_delete_firewall(project: str, firewall: str):
     s = _server()
-    project = s._gcp_project_name(project)
+    project = _gcp_project_name(project)
     fw_id, rec, firewalls = _gcp_firewall_lookup(s, project, firewall)
     if not rec:
         raise HTTPException(404, detail="Firewall not found")
@@ -1547,7 +1559,7 @@ def api_gcp_vpc_delete_firewall(project: str, firewall: str):
 
 async def api_gcp_vpc_update_firewall(project: str, firewall: str, request: Request):
     s = _server()
-    project = s._gcp_project_name(project)
+    project = _gcp_project_name(project)
     fw_id, rec, firewalls = _gcp_firewall_lookup(s, project, firewall)
     if not rec:
         raise HTTPException(404, detail="Firewall not found")
@@ -1571,7 +1583,7 @@ async def api_gcp_vpc_update_firewall(project: str, firewall: str, request: Requ
         rec["disabled"] = bool(payload.get("disabled"))
     if isinstance(payload.get("logConfig"), dict):
         rec["logConfig"] = payload["logConfig"]
-    rec["updateTime"] = s._now()
+    rec["updateTime"] = _now()
     firewalls[fw_id] = rec
     _gcp_vpc_enforce_reconcile(s)
     return _gcp_firewall_view(s, project, rec)

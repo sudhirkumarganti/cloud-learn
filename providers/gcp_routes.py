@@ -9,6 +9,8 @@ from .gcp import tool_response as gcp_tool_response
 from . import gcp_iam
 from . import gcp_services, gcp_storage_sql_vpc
 from core.tooling_simulators import gcp_gcutil_resolve, gcp_gcloud_resolve, sdk_snippet
+from core import models as _models
+from core.app_context import gcp_functions_state, gcp_sql_state
 
 
 _TARGET_OVERRIDES = {
@@ -112,7 +114,6 @@ def _proxy(target_name: str, signature: str, body_mode: str = "none", body_targe
     stub_signature = inspect.signature(namespace["_stub"])
 
     async def endpoint(**kwargs):
-        server = _server()
         if body_mode == "json":
             request = kwargs.pop("request", None)
             payload: dict[str, Any] = {}
@@ -130,9 +131,9 @@ def _proxy(target_name: str, signature: str, body_mode: str = "none", body_targe
                     payload = await request.json()
                 except Exception:
                     payload = {}
-            model_cls = getattr(server, model_name)
+            model_cls = getattr(_models, model_name, None) or getattr(_server(), model_name)
             kwargs[body_target] = model_cls(**(payload if isinstance(payload, dict) else {}))
-        target = _TARGET_OVERRIDES.get(target_name) or getattr(server, target_name)
+        target = _TARGET_OVERRIDES.get(target_name) or getattr(_server(), target_name)
         result = target(**kwargs)
         if inspect.isawaitable(result):
             return await result
@@ -158,8 +159,7 @@ def register(app, h) -> None:
     @app.get("/sql/v1beta4/projects/{project}/operations")
     @app.get("/api/gcp/sql/v1beta4/projects/{project}/operations")
     def api_gcp_sql_list_operations(project: str):
-        s = _server()
-        recs = s.gcp_sql_state.get("operation_records")
+        recs = gcp_sql_state.get("operation_records")
         ops = list(recs.values()) if isinstance(recs, dict) else []
         return {"kind": "sql#operationsList", "items": ops}
 
@@ -167,14 +167,13 @@ def register(app, h) -> None:
     @app.get("/api/gcp/sql/v1beta4/projects/{project}/operations/{operation}")
     def api_gcp_sql_get_operation(project: str, operation: str):
         # LRO poll target. Sim ops complete synchronously, so always report DONE.
-        s = _server()
-        recs = s.gcp_sql_state.get("operation_records")
+        recs = gcp_sql_state.get("operation_records")
         op = recs.get(operation) if isinstance(recs, dict) else None
         if not op:
             op = {
                 "kind": "sql#operation", "name": operation, "status": "DONE",
                 "operationType": "CREATE", "targetProject": project,
-                "selfLink": f"{s._gcp_sql_root()}/projects/{project}/operations/{operation}",
+                "selfLink": f"{_server()._gcp_sql_root()}/projects/{project}/operations/{operation}",
             }
         return op
 
@@ -188,8 +187,7 @@ def register(app, h) -> None:
     def api_gcp_functions_get_operation(operation: str):
         # Cloud Functions LRO poll target (google.longrunning.Operation). Sim ops
         # complete synchronously → always report done.
-        s = _server()
-        recs = s.gcp_functions_state.get("operation_records")
+        recs = gcp_functions_state.get("operation_records")
         op = recs.get(operation) if isinstance(recs, dict) else None
         if not op:
             op = {"name": f"operations/{operation}", "done": True}

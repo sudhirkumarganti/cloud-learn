@@ -23,42 +23,32 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request as URLRequest, urlopen
 
 
+from core.app_context import (
+    AWS_ACCOUNT_ID as _AWS_ACCOUNT_ID,
+    id_gen as _id_gen,
+    now as _now,
+    parse_utc_timestamp as _parse_ts,
+    persist_state as _persist_state,
+    record_usage as _record_usage,
+    sqs_state as _sqs_state_proxy,
+    ddb_state as _ddb_state_proxy,
+    lambda_state as _lambda_state_proxy,
+    apigw_state as _apigw_state_proxy,
+)
+
+
 def _server():
     import server as server_module
 
     return server_module
 
 
-def _now() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
-
-
-def _parse_ts(value: str | None) -> datetime | None:
-    if not value:
-        return None
-    try:
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except Exception:
-        return None
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
-    return parsed.astimezone(timezone.utc)
-
-
-def _record_usage(event: str, detail: dict | None = None) -> None:
-    _server()._record_usage(event, detail)
-
-
-def _persist_state() -> None:
-    _server()._persist_state()
-
-
 def _aws_account_id() -> str:
-    return _server().AWS_ACCOUNT_ID
+    return _AWS_ACCOUNT_ID
 
 
 def _sqs_state() -> dict:
-    return _server().sqs_state
+    return _sqs_state_proxy
 
 
 def _sqs_queue_key(queue_name: str) -> str:
@@ -285,7 +275,7 @@ def _sqs_enqueue_message(queue: dict, body: str, attributes: dict | None = None,
                 if parsed_sent and parsed_sent >= dedup_window_start:
                     return existing
     message = {
-        "message_id": _server()._id("msg"),
+        "message_id": _id_gen("msg"),
         "body": body,
         "attributes": copy.deepcopy(attributes or {}),
         "message_attributes": copy.deepcopy(message_attributes or {}),
@@ -432,7 +422,7 @@ def _sqs_extract_messages_for_delivery(queue: dict, max_messages: int) -> list[d
             message["deleted"] = True
             continue
         message["in_flight"] = True
-        message["receipt_handle"] = _server()._id("rhdl")
+        message["receipt_handle"] = _id_gen("rhdl")
         message["visible_at"] = (now + timedelta(seconds=visibility)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
         deliveries.append(message)
     queue["last_modified"] = _now()
@@ -495,7 +485,7 @@ def _fmt_size(n: int) -> str:
 
 
 def _ddb_state() -> dict:
-    return _server().ddb_state
+    return _ddb_state_proxy
 
 
 def _ddb_tables() -> dict:
@@ -1378,7 +1368,7 @@ def api_dynamodb_untag_table(table_name: str, payload: dict[str, Any]):
 
 
 def _lambda_state() -> dict:
-    return _server().lambda_state
+    return _lambda_state_proxy
 
 
 def _lambda_function_key(function_name: str) -> str:
@@ -1575,7 +1565,7 @@ def _lambda_run_handler(function: dict, event_payload: Any) -> dict:
 
 def _lambda_record_invocation(function: dict, invocation_type: str, event_payload: Any, run_result: dict, source: str = "", source_principal: str = "", source_arn: str = "", source_account: str = "") -> dict:
     record = {
-        "id": _server()._id("laminv"),
+        "id": _id_gen("laminv"),
         "at": _now(),
         "function_name": function.get("function_name", ""),
         "function_arn": function.get("function_arn", ""),
@@ -1609,7 +1599,7 @@ def _lambda_invoke_function(function_name: str, event_payload: Any, invocation_t
     normalized = (invocation_type or "RequestResponse").strip().lower()
     if normalized == "event":
         record = {
-            "id": _server()._id("laminv"),
+            "id": _id_gen("laminv"),
             "at": _now(),
             "function_name": function.get("function_name", ""),
             "function_arn": function.get("function_arn", ""),
@@ -1679,7 +1669,7 @@ def _lambda_invoke_response(function_name: str, event_payload: Any, invocation_t
 
 
 def _apigw_state() -> dict:
-    return _server().apigw_state
+    return _apigw_state_proxy
 
 
 def _apigw_api(api_id: str) -> dict | None:

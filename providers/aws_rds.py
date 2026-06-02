@@ -4,6 +4,8 @@ from typing import Any
 
 from fastapi import HTTPException
 
+from core.app_context import rds_state, vpc_state
+
 
 def _server():
     import server as server_module
@@ -79,7 +81,7 @@ def api_rds_delete_database(db_instance_identifier: str, skip_final_snapshot: bo
 
 def api_rds_list_subnet_groups():
     s = _server()
-    return {"db_subnet_groups": list(sorted(s.rds_state["db_subnet_groups"].values(), key=lambda item: item.get("db_subnet_group_name", ""))), "count": len(s.rds_state["db_subnet_groups"])}
+    return {"db_subnet_groups": list(sorted(rds_state["db_subnet_groups"].values(), key=lambda item: item.get("db_subnet_group_name", ""))), "count": len(rds_state["db_subnet_groups"])}
 
 
 def api_rds_create_subnet_group(req):
@@ -87,12 +89,12 @@ def api_rds_create_subnet_group(req):
     name = req.db_subnet_group_name.strip().lower()
     if not name:
         raise HTTPException(400, detail="MissingParameter: DBSubnetGroupName")
-    if name in s.rds_state["db_subnet_groups"]:
+    if name in rds_state["db_subnet_groups"]:
         raise HTTPException(400, detail="DBSubnetGroupAlreadyExists")
     vpc_id = req.vpc_id or s._rds_vpc_id()
     if not vpc_id:
         raise HTTPException(400, detail="NoSuchVpc")
-    subnet_ids = [sid for sid in req.subnet_ids if sid in s.vpc_state.get("subnets", {}) and s.vpc_state["subnets"][sid].get("vpc_id") == vpc_id]
+    subnet_ids = [sid for sid in req.subnet_ids if sid in vpc_state.get("subnets", {}) and vpc_state["subnets"][sid].get("vpc_id") == vpc_id]
     if not subnet_ids:
         subnet_ids = s._rds_default_subnet_ids(vpc_id)
     return s._rds_make_db_subnet_group(name, req.db_subnet_group_description or name, vpc_id, subnet_ids, req.tags or [])
@@ -101,18 +103,18 @@ def api_rds_create_subnet_group(req):
 def api_rds_delete_subnet_group(db_subnet_group_name: str):
     s = _server()
     name = db_subnet_group_name.lower()
-    for db in s.rds_state["db_instances"].values():
+    for db in rds_state["db_instances"].values():
         if db.get("db_subnet_group_name") == name:
             raise HTTPException(409, detail="InvalidDBSubnetGroupState")
-    if name not in s.rds_state["db_subnet_groups"]:
+    if name not in rds_state["db_subnet_groups"]:
         raise HTTPException(404, detail="DBSubnetGroupNotFound")
-    del s.rds_state["db_subnet_groups"][name]
+    del rds_state["db_subnet_groups"][name]
     return {"deleted": True, "db_subnet_group_name": name}
 
 
 def api_rds_list_parameter_groups():
     s = _server()
-    return {"db_parameter_groups": list(sorted(s.rds_state["db_parameter_groups"].values(), key=lambda item: item.get("db_parameter_group_name", ""))), "count": len(s.rds_state["db_parameter_groups"])}
+    return {"db_parameter_groups": list(sorted(rds_state["db_parameter_groups"].values(), key=lambda item: item.get("db_parameter_group_name", ""))), "count": len(rds_state["db_parameter_groups"])}
 
 
 def api_rds_create_parameter_group(req):
@@ -120,7 +122,7 @@ def api_rds_create_parameter_group(req):
     name = req.db_parameter_group_name.strip().lower()
     if not name:
         raise HTTPException(400, detail="MissingParameter: DBParameterGroupName")
-    if name in s.rds_state["db_parameter_groups"]:
+    if name in rds_state["db_parameter_groups"]:
         raise HTTPException(400, detail="DBParameterGroupAlreadyExists")
     return s._rds_make_db_parameter_group(name, req.family, req.description or name, req.tags or [])
 
@@ -128,18 +130,18 @@ def api_rds_create_parameter_group(req):
 def api_rds_delete_parameter_group(db_parameter_group_name: str):
     s = _server()
     name = db_parameter_group_name.lower()
-    for db in s.rds_state["db_instances"].values():
+    for db in rds_state["db_instances"].values():
         if db.get("db_parameter_group_name") == name:
             raise HTTPException(409, detail="InvalidDBParameterGroupState")
-    if name not in s.rds_state["db_parameter_groups"]:
+    if name not in rds_state["db_parameter_groups"]:
         raise HTTPException(404, detail="DBParameterGroupNotFound")
-    del s.rds_state["db_parameter_groups"][name]
+    del rds_state["db_parameter_groups"][name]
     return {"deleted": True, "db_parameter_group_name": name}
 
 
 def api_rds_list_snapshots():
     s = _server()
-    return {"db_snapshots": [s._rds_db_snapshot_view(snapshot) for snapshot in sorted(s.rds_state["db_snapshots"].values(), key=lambda item: item.get("created", ""))], "count": len(s.rds_state["db_snapshots"])}
+    return {"db_snapshots": [s._rds_db_snapshot_view(snapshot) for snapshot in sorted(rds_state["db_snapshots"].values(), key=lambda item: item.get("created", ""))], "count": len(rds_state["db_snapshots"])}
 
 
 def api_rds_create_snapshot(db_instance_identifier: str, req):

@@ -9,6 +9,13 @@ from .aws import tool_response as aws_tool_response
 from . import aws_iam
 from . import aws_rds, aws_services, aws_vpc
 from core.tooling_simulators import aws_cli_resolve, sdk_snippet
+from core import models as _models
+from routes import aws_lambda as _routes_lambda
+from routes import aws_sqs as _routes_sqs
+from routes import aws_vpc as _routes_vpc
+from routes import aws_rds as _routes_rds
+from routes import aws_apigw as _routes_apigw
+from routes import aws_dynamodb as _routes_dynamodb
 
 
 _TARGET_OVERRIDES = {
@@ -74,6 +81,91 @@ _TARGET_OVERRIDES = {
 for _name in aws_services.TARGETS:
     _TARGET_OVERRIDES[_name] = getattr(aws_services, _name)
 
+# Prefer route-module implementations where they exist (they still delegate
+# to server.py helpers, but the handler layer is cleanly separated).
+for _name in [
+    "api_lambda_list_functions", "api_lambda_create_function",
+    "api_lambda_get_function", "api_lambda_update_function_code",
+    "api_lambda_update_function_configuration", "api_lambda_delete_function",
+    "api_lambda_get_policy", "api_lambda_add_permission",
+    "api_lambda_remove_permission", "api_lambda_list_invocations",
+    "api_lambda_list_versions", "api_lambda_publish_version",
+    "api_lambda_invoke_function",
+    "api_lambda_list_functions_aws", "api_lambda_create_function_aws",
+    "api_lambda_get_function_aws", "api_lambda_delete_function_aws",
+    "api_lambda_get_policy_aws", "api_lambda_add_permission_aws",
+    "api_lambda_remove_permission_aws", "api_lambda_update_function_code_aws",
+    "api_lambda_update_function_configuration_aws",
+    "api_lambda_publish_version_aws", "api_lambda_list_versions_aws",
+    "api_lambda_invoke_function_aws",
+]:
+    if hasattr(_routes_lambda, _name):
+        _TARGET_OVERRIDES[_name] = getattr(_routes_lambda, _name)
+
+for _name in [
+    "api_sqs_query", "api_sqs_list_queues", "api_sqs_create_queue",
+    "api_sqs_get_queue", "api_sqs_update_queue", "api_sqs_delete_queue",
+    "api_sqs_list_messages", "api_sqs_send_message", "api_sqs_receive_message",
+    "api_sqs_delete_message", "api_sqs_change_visibility", "api_sqs_purge",
+    "api_sqs_list_tags", "api_sqs_tag_queue", "api_sqs_untag_queue",
+]:
+    if hasattr(_routes_sqs, _name):
+        _TARGET_OVERRIDES[_name] = getattr(_routes_sqs, _name)
+
+for _name in [
+    "api_vpc_list_vpcs", "api_vpc_create", "api_vpc_delete",
+    "api_vpc_create_subnet", "api_vpc_create_security_group",
+    "api_vpc_add_ingress", "api_vpc_list_subnets",
+    "api_vpc_list_security_groups", "api_vpc_list_route_tables",
+    "api_vpc_create_route_table", "api_vpc_list_internet_gateways",
+    "api_vpc_create_internet_gateway", "api_vpc_attach_internet_gateway",
+    "api_vpc_add_route", "api_vpc_associate_subnet", "api_vpc_resources",
+    "api_vpc_query",
+]:
+    if hasattr(_routes_vpc, _name):
+        _TARGET_OVERRIDES[_name] = getattr(_routes_vpc, _name)
+
+for _name in [
+    "api_apigateway_list_apis", "api_apigateway_create_api",
+    "api_apigateway_get_api", "api_apigateway_delete_api",
+    "api_apigateway_list_resources", "api_apigateway_create_resource",
+    "api_apigateway_put_method", "api_apigateway_put_integration",
+    "api_apigateway_create_deployment", "api_apigateway_list_deployments",
+    "api_apigateway_create_stage", "api_apigateway_list_stages",
+    "api_apigateway_list_logs",
+    "api_apigateway_invoke_path", "api_apigateway_invoke_root",
+]:
+    if hasattr(_routes_apigw, _name):
+        _TARGET_OVERRIDES[_name] = getattr(_routes_apigw, _name)
+
+for _name in [
+    "api_dynamodb_list_tables", "api_dynamodb_create_table",
+    "api_dynamodb_get_table", "api_dynamodb_delete_table",
+    "api_dynamodb_list_items", "api_dynamodb_put_item",
+    "api_dynamodb_update_item", "api_dynamodb_delete_item",
+    "api_dynamodb_query_items", "api_dynamodb_scan_items",
+    "api_dynamodb_list_tags", "api_dynamodb_tag_table",
+    "api_dynamodb_untag_table",
+    "api_dynamodb_aws",
+]:
+    if hasattr(_routes_dynamodb, _name):
+        _TARGET_OVERRIDES[_name] = getattr(_routes_dynamodb, _name)
+
+for _name in [
+    "api_rds_list_databases", "api_rds_create_database",
+    "api_rds_get_database", "api_rds_start_database",
+    "api_rds_stop_database", "api_rds_reboot_database",
+    "api_rds_modify_database", "api_rds_delete_database",
+    "api_rds_list_subnet_groups", "api_rds_create_subnet_group",
+    "api_rds_delete_subnet_group", "api_rds_list_parameter_groups",
+    "api_rds_create_parameter_group", "api_rds_delete_parameter_group",
+    "api_rds_list_snapshots", "api_rds_create_snapshot",
+    "api_rds_restore_snapshot", "api_rds_add_tags", "api_rds_list_tags",
+    "api_rds_query",
+]:
+    if hasattr(_routes_rds, _name):
+        _TARGET_OVERRIDES[_name] = getattr(_routes_rds, _name)
+
 
 def tool_response(tool: str) -> dict:
     return aws_tool_response(tool)
@@ -103,7 +195,6 @@ def _proxy(target_name: str, signature: str, body_mode: str = "none", body_targe
     stub_signature = inspect.signature(namespace["_stub"])
 
     async def endpoint(**kwargs):
-        server = _server()
         if body_mode == "json":
             request = kwargs.pop("request", None)
             payload: dict[str, Any] = {}
@@ -121,9 +212,9 @@ def _proxy(target_name: str, signature: str, body_mode: str = "none", body_targe
                     payload = await request.json()
                 except Exception:
                     payload = {}
-            model_cls = getattr(server, model_name)
+            model_cls = getattr(_models, model_name, None) or getattr(_server(), model_name)
             kwargs[body_target] = model_cls(**(payload if isinstance(payload, dict) else {}))
-        target = _TARGET_OVERRIDES.get(target_name) or getattr(server, target_name)
+        target = _TARGET_OVERRIDES.get(target_name) or getattr(_server(), target_name)
         result = target(**kwargs)
         if inspect.isawaitable(result):
             return await result

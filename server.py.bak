@@ -1,16 +1,11 @@
 #!/usr/bin/env python3
 """
-CloudLearn — Cloud Simulator (slim orchestrator)
+CloudLearn — S3 Simulator Bundle
+Implements the AWS S3 REST API (path-style) so boto3/aws-cli work with
+--endpoint-url http://localhost:9000
 
-This module wires together the extracted subsystems:
-  - core.app_context   — shared state, constants, proxies, tenants, utilities
-  - core.models        — Pydantic request/response models
-  - core.middleware     — all ASGI middleware layers
-  - routes/*           — FastAPI route handlers (20 modules)
-  - providers/*        — provider-specific dispatchers & helpers
-
-All business-logic helper functions that are still lazily imported by
-provider and route modules (``import server``) remain here.
+Also exposes a custom JSON API at /api/s3/* for the React UI.
+UI served at: http://localhost:9000
 """
 
 import base64
@@ -95,62 +90,18 @@ from providers import azure_services as provider_azure_services
 from providers.azure_services import register as register_azure_routes
 from core.tooling_simulators import aws_cli_resolve, sdk_snippet
 
-# ── Re-exports for backward compatibility ─────────────────────────────
-from core.app_context import (
-    PLATFORM, STATE, STATE_LOCK, REQUEST_TENANT, REQUEST_PROVIDER, REQUEST_PUBLIC_BASE,
-    AWS_ACCOUNT_ID, DEFAULT_TENANT_ID, ALLOWED_PROVIDERS,
-    EC2_XML_NS, RDS_XML_NS, SQS_XML_NS, S3_NS,
-    STATE_FILE, LEGACY_STATE_FILE, STATE_VERSION,
-    LXD_RUNTIME_IMAGE, MULTIPASS_RUNTIME_IMAGE, LXD_CONSOLE_PORT,
-    EC2_TERMINATED_VISIBILITY_SECONDS, INSTANCE_WORK_ROOT,
-    _DEFAULT_RUNTIME_BUNDLES,
-    _SpaceScopedDictProxy,
-    buckets, objects, multiparts,
-    iam_state, ec2_state, gcp_compute_state, gcp_storage_state,
-    gcp_sql_state, gcp_pubsub_state, gcp_firestore_state,
-    gcp_functions_state, gcp_apigw_state, gcp_vpc_state, gcp_iam_state,
-    azure_arm_state, vpc_state, rds_state, apigw_state, lambda_state,
-    sqs_state, ddb_state, runtime_state, github_state,
-    now as _now, now_http as _now_http, iso_to_http_date as _iso_to_http_date,
-    parse_utc_timestamp as _parse_utc_timestamp,
-    id_gen as _id, public_ip as _public_ip, private_ip as _private_ip,
-    iam_root_principal as _iam_root_principal,
-    persist_state as _persist_state, load_state as _load_state,
-    record_usage as _record_usage,
-    spaces_state as _spaces_state,
-    tenants_state as _tenants_state, active_tenant_id as _active_tenant_id,
-    tenant_dict as _tenant_dict, ensure_default_tenant as _ensure_default_tenant,
-    tenant_scoped_bucket as _tenant_scoped_bucket,
-    terraform_state as _terraform_state, terraform_space_state as _terraform_space_state,
-    active_tier as _active_tier, enforce_quantity_cap as _enforce_quantity_cap,
-    enforce_tier_feature as _enforce_tier_feature, enforce_size_cap as _enforce_size_cap,
-    gcp_active_space_dict as _gcp_active_space_dict,
-    gcp_project_name as _gcp_project_name,
-    gcp_state_proxies as _gcp_state_proxies,
-    azure_state_dict as _azure_state_dict,
-    appliance_mode_enabled as _appliance_mode_enabled,
-    distribution_mode as _distribution_mode,
-    host_config as _host_config,
-    resolved_host_os as _resolved_host_os,
-    is_gcp_native_path as _is_gcp_native_path,
-    is_azure_native_path as _is_azure_native_path,
-    resolve_provider_service as _resolve_provider_service,
-    rate_limit_tenant as _rate_limit_tenant,
-    _GCP_CONSOLE_COLLECTIONS, _GCP_IAM_NESTED_COLLECTIONS,
-    init_azure_state,
-)
-
-from core.models import *  # noqa: F401,F403  — backward compat
-
-# ── App creation ──────────────────────────────────────────────────────
 app = FastAPI(title="CloudLearn Cloud Simulator", version="2.0.0", docs_url=None, redoc_url=None)
 
-# ── Backend route registration (EARLY) ───────────────────────────────
+# MVP P0: register backend-backed routes EARLY (before the S3 catch-all on
+# /{bucket} grabs /v1/projects/... or /azure-data/...). All three modules
+# follow the same shape: REST routes for GCP+Azure get mounted here; AWS
+# X-Amz-Target dispatchers are collected in _aws_xamz_dispatchers and
+# consumed by aws_query_root.
 _aws_xamz_dispatchers: dict = {}
 try:
     from core import vault_routes as _vault_routes
     _vault_routes.register(app, aws_dispatchers=_aws_xamz_dispatchers)
-except Exception:
+except Exception:  # never break startup
     pass
 try:
     from core import nats_routes as _nats_routes
@@ -163,45 +114,205 @@ try:
 except Exception:
     pass
 
-# ── Provider route registration ──────────────────────────────────────
-register_aws_ec2_routes(app, None)
-register_gcp_compute_routes(app, None)
-register_aws_routes(app, None)
-register_gcp_routes(app, None)
-register_azure_routes(app, None)
 
-# ── Route module registration ────────────────────────────────────────
-from routes import console, aws_extras, gcp_extras, tenants, config, licensing
-from routes import terraform, azure_console, cloudsim, spaces, gcp_console, runtime
-from routes import aws_apigw, aws_ec2, aws_lambda, aws_sqs, aws_vpc, aws_rds, aws_dynamodb
+@app.get("/api/runtime/backends", include_in_schema=False)
+def runtime_backends() -> dict:
+    """Status of all MVP P0 backends — what's real vs in-memory mock.
 
-for mod in [console, aws_extras, gcp_extras, tenants, config, licensing,
-            terraform, azure_console, cloudsim, spaces, gcp_console, runtime,
-            aws_apigw, aws_ec2, aws_lambda, aws_sqs, aws_vpc, aws_rds, aws_dynamodb]:
-    mod.register(app)
+    This is what the console badges + ``cloud-learn doctor`` should call to
+    surface which services are running on a real engine vs a mock.
+    """
+    results: dict = {}
+    try:
+        from core import vault_client as _vc
+        results["vault"] = {
+            "url": _vc._VAULT_URL,
+            "available": _vc.available(),
+            "backs": ["AWS KMS", "AWS Secrets Manager", "GCP Cloud KMS",
+                      "GCP Secret Manager", "Azure Key Vault (keys + secrets)"],
+        }
+    except Exception as exc:
+        results["vault"] = {"available": False, "error": repr(exc)}
+    try:
+        from core import nats_client as _nc
+        results["nats"] = {
+            "url": _nc._NATS_URL,
+            "available": _nc.available(),
+            "backs": ["AWS EventBridge", "GCP Eventarc", "Azure Event Grid"],
+        }
+    except Exception as exc:
+        results["nats"] = {"available": False, "error": repr(exc)}
+    try:
+        from core import minio_mirror as _mm
+        results["minio"] = {
+            "url": _mm._MINIO_URL,
+            "available": _mm.available(),
+            "backs": ["AWS S3 (write-through real bytes)"],
+        }
+    except Exception as exc:
+        results["minio"] = {"available": False, "error": repr(exc)}
+    try:
+        from core import dynamodb_proxy as _dp
+        results["dynamodb-local"] = {
+            "url": _dp._DDB_URL,
+            "available": _dp.available(),
+            "backs": ["AWS DynamoDB (full proxy)"],
+        }
+    except Exception as exc:
+        results["dynamodb-local"] = {"available": False, "error": repr(exc)}
+    try:
+        from core import elasticmq_proxy as _emq
+        results["elasticmq"] = {
+            "url": _emq._EMQ_URL,
+            "available": _emq.available(),
+            "backs": ["AWS SQS (legacy/query protocol; modern JSON-RPC stays in-memory)"],
+        }
+    except Exception as exc:
+        results["elasticmq"] = {"available": False, "error": repr(exc)}
+    try:
+        from core import cedar_engine as _ce
+        results["cedar"] = {
+            "available": _ce.available(),
+            "backs": ["AWS IAM (JSON policies)", "GCP IAM (bindings)",
+                      "Azure RBAC (role assignments)"],
+        }
+    except Exception as exc:
+        results["cedar"] = {"available": False, "error": repr(exc)}
+    try:
+        from core import gcp_sql_engine as _eng
+        results["postgres"] = {
+            "available": _eng.available("postgres"),
+            "backs": ["GCP Cloud SQL Postgres", "Azure Database for PostgreSQL",
+                      "Azure SQL (Microsoft.Sql/servers/databases)"],
+        }
+        results["mysql"] = {
+            "available": _eng.available("mysql"),
+            "backs": ["GCP Cloud SQL MySQL", "Azure Database for MySQL"],
+        }
+    except Exception as exc:
+        results["postgres"] = {"available": False, "error": repr(exc)}
+    summary = {
+        "ready": sum(1 for v in results.values() if v.get("available")),
+        "total": len(results),
+    }
+    return {"backends": results, "summary": summary}
 
-# ── Middleware registration ──────────────────────────────────────────
-from core.middleware import register_middleware
-register_middleware(app)
 
-# ── Azure state injection ────────────────────────────────────────────
-init_azure_state()
-
-# ── Static files mount ───────────────────────────────────────────────
-STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
-os.makedirs(STATIC_DIR, exist_ok=True)
-_UI_HTML = os.path.join(STATIC_DIR, "index.html")
-app.mount("/assets", StaticFiles(directory=STATIC_DIR), name="assets")
-
-# ── S3 catch-all routes — LAST ──────────────────────────────────────
-from routes import aws_s3
-aws_s3.register(app, aws_xamz_dispatchers=_aws_xamz_dispatchers)
+def _swagger_html(openapi_url: str, title: str):
+    """Swagger UI from locally-bundled assets (works fully offline)."""
+    from fastapi.openapi.docs import get_swagger_ui_html
+    return get_swagger_ui_html(
+        openapi_url=openapi_url,
+        title=title,
+        swagger_js_url="/assets/swagger/swagger-ui-bundle.js",
+        swagger_css_url="/assets/swagger/swagger-ui.css",
+        swagger_favicon_url="/assets/swagger/favicon-32x32.png",
+    )
 
 
-# ═══════════════════════════════════════════════════════════════════════
-# Business-logic helper functions still referenced by lazy import server
-# ═══════════════════════════════════════════════════════════════════════
+def _openapi_subset(provider: str) -> dict:
+    """A per-provider OpenAPI spec: keep only that provider's paths so AWS and GCP
+    each get their own Swagger console instead of one giant combined list."""
+    import copy
+    spec = copy.deepcopy(app.openapi())
+    label = "GCP" if provider == "gcp" else "AWS"
+    spec["info"] = {**spec.get("info", {}), "title": f"CloudLearn — {label} API"}
+    paths = spec.get("paths", {}) or {}
+    spec["paths"] = {p: it for p, it in paths.items() if _is_gcp_native_path(p) == (provider == "gcp")}
+    # Prune now-unreferenced tags (cosmetic).
+    return spec
 
+
+@app.get("/openapi-gcp.json", include_in_schema=False)
+def openapi_gcp():
+    from fastapi.responses import JSONResponse
+    return JSONResponse(_openapi_subset("gcp"))
+
+
+@app.get("/openapi-aws.json", include_in_schema=False)
+def openapi_aws():
+    from fastapi.responses import JSONResponse
+    return JSONResponse(_openapi_subset("aws"))
+
+
+@app.get("/openapi-azure.json", include_in_schema=False)
+def openapi_azure():
+    from fastapi.responses import JSONResponse
+    return JSONResponse(provider_azure_services.build_openapi())
+
+
+@app.get("/docs/azure", include_in_schema=False)
+def docs_azure():
+    return _swagger_html("/openapi-azure.json", "CloudLearn — Azure API")
+
+
+# Short-path redirects: the main SPA's space-filter buttons navigate to
+# /aws, /gcp, /azure (e.g. clicking the "AWS spaces" filter chip). Without
+# these explicit routes, FastAPI matches @app.get("/{bucket}") (the S3
+# catch-all) and returns "NoSuchBucket". Register a permanent redirect to
+# the per-provider console so browser clicks land somewhere meaningful.
+# Registered BEFORE /console/* and the S3 catch-all so they win route
+# matching for single-segment provider paths.
+@app.get("/aws", include_in_schema=False)
+def _shortpath_aws():
+    from fastapi.responses import RedirectResponse
+    return RedirectResponse(url="/console/aws", status_code=302)
+
+
+@app.get("/gcp", include_in_schema=False)
+def _shortpath_gcp():
+    from fastapi.responses import RedirectResponse
+    return RedirectResponse(url="/console/gcp", status_code=302)
+
+
+@app.get("/azure", include_in_schema=False)
+def _shortpath_azure():
+    from fastapi.responses import RedirectResponse
+    return RedirectResponse(url="/console/azure", status_code=302)
+
+
+# ── Tier launch page ────────────────────────────────────────────────────
+# /pricing renders the 4-tier comparison page (Free/Student/Developer/
+# Enterprise) with INR pricing, Monthly/Annual toggle, and a "Current Plan"
+# highlight on the active tier. Users land here first — after picking a
+# tier the "Continue to console" button sets a cookie and goes to /.
+@app.get("/pricing", include_in_schema=False)
+def pricing_page():
+    from fastapi.responses import HTMLResponse
+    html_path = os.path.join(os.path.dirname(__file__), "static", "pricing.html")
+    with open(html_path, "rb") as f:
+        return HTMLResponse(content=f.read().decode("utf-8"),
+                            headers={"Cache-Control": "no-store, max-age=0"})
+
+
+@app.get("/console/azure", include_in_schema=False)
+@app.get("/console/azure/{path:path}", include_in_schema=False)
+def console_azure(path: str = ""):
+    from fastapi.responses import HTMLResponse
+    html_path = os.path.join(os.path.dirname(__file__), "static", "azure-console.html")
+    with open(html_path, "rb") as f:
+        return HTMLResponse(content=f.read().decode("utf-8"), headers={"Cache-Control": "no-store, max-age=0"})
+
+
+# Cross-cloud parity: standalone AWS console (mirrors /console/azure layout +
+# Phases A–E renderer patterns). Catalog endpoint feeds it via a single fetch.
+@app.get("/console/aws", include_in_schema=False)
+@app.get("/console/aws/{path:path}", include_in_schema=False)
+def console_aws(path: str = ""):
+    from fastapi.responses import HTMLResponse
+    html_path = os.path.join(os.path.dirname(__file__), "static", "aws-console.html")
+    with open(html_path, "rb") as f:
+        return HTMLResponse(content=f.read().decode("utf-8"), headers={"Cache-Control": "no-store, max-age=0"})
+
+
+@app.get("/api/aws/catalog", include_in_schema=False)
+def api_aws_catalog():
+    from fastapi.responses import JSONResponse
+    from providers.aws_catalog import build_console_payload
+    space = PLATFORM.get_active_space() or {}
+    region  = str(space.get("active_region") or "us-east-1")
+    account = str(space.get("active_account") or "123456789012")
+    return JSONResponse(build_console_payload(active_region=region, active_account=account))
 
 
 # ===========================================================================
@@ -366,6 +477,98 @@ def _aws_extras_derive(stub_key: str) -> list[dict]:
     return []
 
 
+@app.get("/api/aws/extras/{stub_path:path}", include_in_schema=False)
+def api_aws_extras_get(stub_path: str):
+    from core.aws_rail_extras import EXTRAS
+    schema = EXTRAS.get(stub_path)
+    if not schema:
+        raise HTTPException(status_code=404, detail=f"Unknown stub: {stub_path}")
+    if schema.get("derived_from"):
+        return {"items": _aws_extras_derive(stub_path), "derived": True,
+                "schema": {"category": schema.get("category"), "columns": schema.get("columns")}}
+    _aws_extras_seed_if_needed(stub_path)
+    slot = _aws_extras_state(stub_path)
+    return {"items": list(slot["items"].values()), "derived": False,
+            "schema": {"category": schema.get("category"), "columns": schema.get("columns")}}
+
+
+@app.post("/api/aws/extras/{stub_path:path}", include_in_schema=False)
+def api_aws_extras_create(stub_path: str, payload: dict[str, Any] | None = None):
+    from core.aws_rail_extras import EXTRAS
+    import secrets as _sec
+    schema = EXTRAS.get(stub_path)
+    if not schema:
+        raise HTTPException(status_code=404, detail=f"Unknown stub: {stub_path}")
+    if schema.get("derived_from"):
+        raise HTTPException(status_code=400, detail="Derived collection — create via the source service.")
+    if schema.get("category") == "config":
+        raise HTTPException(status_code=400, detail="Use PUT to update config.")
+    payload = dict(payload or {})
+    # Find a name field; auto-generate if missing.
+    name = payload.get("name") or payload.get("id")
+    if not name:
+        prefix = stub_path.split("/")[-1].split("-")[0][:3]
+        name = f"{prefix}-{_sec.token_hex(4)}"
+    payload["name"] = name
+    payload.setdefault("created", _now() if "_now" in globals() else "")
+    # Backfill expected columns with a placeholder so the row renders cleanly.
+    for col_path, _ in (schema.get("columns") or []):
+        if "." not in col_path and col_path not in payload:
+            payload[col_path] = payload.get(col_path, "—")
+    slot = _aws_extras_state(stub_path)
+    slot["items"][name] = payload
+    slot["seeded"] = True
+    _persist_state()
+    return payload
+
+
+@app.delete("/api/aws/extras/{stub_path:path}", include_in_schema=False)
+def api_aws_extras_delete_one(stub_path: str):
+    """Delete by name. URL pattern is /api/aws/extras/<svc>/<stub>/<name> —
+    the last segment is the item name. Because :path captures everything, we
+    split here at the last slash."""
+    from core.aws_rail_extras import EXTRAS
+    parts = stub_path.rsplit("/", 1)
+    if len(parts) != 2:
+        raise HTTPException(status_code=400, detail="Expected /api/aws/extras/<service>/<stub>/<name>")
+    key, name = parts
+    schema = EXTRAS.get(key)
+    if not schema:
+        raise HTTPException(status_code=404, detail=f"Unknown stub: {key}")
+    if schema.get("derived_from"):
+        raise HTTPException(status_code=400, detail="Derived collection — delete via the source service.")
+    slot = _aws_extras_state(key)
+    slot["items"].pop(name, None)
+    _persist_state()
+    return {"deleted": True, "name": name}
+
+
+@app.get("/api/aws/extras-config/{stub_path:path}", include_in_schema=False)
+def api_aws_extras_config_get(stub_path: str):
+    """Config-category stubs are a single editable record (e.g. S3 Block
+    Public Access). Returns {values: {...}, schema: {fields, defaults}}."""
+    from core.aws_rail_extras import EXTRAS
+    schema = EXTRAS.get(stub_path)
+    if not schema or schema.get("category") != "config":
+        raise HTTPException(status_code=404, detail=f"Not a config stub: {stub_path}")
+    slot = _aws_extras_state(stub_path)
+    if not slot.get("seeded"):
+        slot["items"] = dict(schema.get("defaults") or {})
+        slot["seeded"] = True
+    return {"values": slot["items"], "schema": {"fields": schema.get("fields"), "defaults": schema.get("defaults")}}
+
+
+@app.put("/api/aws/extras-config/{stub_path:path}", include_in_schema=False)
+def api_aws_extras_config_put(stub_path: str, payload: dict[str, Any] | None = None):
+    from core.aws_rail_extras import EXTRAS
+    schema = EXTRAS.get(stub_path)
+    if not schema or schema.get("category") != "config":
+        raise HTTPException(status_code=404, detail=f"Not a config stub: {stub_path}")
+    slot = _aws_extras_state(stub_path)
+    slot["items"] = dict(payload or {})
+    slot["seeded"] = True
+    _persist_state()
+    return {"values": slot["items"]}
 
 
 # ===========================================================================
@@ -408,6 +611,81 @@ def _gcp_extras_seed_if_needed(stub_key: str) -> None:
     slot["seeded"] = True
 
 
+@app.get("/api/gcp/extras/{stub_path:path}", include_in_schema=False)
+def api_gcp_extras_get(stub_path: str):
+    from core.gcp_rail_extras import EXTRAS
+    schema = EXTRAS.get(stub_path)
+    if not schema:
+        raise HTTPException(status_code=404, detail=f"Unknown GCP stub: {stub_path}")
+    _gcp_extras_seed_if_needed(stub_path)
+    slot = _gcp_extras_state(stub_path)
+    return {"items": list(slot["items"].values()), "derived": False,
+            "schema": {"category": schema.get("category"), "columns": schema.get("columns")}}
+
+
+@app.post("/api/gcp/extras/{stub_path:path}", include_in_schema=False)
+def api_gcp_extras_create(stub_path: str, payload: dict[str, Any] | None = None):
+    from core.gcp_rail_extras import EXTRAS
+    import secrets as _sec
+    schema = EXTRAS.get(stub_path)
+    if not schema:
+        raise HTTPException(status_code=404, detail=f"Unknown GCP stub: {stub_path}")
+    payload = dict(payload or {})
+    name = payload.get("name") or payload.get("id")
+    if not name:
+        prefix = stub_path.split("/")[-1].split("-")[0][:3]
+        name = f"{prefix}-{_sec.token_hex(4)}"
+    payload["name"] = name
+    payload.setdefault("created", _now() if "_now" in globals() else "")
+    for col_path, _ in (schema.get("columns") or []):
+        if "." not in col_path and col_path not in payload:
+            payload[col_path] = payload.get(col_path, "—")
+    slot = _gcp_extras_state(stub_path)
+    slot["items"][name] = payload
+    slot["seeded"] = True
+    _persist_state()
+    return payload
+
+
+@app.delete("/api/gcp/extras/{stub_path:path}", include_in_schema=False)
+def api_gcp_extras_delete_one(stub_path: str):
+    from core.gcp_rail_extras import EXTRAS
+    parts = stub_path.rsplit("/", 1)
+    if len(parts) != 2:
+        raise HTTPException(status_code=400, detail="Expected /api/gcp/extras/<service>/<stub>/<name>")
+    key, name = parts
+    if key not in EXTRAS:
+        raise HTTPException(status_code=404, detail=f"Unknown GCP stub: {key}")
+    slot = _gcp_extras_state(key)
+    slot["items"].pop(name, None)
+    _persist_state()
+    return {"deleted": True, "name": name}
+
+
+@app.get("/api/gcp/extras-config/{stub_path:path}", include_in_schema=False)
+def api_gcp_extras_config_get(stub_path: str):
+    from core.gcp_rail_extras import EXTRAS
+    schema = EXTRAS.get(stub_path)
+    if not schema or schema.get("category") != "config":
+        raise HTTPException(status_code=404, detail=f"Not a GCP config stub: {stub_path}")
+    slot = _gcp_extras_state(stub_path)
+    if not slot.get("seeded"):
+        slot["items"] = dict(schema.get("defaults") or {})
+        slot["seeded"] = True
+    return {"values": slot["items"], "schema": {"fields": schema.get("fields"), "defaults": schema.get("defaults")}}
+
+
+@app.put("/api/gcp/extras-config/{stub_path:path}", include_in_schema=False)
+def api_gcp_extras_config_put(stub_path: str, payload: dict[str, Any] | None = None):
+    from core.gcp_rail_extras import EXTRAS
+    schema = EXTRAS.get(stub_path)
+    if not schema or schema.get("category") != "config":
+        raise HTTPException(status_code=404, detail=f"Not a GCP config stub: {stub_path}")
+    slot = _gcp_extras_state(stub_path)
+    slot["items"] = dict(payload or {})
+    slot["seeded"] = True
+    _persist_state()
+    return {"values": slot["items"]}
 
 
 # ── GCP API Gateway — minimal handlers ──────────────────────────────────────
@@ -429,8 +707,136 @@ def _gcp_apigateway_state(project: str, kind: str) -> dict:
     return proj.setdefault(kind, {})
 
 
+@app.get("/api/gcp/apigateway/v1/projects/{project}/locations/global/apis", include_in_schema=False)
+def gcp_apigateway_list_apis(project: str):
+    apis = _gcp_apigateway_state(project, "apis")
+    return {
+        "apis": [
+            {
+                "name": f"projects/{project}/locations/global/apis/{name}",
+                "displayName": rec.get("displayName", name),
+                "createTime": rec.get("createTime", ""),
+                "state": rec.get("state", "ACTIVE"),
+                "managedService": rec.get("managedService", f"{name}.apigateway.{project}.cloud.goog"),
+                "labels": rec.get("labels", {}),
+            }
+            for name, rec in apis.items()
+        ],
+    }
 
 
+@app.post("/api/gcp/apigateway/v1/projects/{project}/locations/global/apis", include_in_schema=False)
+async def gcp_apigateway_create_api(project: str, request: Request):
+    api_id = request.query_params.get("apiId", "")
+    body = await request.json() if (await request.body()) else {}
+    name = api_id or body.get("name") or f"api-{uuid.uuid4().hex[:6]}"
+    rec = {
+        "displayName": body.get("displayName", name),
+        "createTime": _now(),
+        "state": "ACTIVE",
+        "managedService": f"{name}.apigateway.{project}.cloud.goog",
+        "labels": body.get("labels", {}),
+    }
+    _gcp_apigateway_state(project, "apis")[name] = rec
+    _persist_state()
+    return {
+        "name": f"projects/{project}/locations/global/operations/op-{uuid.uuid4().hex[:8]}",
+        "metadata": {"@type": "type.googleapis.com/google.cloud.apigateway.v1.OperationMetadata",
+                     "target": f"projects/{project}/locations/global/apis/{name}"},
+        "done": True,
+        "response": {"@type": "type.googleapis.com/google.cloud.apigateway.v1.Api",
+                     "name": f"projects/{project}/locations/global/apis/{name}", **rec},
+    }
+
+
+@app.get("/api/gcp/apigateway/v1/projects/{project}/locations/global/apis/{name}", include_in_schema=False)
+def gcp_apigateway_get_api(project: str, name: str):
+    apis = _gcp_apigateway_state(project, "apis")
+    if name not in apis:
+        raise HTTPException(404, detail=f"API '{name}' not found")
+    rec = apis[name]
+    return {
+        "name": f"projects/{project}/locations/global/apis/{name}",
+        "displayName": rec.get("displayName", name),
+        "createTime": rec.get("createTime", ""),
+        "state": rec.get("state", "ACTIVE"),
+        "managedService": rec.get("managedService", f"{name}.apigateway.{project}.cloud.goog"),
+        "labels": rec.get("labels", {}),
+    }
+
+
+@app.delete("/api/gcp/apigateway/v1/projects/{project}/locations/global/apis/{name}", include_in_schema=False)
+def gcp_apigateway_delete_api(project: str, name: str):
+    apis = _gcp_apigateway_state(project, "apis")
+    apis.pop(name, None)
+    _persist_state()
+    return {"name": f"projects/{project}/locations/global/operations/op-{uuid.uuid4().hex[:8]}",
+            "done": True}
+
+
+@app.get("/api/gcp/apigateway/v1/projects/{project}/locations/global/apis/{api}/configs", include_in_schema=False)
+def gcp_apigateway_list_configs(project: str, api: str):
+    configs = _gcp_apigateway_state(project, "configs").get(api, {})
+    return {"apiConfigs": [
+        {"name": f"projects/{project}/locations/global/apis/{api}/configs/{c}",
+         "displayName": rec.get("displayName", c),
+         "createTime": rec.get("createTime", ""), "state": rec.get("state", "ACTIVE")}
+        for c, rec in configs.items()
+    ]}
+
+
+@app.get("/api/gcp/apigateway/v1/projects/{project}/locations/global/gateways", include_in_schema=False)
+def gcp_apigateway_list_gateways(project: str):
+    gws = _gcp_apigateway_state(project, "gateways")
+    return {"gateways": [
+        {"name": f"projects/{project}/locations/global/gateways/{name}",
+         "displayName": rec.get("displayName", name),
+         "apiConfig": rec.get("apiConfig", ""),
+         "createTime": rec.get("createTime", ""), "state": rec.get("state", "ACTIVE"),
+         "defaultHostname": f"{name}-{uuid.uuid4().hex[:8]}.uc.gateway.dev"}
+        for name, rec in gws.items()
+    ]}
+
+
+# Cross-cloud parity Step 2: standalone GCP console (mirrors /console/azure
+# and /console/aws). Catalog endpoint feeds it via a single fetch.
+@app.get("/console/gcp", include_in_schema=False)
+@app.get("/console/gcp/{path:path}", include_in_schema=False)
+def console_gcp(path: str = ""):
+    from fastapi.responses import HTMLResponse
+    html_path = os.path.join(os.path.dirname(__file__), "static", "gcp-console.html")
+    with open(html_path, "rb") as f:
+        return HTMLResponse(content=f.read().decode("utf-8"), headers={"Cache-Control": "no-store, max-age=0"})
+
+
+@app.get("/api/gcp/catalog", include_in_schema=False)
+def api_gcp_catalog():
+    from fastapi.responses import JSONResponse
+    from providers.gcp_catalog import build_console_payload
+    space = PLATFORM.get_active_space() or {}
+    project = str(space.get("active_account") or "cloudlearn")
+    region  = str(space.get("active_region") or "us-central1")
+    # Derive a zone from the region (real GCP would let user pick; this is a
+    # sensible default for the console shell).
+    zone = region + "-a"
+    return JSONResponse(build_console_payload(active_project=project,
+                                              active_region=region,
+                                              active_zone=zone))
+
+
+@app.get("/docs/gcp", include_in_schema=False)
+def docs_gcp():
+    return _swagger_html("/openapi-gcp.json", "CloudLearn — GCP API")
+
+
+@app.get("/docs/aws", include_in_schema=False)
+def docs_aws():
+    return _swagger_html("/openapi-aws.json", "CloudLearn — AWS API")
+
+
+@app.get("/docs/all", include_in_schema=False)
+def docs_all():
+    return _swagger_html(app.openapi_url or "/openapi.json", "CloudLearn — All APIs")
 
 
 _USAGE = {
@@ -804,6 +1210,62 @@ def _usage_html(request, provider: str) -> str:
 </body></html>"""
 
 
+@app.get("/docs/gcp/usage", include_in_schema=False)
+def docs_gcp_usage(request: Request):
+    from fastapi.responses import HTMLResponse
+    return HTMLResponse(_usage_html(request, "gcp"))
+
+
+@app.get("/docs/aws/usage", include_in_schema=False)
+def docs_aws_usage(request: Request):
+    from fastapi.responses import HTMLResponse
+    return HTMLResponse(_usage_html(request, "aws"))
+
+
+@app.get("/docs/azure/usage", include_in_schema=False)
+def docs_azure_usage(request: Request):
+    from fastapi.responses import HTMLResponse
+    return HTMLResponse(_usage_html(request, "azure"))
+
+
+@app.get("/docs", include_in_schema=False)
+def docs_chooser():
+    """Landing chooser that links to the separate AWS and GCP API consoles."""
+    from fastapi.responses import HTMLResponse
+    html = """<!doctype html><html><head><meta charset="utf-8"><title>CloudLearn API Consoles</title>
+<link rel="icon" href="/assets/swagger/favicon-32x32.png">
+<style>
+ body{margin:0;font-family:Roboto,Arial,sans-serif;background:#0f1b2d;color:#e8eef6;min-height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:28px}
+ h1{font-weight:500;margin:0 0 4px}.sub{color:#9fb0c7;margin-bottom:8px}
+ .cards{display:flex;gap:24px;flex-wrap:wrap;justify-content:center}
+ .col{display:flex;flex-direction:column;gap:12px;align-items:stretch;width:280px}
+ a.card{display:block;padding:28px;border-radius:14px;text-decoration:none;color:#fff;box-shadow:0 8px 30px rgba(0,0,0,.35);transition:transform .12s}
+ a.card:hover{transform:translateY(-4px)}
+ .aws{background:linear-gradient(135deg,#ff9900,#d97700)}.gcp{background:linear-gradient(135deg,#1a73e8,#1761c9)}.azure{background:linear-gradient(135deg,#0078d4,#005a9e)}
+ .card h2{margin:0 0 6px;font-size:22px}.card p{margin:0;opacity:.9;font-size:14px}
+ .ulink{display:block;text-align:center;color:#cfe0f7;font-size:13px;text-decoration:none;background:#16243a;border:1px solid #243650;border-radius:8px;padding:9px}
+ .ulink:hover{background:#1d2f4a;color:#fff}
+ .all{color:#9fb0c7;font-size:13px;text-decoration:none}.all:hover{color:#fff}
+</style></head><body>
+ <div style="text-align:center"><h1>CloudLearn — API Reference</h1><div class="sub">Interactive Swagger consoles + SDK/CLI usage, one per cloud.</div></div>
+ <div class="cards">
+   <div class="col">
+     <a class="card aws" href="/docs/aws"><h2>AWS API ›</h2><p>S3, EC2, IAM, SQS, RDS, DynamoDB, Lambda, API Gateway, VPC.</p></a>
+     <a class="ulink" href="/docs/aws/usage">⌨ SDK &amp; CLI usage (CLI · boto3 · Java · Go · Terraform) ›</a>
+   </div>
+   <div class="col">
+     <a class="card gcp" href="/docs/gcp"><h2>GCP API ›</h2><p>Compute, Storage, Cloud SQL, Pub/Sub, Firestore, Functions, API Gateway, VPC, IAM.</p></a>
+     <a class="ulink" href="/docs/gcp/usage">⌨ SDK &amp; CLI usage (gcloud/gsutil · Java · Go · Terraform) ›</a>
+   </div>
+   <div class="col">
+     <a class="card azure" href="/docs/azure"><h2>Azure API ›</h2><p>Virtual Machines, Blob Storage, SQL, Service Bus, Cosmos DB, Functions, API Management, VNet, Entra/RBAC.</p></a>
+     <a class="ulink" href="/docs/azure/usage">⌨ SDK &amp; CLI usage (az CLI · Java · Go) ›</a>
+     <a class="ulink" href="/console/azure">🖥 Azure portal console ›</a>
+   </div>
+ </div>
+ <a class="all" href="/docs/all">View all endpoints (combined) →</a>
+</body></html>"""
+    return HTMLResponse(html)
 
 
 register_aws_ec2_routes(app, None)
@@ -811,9 +1273,220 @@ register_gcp_compute_routes(app, None)
 register_aws_routes(app, None)
 register_gcp_routes(app, None)
 register_azure_routes(app, None)
+REQUEST_PROVIDER: ContextVar[str] = ContextVar("cloudlearn_request_provider", default="aws")
+# Per-request simulator origin (set from the Host header) so GCP resource
+# metadata reflects the address the client actually used. Request-scoped to
+# avoid cross-request races (e.g. the container healthcheck hitting 127.0.0.1).
+REQUEST_PUBLIC_BASE: ContextVar[str] = ContextVar("cloudlearn_public_base", default="")
 
 
+def _is_gcp_native_path(path: str) -> bool:
+    return path.startswith((
+        "/compute/v1/",
+        "/storage/v1/",
+        "/upload/storage/v1/",
+        "/download/storage/v1/",
+        "/sql/v1beta4/",
+        "/pubsub/v1/",
+        "/firestore/v1/",
+        "/v1/projects/",
+        "/v1/operations/",
+        "/api/gcp/s3/",
+        "/api/gcp/iam/",
+        "/api/gcp/rds/",
+        "/api/gcp/sqs/",
+        "/api/gcp/dynamodb/",
+        "/api/gcp/lambda/",
+        "/api/gcp/apigateway/",
+        "/api/gcp/vpc/",
+        "/api/gcp/compute/",
+        "/api/gcp/storage/",
+        "/api/gcp/sql/",
+        "/api/gcp/pubsub/",
+        "/api/gcp/firestore/",
+        "/api/gcp/cloudfunctions/",
+        "/api/gcp/console/",
+        "/api/gcp/catalog",   # standalone console payload — must NOT be path-stripped
+        "/api/gcp/extras/",   # reserved for GCP-D (parity with /api/aws/extras)
+        "/api/gcp/extras-config/",
+    ))
 
+
+def _is_azure_native_path(path: str) -> bool:
+    """Azure ARM control-plane (`/subscriptions/...`) and the console catalog.
+    These are served by the generic ARM dispatcher and must bypass the AWS
+    action/capability gating (they aren't S3/EC2 calls)."""
+    return path.startswith(("/subscriptions/", "/api/azure/", "/azure-data/"))
+
+
+def _gcp_iam_enforcement_response(request, path: str):
+    """Return a 403 JSONResponse if IAM enforcement is enabled for the active
+    space and the caller's bindings don't grant the operation; else None.
+    Owners/root bypass, and any failure fails open so enforcement bugs never
+    block the control plane."""
+    try:
+        space = _gcp_active_space_dict()
+        if not (isinstance(space, dict) and space.get("enforce_iam")):
+            return None
+        from core import gcp_iam_policy
+        required = gcp_iam_policy.permission_for_request(path, request.method)
+        if not required:
+            return None
+        principal = request.headers.get("x-cloudlearn-principal") or str(space.get("active_principal") or "root")
+        # space = project: union every stored policy's bindings (one project per space).
+        policies = gcp_iam_state.get("policies", {}) if isinstance(gcp_iam_state.get("policies"), dict) else {}
+        bindings: list = []
+        for policy in policies.values():
+            if isinstance(policy, dict):
+                bindings.extend(policy.get("bindings", []) if isinstance(policy.get("bindings"), list) else [])
+        if gcp_iam_policy.authorize(principal, required, bindings):
+            return None
+        return JSONResponse(status_code=403, content={"error": {
+            "code": 403, "status": "PERMISSION_DENIED",
+            "message": f"Permission '{required}' denied for principal '{principal}'.",
+        }})
+    except Exception:
+        return None
+
+
+@app.middleware("http")
+async def provider_api_alias_middleware(request, call_next):
+    path = request.scope.get("path", "")
+    _gcp_capture_public_base(request)
+    if _is_azure_native_path(path):
+        provider = "azure"
+    elif _is_gcp_native_path(path) or path.startswith(("/ws/gcp/compute/", "/ws/compute/")):
+        provider = "gcp"
+    else:
+        provider = "aws"
+    token = REQUEST_PROVIDER.set(provider)
+    request.state.cloudlearn_provider = provider
+    request.state.cloudlearn_original_path = path
+    if _is_azure_native_path(path):
+        try:
+            return await call_next(request)
+        finally:
+            REQUEST_PROVIDER.reset(token)
+    if _is_gcp_native_path(path) or path.startswith(("/ws/gcp/compute/", "/ws/compute/")):
+        try:
+            if not path.startswith(("/ws/", "/api/gcp/console/")):
+                denied = _gcp_iam_enforcement_response(request, path)
+                if denied is not None:
+                    return denied
+            return await call_next(request)
+        finally:
+            REQUEST_PROVIDER.reset(token)
+    if path.startswith("/api/gcp/"):
+        request.scope["path"] = "/api/" + path[len("/api/gcp/"):]
+    try:
+        return await call_next(request)
+    finally:
+        REQUEST_PROVIDER.reset(token)
+
+
+@app.middleware("http")
+async def tenant_context_middleware(request, call_next):
+    """Read X-CloudLearn-Tenant header → request-scoped tenant override
+    (ContextVar). Without the header, requests fall through to the globally
+    active tenant. Cross-tenant access is then blocked by the state proxy."""
+    tid = (request.headers.get("x-cloudlearn-tenant") or "").strip()
+    token = REQUEST_TENANT.set(tid) if tid else None
+    try:
+        response = await call_next(request)
+    finally:
+        if token is not None:
+            REQUEST_TENANT.reset(token)
+    return response
+
+
+class _DecompressRequestMiddleware:
+    """Transparently decode gzip/deflate-compressed request bodies. Real Google
+    client libraries (e.g. google-cloud-storage for Java) gzip their JSON request
+    bodies; without this the handlers' `await request.json()` chokes on the gzip
+    magic bytes (0x1f 0x8b) with a UnicodeDecodeError → 500."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope.get("type") != "http":
+            return await self.app(scope, receive, send)
+        headers = {k.lower(): v for (k, v) in (scope.get("headers") or [])}
+        enc = headers.get(b"content-encoding", b"").lower()
+        if enc not in (b"gzip", b"x-gzip", b"deflate"):
+            return await self.app(scope, receive, send)
+        import gzip as _gzip
+        import zlib as _zlib
+        body = b""
+        more = True
+        while more:
+            message = await receive()
+            if message["type"] == "http.request":
+                body += message.get("body", b"")
+                more = message.get("more_body", False)
+            elif message["type"] == "http.disconnect":
+                break
+        try:
+            body = _gzip.decompress(body) if enc in (b"gzip", b"x-gzip") else _zlib.decompress(body)
+        except Exception:
+            pass  # leave body untouched if it wasn't actually compressed
+        new_headers = [
+            (k, v) for (k, v) in (scope.get("headers") or [])
+            if k.lower() not in (b"content-encoding", b"content-length")
+        ]
+        new_headers.append((b"content-length", str(len(body)).encode("ascii")))
+        new_scope = dict(scope)
+        new_scope["headers"] = new_headers
+        delivered = False
+
+        async def _receive():
+            nonlocal delivered
+            if not delivered:
+                delivered = True
+                return {"type": "http.request", "body": body, "more_body": False}
+            return {"type": "http.request", "body": b"", "more_body": False}
+
+        return await self.app(new_scope, _receive, send)
+
+
+app.add_middleware(_DecompressRequestMiddleware)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+    expose_headers=["ETag", "x-amz-request-id", "x-amz-id-2", "Content-Range"],
+)
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
+
+def _now_http() -> str:
+    return datetime.now(timezone.utc).strftime("%a, %d %b %Y %H:%M:%S GMT")
+
+
+def _iso_to_http_date(iso: str) -> str:
+    """Convert ``2026-05-31T19:57:42.000Z`` → ``Sun, 31 May 2026 19:57:42 GMT``.
+
+    Real S3 / Azure Blob / GCS responses use HTTP date format (RFC 1123) for
+    Last-Modified. aws-sdk-go-v2 strictly enforces this and fails to deserialize
+    when the simulator emits ISO 8601. Stored timestamps are ISO (from
+    ``_now()``); convert at the response edge.
+    """
+    if not iso:
+        return _now_http()
+    try:
+        cleaned = iso.rstrip("Z").split(".")[0]
+        dt = datetime.strptime(cleaned, "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc)
+        return dt.strftime("%a, %d %b %Y %H:%M:%S GMT")
+    except Exception:
+        return iso  # last resort — return as-is rather than crashing the response
+
+
+def _iam_root_principal() -> str:
+    return f"arn:aws:iam::{AWS_ACCOUNT_ID}:root"
 
 
 def _parent_os() -> str:
@@ -1794,12 +2467,497 @@ def _iam_route_action_resource(request: Request) -> tuple[str, str] | None:
                         return ("s3:CompleteMultipartUpload", resource)
     return None
 
+STATE_VERSION = 12
+STATE_FILE = Path(os.environ.get("CLOUDLEARN_STATE_FILE", Path(__file__).with_name(".cloudlearn_state.sqlite3")))
+LEGACY_STATE_FILE = Path(os.environ.get("CLOUDLEARN_LEGACY_STATE_FILE", STATE_FILE.with_suffix(".pkl")))
+STATE_LOCK = threading.RLock()
+LXD_RUNTIME_IMAGE = os.environ.get("CLOUDLEARN_LXD_RUNTIME_IMAGE", os.environ.get("CLOUDLEARN_LXD_RUNTIME_IMAGE", "ubuntu:24.04"))
+LXD_RUNTIME_IMAGE = LXD_RUNTIME_IMAGE
+MULTIPASS_RUNTIME_IMAGE = os.environ.get("CLOUDLEARN_MULTIPASS_RUNTIME_IMAGE", "ubuntu:24.04")
+LXD_CONSOLE_PORT = 8080
+EC2_TERMINATED_VISIBILITY_SECONDS = int(os.environ.get("CLOUDLEARN_EC2_TERMINATED_VISIBILITY_SECONDS", "60"))
+INSTANCE_WORK_ROOT = Path(os.environ.get("CLOUDLEARN_DEPLOY_DIR", "/var/lib/cloudlearn/deployments"))
+EC2_XML_NS = "http://ec2.amazonaws.com/doc/2016-11-15/"
+RDS_XML_NS = "http://rds.amazonaws.com/doc/2014-10-31/"
+SQS_XML_NS = "http://queue.amazonaws.com/doc/2012-11-05/"
+AWS_ACCOUNT_ID = "123456789012"
+ET.register_namespace("", EC2_XML_NS)
+ET.register_namespace("rds", RDS_XML_NS)
+ET.register_namespace("sqs", SQS_XML_NS)
 
 
+def _default_packs() -> Dict[str, dict]:
+    return load_default_packs()
+
+
+def _default_ec2_runtime_backends() -> list[str]:
+    return ["lxd"] if _appliance_mode_enabled() else ["multipass", "lxd"]
+
+
+def _default_cloudsim_space_policy() -> dict:
+    return {
+        "ec2": {
+            "launch": True,
+            "allowed_runtime_backends": _default_ec2_runtime_backends(),
+            "allowed_amis": [],
+        }
+    }
+
+
+# P2-C (2026-06-01): single source of truth for runtime bundles. Previously
+# this dict was duplicated in 4 places — _default_state(), the legacy
+# initializer, _cloudsim_runtime_bundle_catalog(), and a 2nd legacy
+# setdefault — so adding a new bundle kind (e.g. "azure_vm") meant updating 4
+# sites and silently desyncing if any was missed. All 4 now reference this
+# constant via copy.deepcopy().
+_DEFAULT_RUNTIME_BUNDLES: dict[str, dict] = {
+    "python":        {"id": "cloudlearn.runtime.python",      "name": "Python Runtime",                  "kind": "language", "provider": "shared", "service": "python",    "installed": True, "active": False},
+    "ec2":           {"id": "cloudlearn.runtime.ec2",         "name": "EC2 Runtime Bundle",              "kind": "vm",       "provider": "aws",    "service": "ec2",       "installed": True, "active": False},
+    "gcp_compute":   {"id": "cloudlearn.runtime.gcp.compute", "name": "Compute Engine Runtime Bundle",   "kind": "vm",       "provider": "gcp",    "service": "compute",   "installed": True, "active": False},
+    "azure_vm":      {"id": "cloudlearn.runtime.azure.vm",    "name": "Azure VM Runtime Bundle",         "kind": "vm",       "provider": "azure",  "service": "vm",        "installed": True, "active": False},
+    "lambda":        {"id": "cloudlearn.runtime.lambda",      "name": "Lambda Runtime Bundle",           "kind": "function", "provider": "aws",    "service": "lambda",    "installed": True, "active": False},
+    "gcp_functions": {"id": "cloudlearn.runtime.gcp.functions","name": "Cloud Functions Runtime Bundle", "kind": "function", "provider": "gcp",    "service": "functions", "installed": True, "active": False},
+    "rds":           {"id": "cloudlearn.runtime.rds",         "name": "RDS Runtime Bundle",              "kind": "database", "provider": "aws",    "service": "rds",       "installed": True, "active": False},
+    "gcp_sql":       {"id": "cloudlearn.runtime.gcp.sql",     "name": "Cloud SQL Runtime Bundle",        "kind": "database", "provider": "gcp",    "service": "sql",       "installed": True, "active": False},
+}
+
+
+def _default_state() -> dict:
+    return {
+        "schema_version": STATE_VERSION,
+        "license": {
+            "tier": "free",
+            "user": "guest",
+            "email": "",
+            "credits": 100,
+            "device_id": "",
+            "token": "",
+            "issued_at": _now(),
+            "status": "active",
+        },
+        "spaces": {
+            "spaces": {},
+            "active_space_id": "",
+            "settings": {"max_spaces": 6, "default_provider": "aws", "default_region": "us-east-1", "max_memory_mb": 8192, "max_disk_mb": 32768},
+        },
+        "packs": _default_packs(),
+        "deployments": {},
+        "iam": {"users": {}, "groups": {}, "roles": {}, "policies": {}, "attachments": [], "identity_providers": {}, "account_settings": {"password_policy": {"minimum_length": 8, "require_symbols": True, "require_numbers": True, "require_uppercase": True, "require_lowercase": True}}},
+        "ec2": {"instances": {}},
+        "vpc": {"vpcs": {}, "subnets": {}, "security_groups": {}, "route_tables": {}},
+        "apigateway": {"apis": {}, "logs": []},
+        "lambda": {"functions": {}, "events": [], "invocations": []},
+        "sqs": {"queues": {}, "events": []},
+        "dynamodb": {"tables": {}, "events": []},
+        "cloudsim": {"summary": {}, "events": [], "last_reconcile_at": ""},
+        "terraform": {"plans": {}, "applies": {}, "imports": {}, "spaces": {}},
+        "federations": {"federations": {}, "links": {}, "tests": []},
+        "rds": {
+            "db_instances": {},
+            "db_subnet_groups": {},
+            "db_parameter_groups": {},
+            "db_snapshots": {},
+            "events": [],
+        },
+        "runtime": {
+            "bundles": copy.deepcopy(_DEFAULT_RUNTIME_BUNDLES),
+            "lxd": {"status": "missing", "message": "", "mode": "auto", "last_checked": ""},
+            "multipass": {"status": "missing", "message": "", "mode": "auto", "last_checked": ""},
+        },
+        "github": {"connections": {}, "repos": {}, "deployments": {}},
+        "usage": {"events": []},
+    }
+
+
+def _migrate_state(state: dict) -> dict:
+    default = _default_state()
+    default.update(state)
+    for key, value in default.items():
+        if key not in state:
+            state[key] = value
+    state["schema_version"] = STATE_VERSION
+    terraform_state = state.setdefault("terraform", {"plans": {}, "applies": {}, "imports": {}, "spaces": {}})
+    terraform_state.setdefault("plans", {})
+    terraform_state.setdefault("applies", {})
+    terraform_state.setdefault("imports", {})
+    terraform_state.setdefault("spaces", {})
+    spaces_state = state.setdefault(
+        "spaces",
+        {
+            "spaces": {},
+            "active_space_id": "",
+            "settings": {"max_spaces": 6, "default_provider": "aws", "default_region": "us-east-1", "max_memory_mb": 8192, "max_disk_mb": 32768},
+        },
+    )
+    spaces_state.setdefault("spaces", {})
+    spaces_state.setdefault("active_space_id", "")
+    spaces_state.setdefault("settings", {})
+    spaces_state["settings"].setdefault("max_spaces", 6)
+    spaces_state["settings"].setdefault("default_provider", "aws")
+    spaces_state["settings"].setdefault("default_region", "us-east-1")
+    spaces_state["settings"].setdefault("max_memory_mb", 8192)
+    spaces_state["settings"].setdefault("max_disk_mb", 32768)
+    for space in spaces_state.get("spaces", {}).values():
+        if not isinstance(space, dict):
+            continue
+        cloudsim = space.setdefault("cloudsim", {"summary": {}, "events": [], "last_tick": ""})
+        if not isinstance(cloudsim, dict):
+            space["cloudsim"] = {"summary": {}, "events": [], "last_tick": ""}
+            cloudsim = space["cloudsim"]
+        cloudsim.setdefault("summary", {})
+        cloudsim.setdefault("events", [])
+        cloudsim.setdefault("last_tick", "")
+        policy = cloudsim.get("policy")
+        if not isinstance(policy, dict):
+            cloudsim["policy"] = copy.deepcopy(_default_cloudsim_space_policy())
+        else:
+            ec2_policy = policy.get("ec2")
+            if not isinstance(ec2_policy, dict):
+                policy["ec2"] = copy.deepcopy(_default_cloudsim_space_policy()["ec2"])
+            else:
+                ec2_policy.setdefault("launch", True)
+                ec2_policy.setdefault("allowed_runtime_backends", _default_ec2_runtime_backends())
+                ec2_policy.setdefault("allowed_amis", [])
+    packs = state.setdefault("packs", {})
+    for pack_id, pack in _default_packs().items():
+        packs.setdefault(pack_id, copy.deepcopy(pack))
+    ec2 = state.setdefault("ec2", {"instances": {}})
+    instances = ec2.setdefault("instances", {})
+    for instance_id, inst in instances.items():
+        if not isinstance(inst, dict):
+            continue
+        inst.setdefault("instance_id", instance_id)
+        inst.setdefault("state", "stopped")
+        backend = str(inst.get("runtime_backend") or "").strip().lower()
+        if backend in {"lxd", "lxd-shell"} or inst.get("container_id"):
+            inst["runtime_backend"] = "lxd"
+        elif backend in {"multipass", "multipass-shell"}:
+            inst["runtime_backend"] = "multipass"
+        else:
+            inst["runtime_backend"] = "simulated"
+        inst.setdefault("runtime_image", LXD_RUNTIME_IMAGE)
+        inst.setdefault("container_id", "")
+        inst.setdefault("container_name", f"cloudlearn-{instance_id}")
+        inst.setdefault("container_port", LXD_CONSOLE_PORT)
+        inst.setdefault("host_port", None)
+        inst.setdefault("reservation_id", f"r-{instance_id.replace('i-', '')}")
+        inst.setdefault("owner_id", AWS_ACCOUNT_ID)
+        inst.setdefault("endpoint_url", "")
+        inst.setdefault("container_status", "simulated" if inst["runtime_backend"] == "simulated" else "created")
+        inst.setdefault("console_log", [])
+        inst.setdefault("command", "")
+        inst.setdefault("deployment_path", str((INSTANCE_WORK_ROOT / instance_id).resolve()))
+        inst.setdefault("workspace", str((INSTANCE_WORK_ROOT / instance_id).resolve()))
+        legacy_prefix = "sample"
+        for key in tuple(f"{legacy_prefix}_app_{suffix}" for suffix in ("id", "name", "status", "command", "port", "kill_pattern", "error")):
+            inst.pop(key, None)
+        console_state = inst.get("console_state")
+        if not isinstance(console_state, dict):
+            inst["console_state"] = {"cwd": str((INSTANCE_WORK_ROOT / instance_id).resolve())}
+    runtime = state.setdefault(
+        "runtime",
+        {"bundles": copy.deepcopy(_DEFAULT_RUNTIME_BUNDLES)},
+    )
+    runtime.setdefault("lxd", {"status": "missing", "message": "", "mode": "auto", "last_checked": ""})
+    runtime.setdefault("multipass", {"status": "missing", "message": "", "mode": "auto", "last_checked": ""})
+    federations = state.setdefault("federations", {"federations": {}, "links": {}, "tests": []})
+    federations.setdefault("federations", {})
+    federations.setdefault("links", {})
+    federations.setdefault("tests", [])
+    rds = state.setdefault("rds", {"db_instances": {}, "db_subnet_groups": {}, "db_parameter_groups": {}, "db_snapshots": {}, "events": []})
+    rds.setdefault("db_instances", {})
+    rds.setdefault("db_subnet_groups", {})
+    rds.setdefault("db_parameter_groups", {})
+    rds.setdefault("db_snapshots", {})
+    rds.setdefault("events", [])
+    state.setdefault("cloudsim", {"summary": {}, "events": [], "last_reconcile_at": ""})
+    apigw = state.setdefault("apigateway", {"apis": {}, "logs": []})
+    apigw.setdefault("apis", {})
+    apigw.setdefault("logs", [])
+    state.setdefault("lambda", {"functions": {}, "events": [], "invocations": []})
+    lambda_state = state.setdefault("lambda", {"functions": {}, "events": [], "invocations": []})
+    for function_name, function in lambda_state.setdefault("functions", {}).items():
+        if not isinstance(function, dict):
+            continue
+        function.setdefault("function_name", function_name)
+        function.setdefault("permissions", [])
+    sqs_state = state.setdefault("sqs", {"queues": {}, "events": []})
+    sqs_state.setdefault("queues", {})
+    sqs_state.setdefault("events", [])
+    for queue_name, queue in sqs_state["queues"].items():
+        if not isinstance(queue, dict):
+            continue
+        queue.setdefault("queue_name", queue_name)
+        queue.setdefault("queue_type", "standard")
+        queue.setdefault("fifo_queue", queue_name.endswith(".fifo"))
+        queue.setdefault("content_based_deduplication", False)
+        queue.setdefault("visibility_timeout", 30)
+        queue.setdefault("receive_wait_time_seconds", 0)
+        queue.setdefault("message_retention_period", 345600)
+        queue.setdefault("max_message_size", 262144)
+        queue.setdefault("delay_seconds", 0)
+        queue.setdefault("redrive_policy", {})
+        queue.setdefault("tags", {})
+        queue.setdefault("attributes", {})
+        queue.setdefault("messages", [])
+        queue.setdefault("created", _now())
+        queue.setdefault("last_modified", _now())
+    ddb_state = state.setdefault("dynamodb", {"tables": {}, "events": []})
+    ddb_state.setdefault("tables", {})
+    ddb_state.setdefault("events", [])
+    for table_name, table in ddb_state["tables"].items():
+        if not isinstance(table, dict):
+            continue
+        table.setdefault("table_name", table_name)
+        table.setdefault("table_arn", _iam_dynamodb_table_arn(table_name))
+        table.setdefault("table_status", "ACTIVE")
+        table.setdefault("partition_key_name", "id")
+        table.setdefault("partition_key_type", "S")
+        table.setdefault("sort_key_name", "")
+        table.setdefault("sort_key_type", "S")
+        table.setdefault("billing_mode", "PAY_PER_REQUEST")
+        table.setdefault("provisioned_throughput", {"ReadCapacityUnits": 5, "WriteCapacityUnits": 5})
+        table.setdefault("tags", {})
+        table.setdefault("indexes", [])
+        table.setdefault("streams", {"enabled": False, "latest_stream_label": ""})
+        table.setdefault("items", {})
+        table.setdefault("created", _now())
+        table.setdefault("last_modified", _now())
+    buckets_state = state.setdefault("buckets", {})
+    if isinstance(buckets_state, dict):
+        for bucket_name, bucket_meta in buckets_state.items():
+            if not isinstance(bucket_meta, dict):
+                continue
+            bucket_meta.setdefault("notifications", {
+                "eventBridgeEnabled": False,
+                "topicConfigurations": [],
+                "queueConfigurations": [],
+                "cloudFunctionConfigurations": [],
+                "deliveries": [],
+                "updatedAt": _now(),
+            })
+    spaces_state = state.setdefault("spaces", {"spaces": {}, "active_space_id": "", "settings": {"max_spaces": 6, "default_provider": "aws", "default_region": "us-east-1"}})
+    spaces_state.setdefault("spaces", {})
+    spaces_state.setdefault("active_space_id", "")
+    spaces_state.setdefault("settings", {})
+    spaces_state["settings"].setdefault("max_spaces", 6)
+    spaces_state["settings"].setdefault("default_provider", "aws")
+    spaces_state["settings"].setdefault("default_region", "us-east-1")
+    if not spaces_state["spaces"]:
+        legacy_space_id = "space-legacy"
+        spaces_state["spaces"][legacy_space_id] = {
+            "space_id": legacy_space_id,
+            "name": "Legacy Workspace",
+            "provider": "aws",
+            "status": "running",
+            "seed": state.get("license", {}).get("device_id") or "legacy",
+            "owner_id": "local-user",
+            "created_at": _now(),
+            "updated_at": _now(),
+            "cloudsim_runtime_id": "cloudsim-space-legacy",
+            "lxd_project_name": "cl-space-legacy",
+            "active_region": "us-east-1",
+            "active_account": AWS_ACCOUNT_ID,
+            "max_instances": 10,
+            "max_memory_mb": 4096,
+            "max_disk_mb": 20480,
+            "estimated_memory_mb": 0,
+            "estimated_disk_mb": 0,
+            "estimated_runtime_mb": 0,
+            "estimated_cost_notes": "Legacy workspace seeded from existing simulator state.",
+            "runtime_count": 0,
+            "ec2_count": len((state.get("ec2") or {}).get("instances", {})),
+            "lambda_count": len((state.get("lambda") or {}).get("functions", {})),
+            "rds_count": len((state.get("rds") or {}).get("db_instances", {})),
+            "sqs_count": len((state.get("sqs") or {}).get("queues", {})),
+            "dynamodb_count": len((state.get("dynamodb") or {}).get("tables", {})),
+            "cloudsim": {"summary": {}, "events": [], "last_tick": "", "policy": copy.deepcopy(_default_cloudsim_space_policy())},
+            "runtime": {"mode": "lxd", "instances": {}, "sandbox_count": 0},
+            "resources": {},
+            "events": [],
+            "snapshots": [],
+            "service_states": {
+                "s3": {
+                    "buckets": copy.deepcopy(buckets_state),
+                    "objects": copy.deepcopy(state.get("objects", {})),
+                    "multiparts": copy.deepcopy(state.get("multiparts", {})),
+                },
+                "ec2": copy.deepcopy(state.get("ec2", {"instances": {}})),
+                "vpc": copy.deepcopy(state.get("vpc", {"vpcs": {}, "subnets": {}, "security_groups": {}, "route_tables": {}, "internet_gateways": {}})),
+                "rds": copy.deepcopy(state.get("rds", {"db_instances": {}, "db_subnet_groups": {}, "db_parameter_groups": {}, "db_snapshots": {}, "events": []})),
+                "apigateway": copy.deepcopy(state.get("apigateway", {"apis": {}, "logs": []})),
+                "lambda": copy.deepcopy(state.get("lambda", {"functions": {}, "events": [], "invocations": []})),
+                "sqs": copy.deepcopy(state.get("sqs", {"queues": {}, "events": []})),
+                "dynamodb": copy.deepcopy(state.get("dynamodb", {"tables": {}, "events": []})),
+            },
+            "tags": {},
+        }
+        spaces_state["active_space_id"] = legacy_space_id
+    return state
+
+
+PLATFORM = CloudLearnPlatform(STATE_FILE, LEGACY_STATE_FILE, _default_state)
+STATE = _migrate_state(copy.deepcopy(PLATFORM.state))
+PLATFORM.kernel.state.clear()
+PLATFORM.kernel.state.update(STATE)
+PLATFORM.persist()
+STATE = PLATFORM.state
 STATE_LOCK = PLATFORM.store.lock
 
+# ──────────────────────────────────────────────────────────────────────────────
+# Tenant model — the licensing/isolation boundary ABOVE Space.
+#
+#   Tenant 1:N Space; Space 1:1 Provider (aws|gcp|azure).
+#
+# Cross-tenant access is enforced STRUCTURALLY: the state proxy resolves through
+# the active tenant first, and any space whose tenant_id doesn't match falls
+# back to a non-persisted scratch dict — a handler literally cannot reach
+# another tenant's service_states even by mistake. Provider lock is enforced at
+# the API middleware (a provider-native request against a space of a different
+# provider returns 403).
+# ──────────────────────────────────────────────────────────────────────────────
+DEFAULT_TENANT_ID = "default"
+ALLOWED_PROVIDERS = ("aws", "gcp", "azure")
+
+REQUEST_TENANT: ContextVar[str] = ContextVar("cloudlearn_request_tenant", default="")
 
 
+def _tenants_state() -> dict:
+    return STATE.setdefault("tenants", {"active_tenant_id": "", "tenants": {}})
+
+
+def _active_tenant_id() -> str:
+    """Per-request tenant from `X-CloudLearn-Tenant` header if set, else the
+    globally-active tenant, falling back to DEFAULT_TENANT_ID."""
+    req_tid = (REQUEST_TENANT.get() or "").strip()
+    if req_tid:
+        return req_tid
+    return _tenants_state().get("active_tenant_id", "") or DEFAULT_TENANT_ID
+
+
+def _tenant_dict(tid: str) -> dict | None:
+    t = _tenants_state().get("tenants", {}).get(tid)
+    return t if isinstance(t, dict) else None
+
+
+def _ensure_default_tenant() -> None:
+    """Bootstrap: create the default tenant and tag every untagged space.
+    Idempotent — safe to call repeatedly (called once at startup)."""
+    ts = _tenants_state()
+    tenants = ts.setdefault("tenants", {})
+    if DEFAULT_TENANT_ID not in tenants:
+        tenants[DEFAULT_TENANT_ID] = {
+            "tenant_id": DEFAULT_TENANT_ID,
+            "name": "Default Tenant",
+            "license_tier": str((STATE.get("license") or {}).get("tier", "free")),
+            "created_at": time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime()),
+            "settings": {"max_spaces": 6},
+        }
+    if not ts.get("active_tenant_id"):
+        ts["active_tenant_id"] = DEFAULT_TENANT_ID
+    spaces_map = STATE.setdefault("spaces", {}).setdefault("spaces", {})
+    for sid, sp in spaces_map.items():
+        if isinstance(sp, dict) and not sp.get("tenant_id"):
+            sp["tenant_id"] = DEFAULT_TENANT_ID
+
+
+_ensure_default_tenant()
+
+
+def _tenant_scoped_bucket(name: str) -> str:
+    """Map a logical bucket name to a tenant+space-scoped physical name in the
+    global fake-gcs byte store, so same-named buckets in different tenants (or
+    different spaces within a tenant) don't collide. Closes the last data-plane
+    cross-tenant overlap. Stable hash → deterministic per (tenant, space, name)."""
+    if not name:
+        return name
+    tid = _active_tenant_id() or DEFAULT_TENANT_ID
+    sid = (_spaces_state().get("active_space_id") or "")
+    digest = hashlib.sha1(f"{tid}:{sid}:{name}".encode()).hexdigest()[:10]
+    safe = re.sub(r"[^a-z0-9-]+", "-", str(name).lower()).strip("-") or "b"
+    return f"cl-{safe[:32]}-{digest}"
+
+
+def _load_state() -> dict:
+    return STATE
+
+
+def _persist_state() -> None:
+    PLATFORM.persist()
+
+
+def _terraform_state() -> dict:
+    terraform_state = STATE.setdefault("terraform", {"plans": {}, "applies": {}, "imports": {}, "spaces": {}})
+    terraform_state.setdefault("plans", {})
+    terraform_state.setdefault("applies", {})
+    terraform_state.setdefault("imports", {})
+    terraform_state.setdefault("spaces", {})
+    return terraform_state
+
+
+def _terraform_space_state(space_id: str) -> dict:
+    terraform_state = _terraform_state()
+    spaces = terraform_state.setdefault("spaces", {})
+    space_state = spaces.setdefault(space_id, {})
+    space_state.setdefault("plans", {})
+    space_state.setdefault("applies", {})
+    space_state.setdefault("imports", {})
+    return space_state
+
+
+# Activity-log retention bookkeeping. We lazy-prune the events list on
+# `_record_usage` calls, but rate-limit the prune to once every 5 minutes so
+# hot append paths don't iterate the list on every call.
+_LAST_ACTIVITY_PRUNE_AT: float = 0.0
+_ACTIVITY_PRUNE_MIN_INTERVAL_S: float = 300.0  # 5 minutes
+
+
+def _prune_activity_log_if_due() -> None:
+    """Drop events older than the active tier's `activity_log_retention_hours`.
+    Called from `_record_usage` on a 5-minute interval. Safe to call when no
+    usage state exists — silently no-ops."""
+    global _LAST_ACTIVITY_PRUNE_AT
+    now = time.time()
+    if now - _LAST_ACTIVITY_PRUNE_AT < _ACTIVITY_PRUNE_MIN_INTERVAL_S:
+        return
+    _LAST_ACTIVITY_PRUNE_AT = now
+    try:
+        from core import tier_policy as _tp
+        tier = _active_tier()
+        hours = int(_tp.policy_for(tier).get("activity_log_retention_hours") or 24)
+        if hours <= 0:
+            return
+        cutoff_iso = time.strftime(
+            "%Y-%m-%dT%H:%M:%S.000Z",
+            time.gmtime(now - hours * 3600),
+        )
+        usage = PLATFORM.kernel.state.get("usage") or {}
+        events = usage.get("events") or []
+        if not isinstance(events, list) or not events:
+            return
+        # Events have ISO timestamps lex-sortable; binary keep-from-cutoff.
+        kept = [e for e in events if isinstance(e, dict) and e.get("at", "") >= cutoff_iso]
+        if len(kept) != len(events):
+            usage["events"] = kept
+    except Exception:
+        pass  # Never let retention pruning break a write
+
+
+def _record_usage(event: str, detail: dict | None = None) -> None:
+    payload = copy.deepcopy(detail or {})
+    PLATFORM.record_event(event, payload)
+    _prune_activity_log_if_due()
+    # Audit export sinks (Enterprise tier) — fire-and-forget POST to each
+    # configured sink. emit() is a no-op when the tenant has no sinks.
+    try:
+        from core import audit_sinks as _as
+        _as.emit(STATE, _active_tenant_id(), {"event": event, "detail": payload, "at": _now()})
+    except Exception:
+        pass
+    try:
+        _cloudsim_refresh_bridge(event, payload)
+    except Exception:
+        pass
 
 
 def _cloudsim_active_space_ref() -> dict | None:
@@ -2562,6 +3720,409 @@ def _ensure_capability(path: str) -> None:
 def _catalog() -> list[dict]:
     return PLATFORM.catalog()
 
+
+class LicenseSignupRequest(BaseModel):
+    email: str
+    user: str = "guest"
+    tier: str = "free"
+    device_id: str = ""
+    # Day 2-C: Student tier picks ONE primary cloud (aws|gcp|azure) at signup.
+    primary_cloud: str = ""
+    # Day 2-D: annual vs monthly subscription. annual gets ~7-month price savings
+    # (already in tier_policy.price_inr_annual). Default monthly.
+    period: str = "monthly"  # "monthly" | "annual"
+    # Day 2-D: Enterprise tier needs a seat count (min 10).
+    seats: int = 1
+
+
+class ServiceActionRequest(BaseModel):
+    action: str
+    payload: dict[str, Any] = {}
+
+
+class IAMUserRequest(BaseModel):
+    user_name: str
+    path: str = "/"
+
+
+class IAMRoleRequest(BaseModel):
+    role_name: str
+    path: str = "/"
+    assume_role_policy_document: dict[str, Any] = {}
+    description: str = ""
+
+
+class IAMGroupRequest(BaseModel):
+    group_name: str
+    path: str = "/"
+
+
+class IAMPolicyRequest(BaseModel):
+    policy_name: str
+    document: dict[str, Any] = {}
+
+
+class IAMIdentityProviderRequest(BaseModel):
+    provider_name: str
+    provider_type: str = "SAML"
+    url: str = ""
+    tags: list[dict[str, str]] | None = None
+
+
+class IAMAccountSettingsRequest(BaseModel):
+    password_policy: dict[str, Any] = {}
+
+
+class EC2InstanceRequest(BaseModel):
+    name: str
+    instance_type: str = "t3.micro"
+    ami: str = "sim-ubuntu-22.04"
+    runtime: str = "python"
+    runtime_backend: str = ""
+    key_pair: str = ""
+    subnet_id: str = ""
+    vpc_id: str = ""
+    security_group_ids: list[str] = []
+    az: str = "us-east-1a"
+    storage_gb: int = 8
+    command: str = ""
+    user_data: str = ""
+
+
+class GCPComputeInstanceRequest(BaseModel):
+    project: str = "cloudlearn"
+    zone: str = "us-central1-a"
+    name: str = "gcp-instance"
+    machineType: str = "e2-micro"
+    tags: dict = {}
+    sourceImage: str = "sim-ubuntu-22.04"
+    runtime: str = "python"
+    runtimeBackend: str = ""
+    keyPair: str = ""
+    subnetId: str = ""
+    vpcId: str = ""
+    securityGroupIds: list[str] = []
+    bootDiskSizeGb: int = 8
+    bootDiskType: str = "Balanced persistent disk"
+    assignExternalIp: bool = True
+    serviceAccount: str = "default"
+    shieldedVm: bool = True
+    vtpm: bool = True
+    integrityMonitoring: bool = True
+    startupScript: str = ""
+    startupCommand: str = ""
+    labels: dict[str, str] = {}
+
+
+class EC2ConsoleInputRequest(BaseModel):
+    data: str = ""
+
+
+class EC2ConsoleCommandRequest(BaseModel):
+    command: str = ""
+
+
+class GCPComputeConsoleCommandRequest(BaseModel):
+    command: str = ""
+
+
+class VpcRequest(BaseModel):
+    name: str
+    cidr_block: str = "10.0.0.0/16"
+    encryption_controls: str = "None"
+    tenancy: str = "default"
+    ipv6_mode: str = "none"
+    tags: list[dict[str, str]] | None = None
+
+
+class SubnetRequest(BaseModel):
+    vpc_id: str
+    cidr_block: str
+    availability_zone: str
+    name: str = ""
+    tags: list[dict[str, str]] | None = None
+
+
+class SecurityGroupRequest(BaseModel):
+    vpc_id: str
+    group_name: str
+    description: str = ""
+    tags: list[dict[str, str]] | None = None
+
+
+class RouteTableRequest(BaseModel):
+    vpc_id: str
+    name: str = ""
+    tags: list[dict[str, str]] | None = None
+
+
+class InternetGatewayRequest(BaseModel):
+    name: str = ""
+    tags: list[dict[str, str]] | None = None
+
+
+class RouteRequest(BaseModel):
+    destination_cidr: str = "0.0.0.0/0"
+    target_type: str = "internet-gateway"
+    target_id: str = ""
+
+
+class SubnetAssociationRequest(BaseModel):
+    subnet_id: str
+
+
+class RDSDatabaseRequest(BaseModel):
+    db_instance_identifier: str
+    db_instance_class: str = "db.t3.micro"
+    engine: str = "postgres"
+    engine_version: str = ""
+    master_username: str = "dbadmin"
+    master_user_password: str = "Password123!"
+    allocated_storage: int = 20
+    storage_type: str = "gp3"
+    vpc_id: str = ""
+    db_subnet_group_name: str = ""
+    db_parameter_group_name: str = ""
+    availability_zone: str = "us-east-1a"
+    publicly_accessible: bool = False
+    multi_az: bool = False
+    backup_retention_period: int = 7
+    preferred_maintenance_window: str = "sun:03:00-sun:03:30"
+    tags: list[dict[str, str]] | None = None
+    security_group_ids: list[str] = []
+
+
+class RDSSubnetGroupRequest(BaseModel):
+    db_subnet_group_name: str
+    db_subnet_group_description: str = ""
+    vpc_id: str = ""
+    subnet_ids: list[str] = []
+    tags: list[dict[str, str]] | None = None
+
+
+class RDSParameterGroupRequest(BaseModel):
+    db_parameter_group_name: str
+    family: str = "postgres16"
+    description: str = ""
+    tags: list[dict[str, str]] | None = None
+
+
+class RDSSnapshotRequest(BaseModel):
+    db_instance_identifier: str
+    db_snapshot_identifier: str
+    tags: list[dict[str, str]] | None = None
+
+
+class RDSModifyRequest(BaseModel):
+    db_instance_identifier: str
+    db_instance_class: str | None = None
+    allocated_storage: int | None = None
+    backup_retention_period: int | None = None
+    publicly_accessible: bool | None = None
+    multi_az: bool | None = None
+    engine_version: str | None = None
+    master_user_password: str | None = None
+    db_parameter_group_name: str | None = None
+    preferred_maintenance_window: str | None = None
+    apply_immediately: bool = True
+
+
+class RDSRestoreSnapshotRequest(BaseModel):
+    db_instance_identifier: str
+    db_snapshot_identifier: str
+    db_instance_class: str = "db.t3.micro"
+    vpc_id: str = ""
+    db_subnet_group_name: str = ""
+    publicly_accessible: bool = False
+    multi_az: bool = False
+    tags: list[dict[str, str]] | None = None
+
+
+class APIGatewayRequest(BaseModel):
+    name: str
+    description: str = ""
+    endpoint_type: str = "REGIONAL"
+    tags: list[dict[str, str]] | None = None
+
+
+class APIGatewayResourceRequest(BaseModel):
+    rest_api_id: str = ""
+    parent_id: str = ""
+    path_part: str = ""
+
+
+class APIGatewayMethodRequest(BaseModel):
+    rest_api_id: str = ""
+    resource_id: str = ""
+    http_method: str = "GET"
+    authorization_type: str = "NONE"
+    api_key_required: bool = False
+
+
+class APIGatewayIntegrationRequest(BaseModel):
+    rest_api_id: str = ""
+    resource_id: str = ""
+    http_method: str = "GET"
+    type: str = "MOCK"
+    uri: str = ""
+    integration_http_method: str = "POST"
+    response_body: str = ""
+    status_code: int = 200
+    content_type: str = "application/json"
+
+
+class APIGatewayDeploymentRequest(BaseModel):
+    rest_api_id: str = ""
+    stage_name: str = ""
+    description: str = ""
+
+
+class APIGatewayStageRequest(BaseModel):
+    rest_api_id: str = ""
+    stage_name: str
+    deployment_id: str = ""
+    description: str = ""
+    variables: list[dict[str, str]] | None = None
+
+
+class LambdaFunctionRequest(BaseModel):
+    function_name: str
+    runtime: str = "python3.12"
+    handler: str = "lambda_function.lambda_handler"
+    role: str = "arn:aws:iam::123456789012:role/service-role/cloudlearn-lambda-basic-execution"
+    description: str = ""
+    code: str = ""
+    timeout: int = 3
+    memory_size: int = 128
+    environment: dict[str, str] = {}
+    tags: list[dict[str, str]] | None = None
+
+
+class LambdaFunctionUpdateRequest(BaseModel):
+    runtime: str | None = None
+    handler: str | None = None
+    role: str | None = None
+    description: str | None = None
+    timeout: int | None = None
+    memory_size: int | None = None
+    code: str | None = None
+    environment: dict[str, str] | None = None
+    tags: list[dict[str, str]] | None = None
+
+
+class LambdaInvokeRequest(BaseModel):
+    payload: Any = {}
+    invocation_type: str = "RequestResponse"
+    log_type: str = "None"
+
+
+class LambdaVersionRequest(BaseModel):
+    description: str = ""
+
+
+class LambdaPermissionRequest(BaseModel):
+    statement_id: str = ""
+    action: str = "lambda:InvokeFunction"
+    principal: str = ""
+    source_arn: str = ""
+    source_account: str = ""
+    revision_id: str = ""
+
+
+class SQSQueueCreateRequest(BaseModel):
+    queue_name: str
+    fifo_queue: bool = False
+    content_based_deduplication: bool = False
+    visibility_timeout: int = 30
+    receive_wait_time_seconds: int = 0
+    message_retention_period: int = 345600
+    max_message_size: int = 262144
+    delay_seconds: int = 0
+    redrive_policy: dict[str, Any] | None = None
+    tags: dict[str, str] | None = None
+
+
+class SQSQueueUpdateRequest(BaseModel):
+    visibility_timeout: int | None = None
+    receive_wait_time_seconds: int | None = None
+    message_retention_period: int | None = None
+    max_message_size: int | None = None
+    delay_seconds: int | None = None
+    content_based_deduplication: bool | None = None
+    redrive_policy: dict[str, Any] | None = None
+    tags: dict[str, str] | None = None
+
+
+class SQSMessageSendRequest(BaseModel):
+    message_body: str = ""
+    message_attributes: dict[str, Any] | None = None
+    message_attributes_map: dict[str, Any] | None = None
+    message_group_id: str = ""
+    message_deduplication_id: str = ""
+
+
+class SQSReceiveRequest(BaseModel):
+    max_number_of_messages: int = 1
+    wait_time_seconds: int = 0
+    visibility_timeout: int | None = None
+
+
+class SQSVisibilityRequest(BaseModel):
+    visibility_timeout: int = 30
+
+
+class DynamoDBTableRequest(BaseModel):
+    table_name: str
+    partition_key_name: str = "id"
+    partition_key_type: str = "S"
+    sort_key_name: str = ""
+    sort_key_type: str = "S"
+    billing_mode: str = "PAY_PER_REQUEST"
+    read_capacity_units: int = 5
+    write_capacity_units: int = 5
+    tags: dict[str, str] | None = None
+
+
+class DynamoDBItemRequest(BaseModel):
+    item: dict[str, Any] = {}
+    key: dict[str, Any] = {}
+    return_values: str = "NONE"
+    attribute_updates: dict[str, Any] | None = None
+    update_expression: str = ""
+    expression_attribute_values: dict[str, Any] | None = None
+
+
+class DynamoDBQueryRequest(BaseModel):
+    partition_key_value: Any = None
+    sort_key_equals: Any = None
+    sort_key_begins_with: str = ""
+    sort_key_between: list[Any] | None = None
+    limit: int = 100
+    key_condition_expression: str = ""
+    expression_attribute_values: dict[str, Any] | None = None
+    expression_attribute_names: dict[str, str] | None = None
+
+
+class DynamoDBScanRequest(BaseModel):
+    limit: int = 100
+
+
+class DynamoDBTagRequest(BaseModel):
+    tags: dict[str, str] = {}
+
+
+class DeploymentRequest(BaseModel):
+    name: str
+    source_url: str = ""
+    runtime: str = "python"
+    command: str = ""
+    branch: str = "main"
+    repo: str = ""
+
+
+class TerraformWorkflowRequest(BaseModel):
+    plan_id: str = ""
+    confirm: bool = False
 
 
 def _apigw_state() -> dict:
@@ -4245,6 +5806,39 @@ EC2_INSTANCE_TYPE_CATALOG = [
 ]
 
 
+@app.middleware("http")
+async def _capability_middleware(request: Request, call_next):
+    principal = _iam_principal_from_request(request)
+    request.state.iam_principal = principal
+    identity = _iam_resolve_identity(principal)
+    request.state.iam_identity = identity
+    auth = _iam_route_action_resource(request)
+    # GCP-native requests are authorized by the GCP IAM PDP (in the provider
+    # middleware), not the AWS action model — don't double-check them as S3/EC2.
+    if auth is not None and not identity.get("is_root") and not _is_gcp_native_path(request.url.path) and not _is_azure_native_path(request.url.path):
+        action, resource = auth
+        allowed, reason = _iam_authorize(principal, action, resource, {
+            "aws:PrincipalArn": identity.get("arn", ""),
+            "aws:PrincipalType": identity.get("type", ""),
+            "aws:username": identity.get("name", ""),
+            "aws:RequestedRegion": "us-east-1",
+        })
+        if not allowed:
+            return _iam_deny_response(request, action, resource, reason)
+    capability_path = getattr(request.state, "cloudlearn_original_path", request.url.path)
+    _ensure_capability(capability_path)
+    response = await call_next(request)
+    if request.method in {"POST", "PUT", "DELETE", "PATCH"}:
+        try:
+            _persist_state()
+        except Exception:
+            pass
+    return response
+
+
+@app.get("/healthz", include_in_schema=False)
+def healthz():
+    return {"status": "ok", "tier": STATE["license"].get("tier", "free"), "packs_active": sum(1 for p in STATE["packs"].values() if p.get("active"))}
 
 
 def _reconcile_runtime_instances(instances: dict[str, dict]) -> None:
@@ -4287,7 +5881,357 @@ def _prune_expired_terminated_instances_from(instances: dict[str, dict]) -> None
             _persist_state()
 
 
+@app.on_event("startup")
+def _startup_reconcile_ec2_state():
+    try:
+        PLATFORM.runtime.start_bootstrap()
+    except Exception:
+        pass
+    try:
+        PLATFORM.rehydrate_cloudsim()
+    except Exception:
+        pass
+    _reconcile_runtime_instances(ec2_state.get("instances", {}))
+    _reconcile_runtime_instances(gcp_compute_state.get("instances", {}))
+    _prune_expired_terminated_instances()
+    _prune_expired_terminated_instances_from(gcp_compute_state.get("instances", {}))
 
+
+# ── Tier enforcement middleware ─────────────────────────────────────────────
+# Resolves (provider, service_key) from request, looks up active tenant's
+# tier, and denies locked services with a structured 403 body that the SPA
+# converts into an upgrade modal.
+#
+# Set CLOUDLEARN_TIER_ENFORCE=0 to disable enforcement (dev mode); the
+# default is ENFORCE (so Free users actually see Free behavior).
+
+_TIER_ENFORCE = os.environ.get("CLOUDLEARN_TIER_ENFORCE", "1").strip() not in ("0", "false", "")
+
+
+def _resolve_provider_service(request: Request) -> tuple[str, str]:
+    """Map a request → (provider, service_key) for tier-enforcement lookup.
+
+    Returns ('', '') when the request isn't a provider-scoped operation
+    (e.g. /api/spaces, /healthz, /console/*) — the middleware lets those
+    through unconditionally.
+    """
+    path = request.url.path
+    target = request.headers.get("x-amz-target", "") or ""
+
+    # GCP REST paths — these use Google-native URL prefixes.
+    if path.startswith("/compute/v1/"):
+        return "gcp", "compute"
+    if path.startswith(("/storage/v1/", "/upload/storage/v1/", "/download/storage/v1/")):
+        return "gcp", "storage"
+    if path.startswith("/sql/v1beta4/"):
+        return "gcp", "cloudsql"
+    if path.startswith("/pubsub/v1/"):
+        return "gcp", "pubsub"
+    if path.startswith("/firestore/v1/"):
+        return "gcp", "firestore"
+    if path.startswith("/api/gcp/apigateway/"):
+        return "gcp", "apigateway"
+    # /v1/projects/{p}/... — disambiguate by suffix
+    if path.startswith("/v1/projects/"):
+        if "/topics/" in path or "/subscriptions/" in path:
+            return "gcp", "pubsub"
+        if "/secrets/" in path:
+            return "gcp", "secretmanager"
+        if "/cryptoKeys/" in path or "/keyRings/" in path:
+            return "gcp", "kms"
+        if "/triggers/" in path or "/channels/" in path:
+            return "gcp", "eventarc"
+        if "/functions/" in path:
+            return "gcp", "functions"
+        if "/serviceAccounts" in path or "/iamPolicies" in path or ":getIamPolicy" in path:
+            return "gcp", "iam"
+        if "/databases/" in path or "/documents/" in path:
+            return "gcp", "firestore"
+
+    # Azure ARM paths — /subscriptions/.../Microsoft.{Provider}/...
+    if path.startswith("/subscriptions/"):
+        if "/Microsoft.Compute/" in path:        return "azure", "vm"
+        if "/Microsoft.Storage/" in path:        return "azure", "storage"
+        if "/Microsoft.Sql/" in path:            return "azure", "sql"
+        if "/Microsoft.DocumentDB/" in path:     return "azure", "cosmos"
+        if "/Microsoft.Web/" in path:            return "azure", "functionapp"
+        if "/Microsoft.ApiManagement/" in path:  return "azure", "apim"
+        if "/Microsoft.Network/" in path:        return "azure", "vnet"
+        if "/Microsoft.EventGrid/" in path:      return "azure", "eventgrid"
+        if "/Microsoft.KeyVault/" in path:       return "azure", "keyvault"
+        if "/Microsoft.ServiceBus/" in path:     return "azure", "servicebus"
+        if "/Microsoft.Authorization/" in path:  return "azure", "rbac"
+    # Azure data-plane (under /azure-data/)
+    if path.startswith("/azure-data/"):
+        if "/keyvault/" in path:   return "azure", "keyvault"
+        if "/eventgrid/" in path:  return "azure", "eventgrid"
+        if "/servicebus/" in path: return "azure", "servicebus"
+        if "/cosmos/" in path:     return "azure", "cosmos"
+        if "/blob/" in path:       return "azure", "storage"
+        if "/sql/" in path:        return "azure", "sql"
+
+    # AWS — X-Amz-Target dispatches first (JSON-RPC), then auth-scope.
+    if target.startswith("DynamoDB_"):              return "aws", "dynamodb"
+    if target.startswith("TrentService."):          return "aws", "kms"
+    if target.startswith("secretsmanager."):        return "aws", "secretsmanager"
+    if target.startswith("AWSEvents."):             return "aws", "eventbridge"
+    if target.startswith("AmazonSQS."):             return "aws", "sqs"
+    # Auth-scope service inference for the query-protocol APIs (SQS form,
+    # IAM/EC2/RDS/etc.) and for S3 SigV4.
+    auth = request.headers.get("authorization", "") or ""
+    m = re.search(r"Credential=[^/]+/\d+/[^/]+/(\w+)/aws4_request", auth)
+    if m:
+        svc = m.group(1).lower()
+        # Map AWS service-scope → catalog service_key (most match 1:1).
+        return "aws", svc
+
+    return "", ""
+
+
+# ── Per-tenant rate-limit (token bucket) ───────────────────────────────────
+# Sustained rate from tier policy (`rate_limit_rps`); burst capacity = 4× the
+# steady rate. Buckets are per-tenant + thread-safe. Free=10rps / Student=50 /
+# Developer=200 / Enterprise=unlimited. Hot paths (healthz, static) bypass.
+# On exceed → 429 + `Retry-After` + structured body.
+import threading as _threading
+
+_RATE_LOCK = _threading.Lock()
+_RATE_BUCKETS: dict[str, tuple[float, float]] = {}   # tenant_id -> (tokens, last_refill_ts)
+_RATE_BURST_MULT = 4.0
+
+
+def _rate_limit_tenant(tenant_id: str, rps: int) -> tuple[bool, float]:
+    """Try to consume 1 token from the tenant's bucket. Returns
+    `(allowed, retry_after_seconds)`. `rps <= 0` means UNLIMITED → always allow."""
+    if rps <= 0:
+        return True, 0.0
+    burst = float(rps) * _RATE_BURST_MULT
+    now = time.time()
+    with _RATE_LOCK:
+        tokens, last = _RATE_BUCKETS.get(tenant_id, (burst, now))
+        elapsed = now - last
+        tokens = min(burst, tokens + elapsed * rps)
+        if tokens >= 1.0:
+            tokens -= 1.0
+            _RATE_BUCKETS[tenant_id] = (tokens, now)
+            return True, 0.0
+        retry_after = max(0.001, (1.0 - tokens) / float(rps))
+        _RATE_BUCKETS[tenant_id] = (tokens, now)
+        return False, retry_after
+
+
+_RATE_LIMIT_BYPASS_PATHS = (
+    "/healthz", "/favicon.ico", "/static/", "/assets/",
+    "/api/runtime/branding/",  # public CSS endpoint; per-tenant gate would loop
+)
+
+
+@app.middleware("http")
+async def _rate_limit_middleware(request: Request, call_next):
+    """Per-tenant token-bucket rate limit. Bypasses health probes + static."""
+    p = request.url.path
+    if any(p.startswith(x) for x in _RATE_LIMIT_BYPASS_PATHS):
+        return await call_next(request)
+    try:
+        tid = _active_tenant_id() or "anonymous"
+        from core import tier_policy as _tp
+        tier = _active_tier()
+        rps = _tp.rate_limit_rps(tier)
+        allowed, retry_after = _rate_limit_tenant(tid, rps)
+        if not allowed:
+            return JSONResponse({
+                "error": {
+                    "ok": False, "code": "rate_limited",
+                    "reason": f"{tier} tier limit: {rps} requests/sec sustained",
+                    "active_tier": tier,
+                    "tenant_id": tid,
+                    "rate_limit_rps": rps,
+                    "retry_after_s": round(retry_after, 3),
+                    "docs": "https://cloudlearn.io/docs/tiers",
+                }
+            }, status_code=429, headers={
+                "Retry-After": str(max(1, int(retry_after + 0.999))),
+                "X-RateLimit-Limit-RPS": str(rps),
+                "X-CloudLearn-Tier": tier,
+            })
+    except Exception:
+        pass  # never let the limiter break a request
+    return await call_next(request)
+
+
+@app.middleware("http")
+async def _tier_enforcement_middleware(request: Request, call_next):
+    """Enforce tier_policy.check_service before handlers run.
+
+    Lets non-provider requests through. On denial, returns a structured
+    JSON 403 body the SPA renders as an upgrade modal.
+    """
+    # ── Custom-domain Host → tenant resolution (Enterprise tier) ────────
+    # When the inbound Host matches a configured custom-domain, set the
+    # active tenant for the rest of this request. Tenants without a custom
+    # domain are unaffected (the regular X-CloudLearn-Tenant header path
+    # still works).
+    try:
+        from core import tenant_theming as _tt
+        host_header = request.headers.get("host", "")
+        domain_tenant = _tt.resolve_domain_to_tenant(STATE, host_header)
+        if domain_tenant:
+            # Stash for downstream handlers to read via state
+            request.state.resolved_tenant_id = domain_tenant
+    except Exception:
+        pass
+
+    # ── Cross-tenant RBAC: X-CloudLearn-Acting-As-Tenant header ─────────
+    # When a user wants to operate on another tenant's resources via an
+    # explicit grant, they send the target tenant in this header. The
+    # grant is checked against cross_tenant_rbac.check() — on deny → 403;
+    # on allow → request executes against the target tenant's state.
+    acting_as = request.headers.get("x-cloudlearn-acting-as-tenant", "").strip()
+    if acting_as:
+        try:
+            from core import cross_tenant_rbac as _xt
+            grantee = _active_tenant_id()  # the caller's actual tenant
+            # Service hint from URL for fine-grained scope. Best-effort.
+            svc_hint = ""
+            try:
+                _provider_svc, _svc_key = _resolve_provider_service(request)
+                svc_hint = _svc_key or ""
+            except Exception:
+                pass
+            grant_check = _xt.check(STATE, grantee, acting_as,
+                                     request.method, service=svc_hint)
+            if not grant_check.get("ok"):
+                return JSONResponse({
+                    "error": {
+                        "ok": False, "code": "xt_rbac_denied",
+                        "reason": grant_check.get("reason", "cross-tenant access not granted"),
+                        "grantee_tenant": grantee,
+                        "target_tenant": acting_as,
+                        "method": request.method,
+                        "service": svc_hint,
+                        "docs": "https://cloudlearn.io/docs/cross-tenant-rbac",
+                    }
+                }, status_code=403, headers={"X-CloudLearn-XTRBAC-Denied": "1"})
+            # Grant approved — swap the resolved tenant for this request.
+            request.state.resolved_tenant_id = acting_as
+            request.state.xt_rbac_grant_id = grant_check.get("grant_id", "")
+            request.state.xt_rbac_role = grant_check.get("role", "")
+        except Exception:
+            pass  # fail-open on lookup errors (logged via diagnostics elsewhere)
+
+    if not _TIER_ENFORCE:
+        return await call_next(request)
+
+    provider, service_key = _resolve_provider_service(request)
+    if not provider or not service_key:
+        return await call_next(request)
+
+    # Get active tenant's tier + primary_cloud (Student-only).
+    try:
+        tenant = _tenant_dict(_active_tenant_id()) or {}
+    except Exception:
+        tenant = {}
+    tier = str(tenant.get("license_tier")
+               or (STATE.get("license") or {}).get("tier")
+               or "free")
+    primary_cloud = str(tenant.get("primary_cloud") or "")
+
+    # ── SSO Bearer-token validation (Enterprise tier, when configured) ──
+    # If a Bearer token is present AND the active tenant has SSO configured,
+    # validate the token against the IdP's JWKS. Bare-header (no Bearer)
+    # requests pass through unchanged so existing X-CloudLearn-Tenant flows
+    # keep working — SSO is additive, not replacement.
+    authz = request.headers.get("authorization", "")
+    if authz.startswith("Bearer ") and tenant:
+        sso_conf = (STATE.get("sso_config") or {}).get(_active_tenant_id()) or {}
+        if sso_conf.get("enabled"):
+            try:
+                from core import sso_config as _sso
+                validation = _sso.validate_bearer(STATE, _active_tenant_id(), authz)
+                if not validation.get("ok"):
+                    return JSONResponse({
+                        "error": {
+                            "ok": False, "code": "sso_invalid_token",
+                            "reason": validation.get("reason", "invalid"),
+                            "active_tier": tier,
+                            "docs": "https://cloudlearn.io/docs/sso",
+                        }
+                    }, status_code=401, headers={"X-CloudLearn-SSO-Denied": "1"})
+                # Stash claims for downstream handlers
+                request.state.sso_user = validation.get("user_identifier")
+                request.state.sso_claims = validation.get("claims")
+            except Exception:
+                pass  # fail-open on internal errors
+
+    from core import tier_policy as _tp
+    result = _tp.check_service(tier, service_key,
+                               primary_cloud=primary_cloud,
+                               request_cloud=provider)
+    if not result["ok"]:
+        # Augment with the docs URL + active tier facts for the SPA modal.
+        result["active_tier"] = tier
+        result["request_provider"] = provider
+        result["request_service"] = service_key
+        result["docs"] = "https://cloudlearn.io/docs/tiers"
+        # Fire a notifications event for tier-limit denials so configured
+        # channels (Slack/webhook) get a heads-up when users hit a wall.
+        try:
+            from core import notifications as _nt
+            _nt.emit(STATE, _active_tenant_id(), "tier.limit_denied", {
+                "summary": result.get("reason", "tier limit hit"),
+                "active_tier": tier, "code": result.get("code"),
+                "upgrade_to": result.get("upgrade_to"),
+                "provider": provider, "service": service_key,
+            })
+        except Exception:
+            pass
+        return JSONResponse(
+            {"error": result},
+            status_code=403,
+            headers={"X-CloudLearn-Tier-Denied": result.get("code", "tier_locked")},
+        )
+
+    # ── Cedar IAM enforcement (Developer+ tiers only) ───────────────────
+    # When the active tier has `cedar_enforcement=True` AND the active space
+    # has explicit Cedar policies set, route the request through cedar_engine
+    # for authorization. When no policies are set, cedar_engine returns
+    # default-allow so this is a no-op for users who haven't configured IAM.
+    tier_policy = _tp.policy_for(tier)
+    if (tier_policy.get("features") or {}).get("cedar_enforcement"):
+        try:
+            spaces_state = STATE.get("spaces") or {}
+            active_space_id = spaces_state.get("active_space_id", "")
+            if active_space_id:
+                from core import cedar_engine as _cedar
+                principal = f'User::"{_active_tenant_id()}"'
+                action = f'Action::"{provider}:{service_key}:{request.method}"'
+                resource = f'Resource::"{provider}/{service_key}"'
+                allowed, reason = _cedar.evaluate(
+                    active_space_id, principal, action, resource,
+                    context={"path": str(request.url.path),
+                             "method": request.method,
+                             "provider": provider,
+                             "service": service_key},
+                )
+                if not allowed:
+                    return JSONResponse({
+                        "error": {
+                            "ok": False, "code": "cedar_denied",
+                            "reason": f"Cedar policy denied this action: {reason}",
+                            "active_tier": tier,
+                            "principal": principal,
+                            "action": action,
+                            "resource": resource,
+                            "diagnostic": reason,
+                            "docs": "https://cloudlearn.io/docs/cedar",
+                        }
+                    }, status_code=403, headers={"X-CloudLearn-Cedar-Denied": "1"})
+        except Exception:
+            # Never let Cedar errors break the control plane — fail-open with
+            # a log line. Operators see the issue via /api/iam/evaluate probes.
+            pass
+
+    return await call_next(request)
 
 
 # ── Tier quantity-cap enforcement helpers ───────────────────────────────────
@@ -4500,6 +6444,172 @@ def _enforce_size_cap(resource_kind: str, provider: str, instance_type: str) -> 
         return  # unknown size string in policy → fail-open
 
 
+def _enforce_quantity_cap(resource_type: str) -> None:
+    """Raise HTTPException(403) with the structured tier-policy body if creating
+    one more <resource_type> would exceed the active tier's per-space cap.
+    Safe to call at the top of any create-handler — silently no-ops when the
+    tier policy doesn't define a cap for this resource_type, OR when the
+    cap is UNLIMITED.
+    """
+    tier = _active_tier()
+    current = _count_active_space_resources(resource_type)
+    from core import tier_policy as _tp
+    result = _tp.check_quantity(tier, resource_type, current)
+    if not result["ok"]:
+        result["active_tier"] = tier
+        result["docs"] = "https://cloudlearn.io/docs/tiers"
+        raise HTTPException(status_code=403, detail=result)
+
+
+# ── In-memory state ─────────────────────────────────────────────────────────
+# buckets   : { name → { region, created, access, versioning, arn, tags:{} } }
+# objects   : { bucket → { key → { data, size, content_type, last_modified, etag,
+#                                   metadata:{}, tags:{}, storage_class } } }
+# multiparts: { upload_id → { bucket, key, parts:{part_number → {data,etag}},
+#                              content_type, metadata, initiated } }
+class _SpaceScopedDictProxy(MutableMapping):
+    def __init__(self, service_key: str, default_factory, nested_key: str | None = None):
+        self.service_key = service_key
+        self.default_factory = default_factory
+        self.nested_key = nested_key
+
+    def _service_state(self) -> dict:
+        spaces_state = STATE.setdefault("spaces", {"spaces": {}, "active_space_id": "", "settings": {"max_spaces": 6, "default_provider": "aws", "default_region": "us-east-1"}})
+        active_id = spaces_state.get("active_space_id", "")
+        space = spaces_state.get("spaces", {}).get(active_id, {}) if active_id else {}
+        req_provider = str(REQUEST_PROVIDER.get() or "aws").lower().strip()
+        # STRUCTURAL ISOLATION:
+        #   1. Cross-tenant access — space.tenant_id must equal active_tenant_id.
+        #   2. Cross-provider access — space.provider must equal REQUEST_PROVIDER
+        #      (Space 1:1 Provider rule).
+        # Either mismatch → fall through to a non-persisted scratch dict; a
+        # handler literally cannot reach another tenant's or another provider's
+        # resources even by mistake. The API-layer 403 fires first for good UX;
+        # this is the defense-in-depth.
+        if isinstance(space, dict) and space and active_id:
+            space_tid = space.get("tenant_id") or DEFAULT_TENANT_ID
+            space_provider = str(space.get("provider") or "aws").lower().strip()
+            if space_tid != _active_tenant_id() or space_provider != req_provider:
+                return self.default_factory()  # blocked, scratch (not persisted)
+        if isinstance(space, dict) and space:
+            service_states = space.setdefault("service_states", {})
+            service_key = self.service_key if req_provider == "aws" else f"{req_provider}_{self.service_key}"
+            service_state = service_states.setdefault(service_key, self.default_factory())
+        else:
+            # No active space at all → legacy deployment-level fallback.
+            service_state = STATE.setdefault(self.service_key, self.default_factory())
+        return service_state
+
+    def _target(self) -> dict:
+        service_state = self._service_state()
+        if self.nested_key is None:
+            return service_state
+        return service_state.setdefault(self.nested_key, {})
+
+    def __getitem__(self, key):
+        return self._target()[key]
+
+    def __setitem__(self, key, value):
+        self._target()[key] = value
+
+    def __delitem__(self, key):
+        del self._target()[key]
+
+    def __iter__(self):
+        return iter(self._target())
+
+    def __len__(self):
+        return len(self._target())
+
+    def __contains__(self, key):
+        return key in self._target()
+
+    def get(self, key, default=None):
+        return self._target().get(key, default)
+
+    def setdefault(self, key, default=None):
+        return self._target().setdefault(key, default)
+
+    def pop(self, key, default=None):
+        return self._target().pop(key, default)
+
+    def update(self, *args, **kwargs):
+        return self._target().update(*args, **kwargs)
+
+    def clear(self):
+        return self._target().clear()
+
+    def keys(self):
+        return self._target().keys()
+
+    def items(self):
+        return self._target().items()
+
+    def values(self):
+        return self._target().values()
+
+
+buckets:    Dict[str, dict] = _SpaceScopedDictProxy("s3", lambda: {"buckets": {}, "objects": {}, "multiparts": {}}, "buckets")
+objects:    Dict[str, dict] = _SpaceScopedDictProxy("s3", lambda: {"buckets": {}, "objects": {}, "multiparts": {}}, "objects")
+multiparts: Dict[str, dict] = _SpaceScopedDictProxy("s3", lambda: {"buckets": {}, "objects": {}, "multiparts": {}}, "multiparts")
+iam_state = STATE.setdefault("iam", {"users": {}, "groups": {}, "roles": {}, "policies": {}, "attachments": [], "identity_providers": {}, "account_settings": {"password_policy": {"minimum_length": 8, "require_symbols": True, "require_numbers": True, "require_uppercase": True, "require_lowercase": True}}})
+iam_state.setdefault("users", {})
+iam_state.setdefault("groups", {})
+iam_state.setdefault("roles", {})
+iam_state.setdefault("policies", {})
+iam_state.setdefault("attachments", [])
+iam_state.setdefault("identity_providers", {})
+iam_state.setdefault("account_settings", {"password_policy": {"minimum_length": 8, "require_symbols": True, "require_numbers": True, "require_uppercase": True, "require_lowercase": True}})
+ec2_state = _SpaceScopedDictProxy("ec2", lambda: {"instances": {}})
+gcp_compute_state = _SpaceScopedDictProxy("gcp_compute", lambda: {"instances": {}, "instance_groups": {}, "disks": {}, "snapshots": {}, "images": {}, "operations": []})
+gcp_storage_state = _SpaceScopedDictProxy("gcp_storage", lambda: {"buckets": {}, "objects": {}, "folders": {}, "transfers": {}, "policies": {}, "operations": []})
+gcp_sql_state = _SpaceScopedDictProxy("gcp_sql", lambda: {"instances": {}, "backups": {}, "query_insights": {}, "operations": []})
+gcp_pubsub_state = _SpaceScopedDictProxy("gcp_pubsub", lambda: {"topics": {}, "subscriptions": {}, "messages": {}, "schemas": {}, "operations": []})
+gcp_firestore_state = _SpaceScopedDictProxy("gcp_firestore", lambda: {"databases": {}, "documents": {}, "indexes": {}, "operations": []})
+gcp_functions_state = _SpaceScopedDictProxy("gcp_functions", lambda: {"functions": {}, "versions": {}, "invocations": [], "operations": []})
+gcp_apigw_state = _SpaceScopedDictProxy("gcp_apigateway", lambda: {"apis": {}, "api_configs": {}, "gateways": {}, "operations": [], "logs": []})
+gcp_vpc_state = _SpaceScopedDictProxy("gcp_vpc", lambda: {"networks": {}, "subnetworks": {}, "firewalls": {}, "routes": {}, "operations": []})
+gcp_iam_state = _SpaceScopedDictProxy("gcp_iam", lambda: {"policies": {}, "service_accounts": {}, "bindings": [], "operations": []})
+
+# Azure ARM resources are space-scoped + persisted exactly like AWS/GCP: with
+# REQUEST_PROVIDER="azure" the proxy resolves to the active space's
+# service_states["azure_arm"]["resources"] (a {resource-id: record} dict) which
+# lives in STATE and is written out by _persist_state(). We inject this proxy
+# as azure_services._state so every ARM handler reads/writes the active space.
+azure_arm_state = _SpaceScopedDictProxy("arm", lambda: {"resources": {}}, "resources")
+provider_azure_services._state = azure_arm_state
+
+
+def _azure_state_dict() -> dict:
+    """The active space's Azure ARM resources dict, read independent of
+    REQUEST_PROVIDER (cross-cutting consumers like the CloudSim graph inject and
+    the console summary run outside an azure-native request). Matches exactly
+    what the azure_arm_state proxy resolves to for an azure request."""
+    space = _gcp_active_space_dict()
+    if isinstance(space, dict) and space:
+        return (space.setdefault("service_states", {})
+                     .setdefault("azure_arm", {"resources": {}})
+                     .setdefault("resources", {}))
+    return STATE.setdefault("azure_arm", {"resources": {}}).setdefault("resources", {})
+
+# GCP service_state buckets and the record collections inside each, used by the
+# console summary (counter source-of-truth) and the project consolidation. Keys
+# are passed to _cloudsim_service_state(), which also matches the gcp_-prefixed
+# variant (e.g. "gcp_gcp_pubsub") that native-API writes produce. These are the
+# FLAT collections ({id: record} with a "project" field). IAM is handled
+# separately because it nests by project ({project: {key: record}}).
+_GCP_CONSOLE_COLLECTIONS: dict[str, list[str]] = {
+    "gcp_compute": ["instances", "instance_groups", "disks", "snapshots", "images"],
+    "gcp_storage": ["buckets", "folders", "transfers", "policies"],
+    "gcp_sql": ["instances", "backups", "query_insights"],
+    "gcp_pubsub": ["topics", "subscriptions", "schemas"],
+    "gcp_firestore": ["databases", "documents", "indexes"],
+    "gcp_functions": ["functions", "versions"],
+    "gcp_apigateway": ["apis", "api_configs", "configs", "gateways"],
+    "gcp_vpc": ["networks", "subnetworks", "firewalls", "routes"],
+}
+# IAM stores nest by project: {project: {key: record}}.
+_GCP_IAM_NESTED_COLLECTIONS = ["service_accounts", "policies", "users", "groups", "roles"]
 
 
 def _gcp_active_space_dict() -> dict:
@@ -4532,8 +6642,277 @@ def _gcp_state_proxies() -> dict:
     }
 
 
+@app.get("/api/gcp/console/summary")
+def api_gcp_console_summary(project: str = ""):
+    """Per-service GCP resource counts read straight from the Internal DB
+    (the source of truth), scoped to the active space and the project the
+    console is using. Drives the left-nav counters so they always equal the
+    grids."""
+    target = _gcp_project_name(project) if project else ""
+    # Read via the SAME space/provider-scoped proxies the grid handlers use, so the
+    # counter and the grid always resolve the identical store bucket.
+    proxies = _gcp_state_proxies()
+
+    def coll_of(service_key: str, collection: str) -> dict:
+        c = proxies[service_key].get(collection, {})
+        return c if isinstance(c, dict) else {}
+
+    def count(service_key: str, collection: str) -> int:
+        return sum(1 for rec in coll_of(service_key, collection).values()
+                   if isinstance(rec, dict) and _gcp_record_matches_project(rec, target))
+
+    def count_iam(collection: str) -> int:
+        # IAM nests by project: {project: {key: record}}. Count records under the
+        # target project (or all projects when unscoped).
+        coll = coll_of("gcp_iam", collection)
+        if target:
+            sub = coll.get(target, {})
+            return sum(1 for rec in sub.values() if isinstance(rec, dict)) if isinstance(sub, dict) else 0
+        return sum(sum(1 for rec in sub.values() if isinstance(rec, dict))
+                   for sub in coll.values() if isinstance(sub, dict))
+
+    docs = coll_of("gcp_firestore", "documents")
+    collections: set[str] = set()
+    if isinstance(docs, dict):
+        for rec in docs.values():
+            if not (isinstance(rec, dict) and _gcp_record_matches_project(rec, target)):
+                continue
+            name = str(rec.get("name") or rec.get("path") or "")
+            if "/documents/" in name:
+                tail = name.split("/documents/", 1)[1]
+                collections.add(tail.split("/", 1)[0])
+            elif rec.get("collection"):
+                collections.add(str(rec.get("collection")))
+
+    # Firestore: when delegating to the emulator, count distinct root collections there.
+    try:
+        from core import gcp_firestore_emulator as _fe
+        if _fe.available():
+            collections = set()
+            for d in _fe.list_root(target or _gcp_project_name(""), "(default)"):
+                nm = str(d.get("name") or "")
+                if "/documents/" in nm:
+                    collections.add(nm.split("/documents/", 1)[1].split("/", 1)[0])
+    except Exception:
+        pass
+
+    def _pubsub_count() -> int:
+        # When delegating to the Pub/Sub emulator, topics live there, not in the DB.
+        try:
+            from core import gcp_pubsub_emulator as _pe
+            if _pe.available():
+                return len(_pe.list_topics(target or _gcp_project_name("")))
+        except Exception:
+            pass
+        return count("gcp_pubsub", "topics")
+
+    services = {
+        "gcp-compute": count("gcp_compute", "instances"),
+        "gcp-storage": count("gcp_storage", "buckets"),
+        "gcp-cloudsql": count("gcp_sql", "instances"),
+        "gcp-pubsub": _pubsub_count(),
+        "gcp-firestore": len(collections),
+        "gcp-functions": count("gcp_functions", "functions"),
+        "gcp-apigateway": count("gcp_apigateway", "apis"),
+        "gcp-vpc": count("gcp_vpc", "networks"),
+        "gcp-iam": count_iam("service_accounts"),
+    }
+    return {"project": target, "services": services}
 
 
+@app.post("/api/gcp/console/consolidate")
+async def api_gcp_consolidate_project(request: Request):
+    """Re-key every GCP resource in the active space onto a single canonical
+    project (space = project). Fixes legacy scatter so the project-scoped views
+    surface everything the space owns. Idempotent."""
+    payload = {}
+    if request is not None:
+        try:
+            payload = await request.json()
+        except Exception:
+            payload = {}
+    payload = payload if isinstance(payload, dict) else {}
+    target = _gcp_project_name(payload.get("project"))
+    proxies = _gcp_state_proxies()
+    updated = 0
+
+    def _retarget(rec: dict, old: str) -> bool:
+        changed = False
+        if rec.get("project") != target:
+            rec["project"] = target
+            changed = True
+        if old and old != target:
+            for field in ("name", "selfLink", "topic", "subscription", "network", "subnetwork", "email"):
+                value = rec.get(field)
+                if isinstance(value, str) and old in value:
+                    if field == "email":
+                        rec[field] = value.replace(f"@{old}.", f"@{target}.")
+                    else:
+                        rec[field] = value.replace(f"projects/{old}/", f"projects/{target}/")
+                    changed = True
+        return changed
+
+    # IAM nests records UNDER a project key ({project: {key: record}}), so merge
+    # every project's records under the canonical project key and retarget them.
+    iam_store = proxies["gcp_iam"]
+    for collection in _GCP_IAM_NESTED_COLLECTIONS:
+        nested = iam_store.get(collection)
+        if not isinstance(nested, dict):
+            continue
+        merged: dict = {}
+        for proj_key, sub in list(nested.items()):
+            if not isinstance(sub, dict):
+                continue
+            for key, rec in sub.items():
+                if not isinstance(rec, dict):
+                    continue  # drops scalar keys injected by earlier runs
+                if _retarget(rec, str(rec.get("project") or proj_key or "")):
+                    updated += 1
+                merged[key] = rec
+        nested.clear()
+        nested[target] = merged
+
+    # Every other GCP service: walk the store and retarget real resource records
+    # (identified by selfLink/kind/uniqueId/email) onto the canonical project.
+    # Records are NOT recursed into, so their nested field dicts are left alone.
+    # A scalar "project" found on a non-record container is corruption injected by
+    # an earlier run (e.g. storage objects-by-bucket) and is stripped.
+    _record_fields = ("selfLink", "kind", "uniqueId", "email")
+
+    def _is_record(node: dict) -> bool:
+        # Stored records carry a top-level "name" string; nested containers key BY
+        # name instead, so they lack one.
+        return isinstance(node.get("name"), str) or any(f in node for f in _record_fields)
+
+    def _walk(node) -> None:
+        nonlocal updated
+        if not isinstance(node, dict):
+            return
+        if _is_record(node):
+            if _retarget(node, str(node.get("project") or "")):
+                updated += 1
+            return
+        if isinstance(node.get("project"), str):
+            node.pop("project", None)
+            updated += 1
+        for value in list(node.values()):
+            _walk(value)
+
+    for service_key in ("gcp_compute", "gcp_storage", "gcp_sql", "gcp_pubsub",
+                        "gcp_firestore", "gcp_functions", "gcp_apigateway", "gcp_vpc"):
+        proxy = proxies[service_key]
+        for collection in list(proxy.keys()):
+            _walk(proxy.get(collection))
+    try:
+        _persist_state()
+    except Exception:
+        pass
+    try:
+        _refresh_cloudsim_gcp_summary()
+    except Exception:
+        pass
+    return {"project": target, "updated": updated}
+
+
+def _gcp_vpc_reconcile() -> dict:
+    """Apply firewall enforcement (or restore full access) on every LXD-backed
+    instance in the active space. Default base stays ACCEPT; only rule-derived
+    DROP/ACCEPT entries are programmed, scoped to instances the rules target."""
+    from core import gcp_vpc_enforce
+    space = _gcp_active_space_dict()
+    enforce = bool(space.get("enforce_vpc"))
+    firewalls = [fw for fw in gcp_vpc_state.get("firewalls", {}).values() if isinstance(fw, dict)]
+    applied: list[str] = []
+    for inst in gcp_compute_state.get("instances", {}).values():
+        if not isinstance(inst, dict) or str(inst.get("runtime_backend") or "") != "lxd":
+            continue
+        container = inst.get("container_name") or (f"cloudlearn-{inst.get('instance_id')}" if inst.get("instance_id") else "")
+        if not container:
+            continue
+        if enforce:
+            tags = inst.get("tags") or []
+            rules = [fw for fw in firewalls if gcp_vpc_enforce.rule_applies(fw, tags)]
+            script = gcp_vpc_enforce.build_script(rules)
+        else:
+            script = gcp_vpc_enforce.clear_script()
+        try:
+            _lxd_run(["exec", container, "--", "sh", "-c", script], timeout=30)
+            applied.append(container)
+        except Exception:
+            pass
+    return {"enforced": enforce, "instances": applied}
+
+
+@app.post("/api/gcp/console/vpc-reconcile")
+def api_gcp_vpc_reconcile():
+    """Re-apply VPC firewall enforcement to all governed instances (used by the
+    console after editing rules)."""
+    return _gcp_vpc_reconcile()
+
+
+@app.get("/api/gcp/console/enforcement")
+def api_gcp_get_enforcement():
+    """Per-space enforcement flags + the principal IAM checks run as."""
+    space = _gcp_active_space_dict()
+    return {
+        "iam": bool(space.get("enforce_iam")),
+        "vpc": bool(space.get("enforce_vpc")),
+        "principal": space.get("active_principal") or "root",
+    }
+
+
+@app.post("/api/gcp/console/enforcement")
+async def api_gcp_set_enforcement(request: Request):
+    payload = {}
+    if request is not None:
+        try:
+            payload = await request.json()
+        except Exception:
+            payload = {}
+    payload = payload if isinstance(payload, dict) else {}
+    space = _gcp_active_space_dict()
+    if "iam" in payload:
+        space["enforce_iam"] = bool(payload["iam"])
+    if "vpc" in payload:
+        space["enforce_vpc"] = bool(payload["vpc"])
+    if "principal" in payload:
+        space["active_principal"] = str(payload["principal"] or "root")
+    try:
+        _persist_state()
+    except Exception:
+        pass
+    if "vpc" in payload:
+        try:
+            _gcp_vpc_reconcile()
+        except Exception:
+            pass
+    return {
+        "iam": bool(space.get("enforce_iam")),
+        "vpc": bool(space.get("enforce_vpc")),
+        "principal": space.get("active_principal") or "root",
+    }
+
+
+vpc_state = _SpaceScopedDictProxy("vpc", lambda: {"vpcs": {}, "subnets": {}, "security_groups": {}, "route_tables": {}, "internet_gateways": {}})
+rds_state = _SpaceScopedDictProxy("rds", lambda: {"db_instances": {}, "db_subnet_groups": {}, "db_parameter_groups": {}, "db_snapshots": {}, "events": []})
+apigw_state = _SpaceScopedDictProxy("apigateway", lambda: {"apis": {}, "logs": []})
+lambda_state = _SpaceScopedDictProxy("lambda", lambda: {"functions": {}, "events": [], "invocations": []})
+sqs_state = _SpaceScopedDictProxy("sqs", lambda: {"queues": {}, "events": []})
+ddb_state = _SpaceScopedDictProxy("dynamodb", lambda: {"tables": {}, "events": []})
+runtime_state = STATE.setdefault(
+    "runtime",
+    {"bundles": copy.deepcopy(_DEFAULT_RUNTIME_BUNDLES)},
+)
+runtime_state.setdefault("lxd", {"status": "missing", "message": "", "mode": "auto", "last_checked": ""})
+github_state = STATE.setdefault("github", {"connections": {}, "repos": {}, "deployments": {}})
+
+S3_NS = "http://s3.amazonaws.com/doc/2006-03-01/"
+
+
+# ── Helpers ──────────────────────────────────────────────────────────────────
+
+def _now() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
 
 
 def _now_http() -> str:
@@ -5683,6 +8062,25 @@ def api_get_bucket_versioning(name: str):
     return {"name": name, "versioning": _s3_bucket_versioning_status(name)}
 
 
+class BucketVersioningRequest(BaseModel):
+    status: str
+
+
+class S3NotificationRuleRequest(BaseModel):
+    id: str = ""
+    destination_type: str = "TopicConfiguration"
+    destination: str = ""
+    events: list[str] = []
+    prefix: str = ""
+    suffix: str = ""
+
+
+class BucketNotificationRequest(BaseModel):
+    event_bridge_enabled: bool = False
+    rules: list[S3NotificationRuleRequest] = []
+
+
+@api.delete("/buckets/{name}")
 def api_delete_bucket(name: str):
     if name not in buckets:
         raise HTTPException(404, detail="NoSuchBucket")
@@ -7980,6 +10378,7 @@ def _console_execute(instance: dict, command: str) -> dict:
     return result
 
 
+@app.get("/api/catalog")
 def api_catalog():
     spaces_state = STATE.setdefault("spaces", {"spaces": {}, "active_space_id": "", "settings": {"max_spaces": 6, "default_provider": "aws", "default_region": "us-east-1", "max_memory_mb": 8192, "max_disk_mb": 32768}})
     return {
@@ -8114,6 +10513,7 @@ def _require_tenant_space(space_id: str) -> dict:
     return space
 
 
+@app.get("/api/spaces")
 def api_list_spaces():
     _refresh_cloudsim_gcp_summary()
     all_spaces = PLATFORM.list_spaces()
@@ -8139,6 +10539,7 @@ def api_list_spaces():
     }
 
 
+@app.get("/api/providers")
 def api_list_providers():
     return {
         "providers": _legacy_provider_cards(),
@@ -8146,6 +10547,7 @@ def api_list_providers():
     }
 
 
+@app.get("/api/spaces/active")
 def api_active_space():
     _refresh_cloudsim_gcp_summary()
     spaces_state = _spaces_state()
@@ -8157,12 +10559,14 @@ def api_active_space():
             "active_tenant_id": _active_tenant_id()}
 
 
+@app.get("/api/spaces/{space_id}")
 def api_get_space(space_id: str):
     _refresh_cloudsim_gcp_summary()
     space = _require_tenant_space(space_id)
     return {"space": _space_payload(space)}
 
 
+@app.post("/api/spaces")
 def api_create_space(payload: dict[str, Any]):
     spec = dict(payload or {})
     # PROVIDER LOCK (1:1): a space has exactly one provider, set at create,
@@ -8219,11 +10623,13 @@ def api_create_space(payload: dict[str, Any]):
     return {"message": "Simulation space created", "space": _space_payload(space)}
 
 
+@app.post("/api/spaces/estimate")
 def api_estimate_space(payload: dict[str, Any]):
     estimate = PLATFORM.estimate_space_cost(payload or {})
     return {"estimate": estimate}
 
 
+@app.post("/api/spaces/{space_id}/switch")
 def api_switch_space(space_id: str):
     _require_tenant_space(space_id)  # 404 if cross-tenant — no leak
     try:
@@ -8234,6 +10640,7 @@ def api_switch_space(space_id: str):
     return {"message": "Active space switched", "space": _space_payload(space)}
 
 
+@app.post("/api/spaces/{space_id}/pause")
 def api_pause_space(space_id: str):
     _require_tenant_space(space_id)
     try:
@@ -8244,6 +10651,7 @@ def api_pause_space(space_id: str):
     return {"message": "Simulation space paused", "space": _space_payload(space)}
 
 
+@app.post("/api/spaces/{space_id}/resume")
 def api_resume_space(space_id: str):
     _require_tenant_space(space_id)
     try:
@@ -8254,6 +10662,7 @@ def api_resume_space(space_id: str):
     return {"message": "Simulation space resumed", "space": _space_payload(space)}
 
 
+@app.post("/api/spaces/{space_id}/archive")
 def api_archive_space(space_id: str):
     _require_tenant_space(space_id)
     try:
@@ -8264,6 +10673,7 @@ def api_archive_space(space_id: str):
     return {"message": "Simulation space archived", "space": _space_payload(space)}
 
 
+@app.delete("/api/spaces/{space_id}")
 def api_delete_space(space_id: str):
     _require_tenant_space(space_id)
     try:
@@ -8290,6 +10700,7 @@ def _tenant_usage(tid: str) -> dict:
             "spaces_remaining": max(0, max_spaces - spaces_count)}
 
 
+@app.get("/api/runtime/budget")
 def api_runtime_budget():
     """Simulator's container budget — clamp 30%-50% of host (default 40%). The
     user keeps the rest. Returns budget / used / free / host + clamp limits so
@@ -8308,6 +10719,7 @@ def api_runtime_budget():
     }
 
 
+@app.get("/api/runtime/cloud-shell")
 def api_runtime_cloud_shell():
     """Tier-gated capability probe for the in-console Cloud Shell drawer."""
     _enforce_tier_feature("cloud_shell")
@@ -8329,6 +10741,7 @@ _CLOUD_SHELL_ALLOWED = {
 }
 
 
+@app.post("/api/runtime/cloud-shell/exec")
 async def api_runtime_cloud_shell_exec(request: Request):
     """Run a single shell command from the allow-list and return its output.
     No persistent state (this is a one-shot exec, not a PTY). For a real
@@ -8361,6 +10774,7 @@ async def api_runtime_cloud_shell_exec(request: Request):
     return out
 
 
+@app.get("/api/runtime/terraform-deploy-targets")
 def api_runtime_terraform_deploy_targets():
     """Tier-gated list of deploy targets the current tier can push terraform
     state to. Free/Student: [] (apply is local-stage only). Developer:
@@ -8382,6 +10796,7 @@ def api_runtime_terraform_deploy_targets():
 
 # ── CI integration (Developer+ tier) ────────────────────────────────────────
 
+@app.get("/api/runtime/ci/pipelines")
 def api_ci_list():
     _enforce_tier_feature("ci_integration")
     from core import ci_integration as _ci
@@ -8391,6 +10806,7 @@ def api_ci_list():
     }
 
 
+@app.post("/api/runtime/ci/pipelines")
 async def api_ci_register(request: Request):
     _enforce_tier_feature("ci_integration")
     body = await request.json() if await request.body() else {}
@@ -8403,6 +10819,7 @@ async def api_ci_register(request: Request):
         raise HTTPException(400, detail=str(e))
 
 
+@app.delete("/api/runtime/ci/pipelines/{pipeline_id}")
 def api_ci_delete(pipeline_id: str):
     _enforce_tier_feature("ci_integration")
     from core import ci_integration as _ci
@@ -8413,6 +10830,7 @@ def api_ci_delete(pipeline_id: str):
     return {"deleted": pipeline_id}
 
 
+@app.post("/api/runtime/ci/pipelines/{pipeline_id}/trigger")
 async def api_ci_trigger(pipeline_id: str, request: Request):
     _enforce_tier_feature("ci_integration")
     body = {}
@@ -8428,6 +10846,7 @@ async def api_ci_trigger(pipeline_id: str, request: Request):
     return res
 
 
+@app.post("/api/runtime/ci/webhook/{token}")
 async def api_ci_inbound_webhook(token: str, request: Request):
     """Inbound webhook — pipelines POST CI events here using their `inbound_token`.
     No tier gate (CI calling US shouldn't 403). Token is the auth."""
@@ -8447,12 +10866,14 @@ async def api_ci_inbound_webhook(token: str, request: Request):
 
 # ── Audit export sinks (Enterprise tier) ────────────────────────────────────
 
+@app.get("/api/runtime/audit-sinks")
 def api_audit_sinks_list():
     _enforce_tier_feature("audit_export_sinks")
     from core import audit_sinks as _as
     return {"tier": _active_tier(), "sinks": _as.list_sinks(STATE, _active_tenant_id())}
 
 
+@app.post("/api/runtime/audit-sinks")
 async def api_audit_sinks_register(request: Request):
     _enforce_tier_feature("audit_export_sinks")
     body = await request.json() if await request.body() else {}
@@ -8465,6 +10886,7 @@ async def api_audit_sinks_register(request: Request):
         raise HTTPException(400, detail=str(e))
 
 
+@app.delete("/api/runtime/audit-sinks/{sink_id}")
 def api_audit_sinks_delete(sink_id: str):
     _enforce_tier_feature("audit_export_sinks")
     from core import audit_sinks as _as
@@ -8477,6 +10899,7 @@ def api_audit_sinks_delete(sink_id: str):
 
 # ── Notification channels (Developer+ tier) ─────────────────────────────────
 
+@app.get("/api/runtime/notification-channels")
 def api_notif_list():
     _enforce_tier_feature("notifications")
     from core import notifications as _nt
@@ -8485,6 +10908,7 @@ def api_notif_list():
             "known_events": list(_nt.KNOWN_EVENTS)}
 
 
+@app.post("/api/runtime/notification-channels")
 async def api_notif_register(request: Request):
     level = _enforce_tier_feature("notifications")
     body = await request.json() if await request.body() else {}
@@ -8504,6 +10928,7 @@ async def api_notif_register(request: Request):
         raise HTTPException(400, detail=str(e))
 
 
+@app.delete("/api/runtime/notification-channels/{channel_id}")
 def api_notif_delete(channel_id: str):
     _enforce_tier_feature("notifications")
     from core import notifications as _nt
@@ -8514,6 +10939,7 @@ def api_notif_delete(channel_id: str):
     return {"deleted": channel_id}
 
 
+@app.post("/api/runtime/notification-channels/{channel_id}/test")
 def api_notif_test(channel_id: str):
     _enforce_tier_feature("notifications")
     from core import notifications as _nt
@@ -8522,6 +10948,7 @@ def api_notif_test(channel_id: str):
 
 # ── Custom domain (Enterprise tier) ─────────────────────────────────────────
 
+@app.get("/api/runtime/custom-domain")
 def api_custom_domain_get():
     _enforce_tier_feature("custom_domain")
     from core import tenant_theming as _tt
@@ -8530,6 +10957,7 @@ def api_custom_domain_get():
             "domain": _tt.get_custom_domain(STATE, _active_tenant_id())}
 
 
+@app.post("/api/runtime/custom-domain")
 async def api_custom_domain_set(request: Request):
     _enforce_tier_feature("custom_domain")
     body = await request.json() if await request.body() else {}
@@ -8542,6 +10970,7 @@ async def api_custom_domain_set(request: Request):
         raise HTTPException(400, detail=str(e))
 
 
+@app.delete("/api/runtime/custom-domain")
 def api_custom_domain_delete():
     _enforce_tier_feature("custom_domain")
     from core import tenant_theming as _tt
@@ -8552,6 +10981,7 @@ def api_custom_domain_delete():
 
 # ── Branding (Enterprise tier) ──────────────────────────────────────────────
 
+@app.get("/api/runtime/branding")
 def api_branding_get():
     _enforce_tier_feature("branding")
     from core import tenant_theming as _tt
@@ -8560,6 +10990,7 @@ def api_branding_get():
             "branding": _tt.get_branding(STATE, _active_tenant_id())}
 
 
+@app.post("/api/runtime/branding")
 async def api_branding_set(request: Request):
     _enforce_tier_feature("branding")
     body = await request.json() if await request.body() else {}
@@ -8572,6 +11003,7 @@ async def api_branding_set(request: Request):
         raise HTTPException(400, detail=str(e))
 
 
+@app.get("/api/runtime/branding/{tenant_id}.css")
 def api_branding_css(tenant_id: str):
     """Public endpoint — console pages `<link rel="stylesheet" href="...">`
     this. No tier gate since the URL is referenced from rendered HTML at
@@ -8584,12 +11016,14 @@ def api_branding_css(tenant_id: str):
 
 # ── SSO (Enterprise tier) ───────────────────────────────────────────────────
 
+@app.get("/api/runtime/sso")
 def api_sso_get():
     _enforce_tier_feature("sso")
     from core import sso_config as _sso
     return _sso.get_config(STATE, _active_tenant_id())
 
 
+@app.post("/api/runtime/sso/configure")
 async def api_sso_configure(request: Request):
     _enforce_tier_feature("sso")
     body = await request.json() if await request.body() else {}
@@ -8602,6 +11036,7 @@ async def api_sso_configure(request: Request):
         raise HTTPException(400, detail=str(e))
 
 
+@app.post("/api/runtime/sso/disable")
 def api_sso_disable():
     _enforce_tier_feature("sso")
     from core import sso_config as _sso
@@ -8610,6 +11045,7 @@ def api_sso_disable():
     return res
 
 
+@app.post("/api/runtime/sso/validate")
 async def api_sso_validate(request: Request):
     """Probe endpoint — the SPA POSTs a Bearer token here to verify it without
     actually consuming it. Returns claims on success."""
@@ -8624,6 +11060,7 @@ async def api_sso_validate(request: Request):
 
 # ── Scaffolding generator (Developer+ tier) ─────────────────────────────────
 
+@app.get("/api/scaffolding/supported")
 def api_scaffolding_supported():
     """List all (provider, service, output) triples this tier can scaffold."""
     _enforce_tier_feature("scaffolding_generator")
@@ -8631,6 +11068,7 @@ def api_scaffolding_supported():
     return {"tier": _active_tier(), "triples": _sg.supported()}
 
 
+@app.get("/api/scaffolding/generate")
 def api_scaffolding_generate(provider: str, service: str, output: str = "terraform",
                               name: str = "my-resource", endpoint: str | None = None):
     """Generate a copy-paste-ready scaffolding snippet."""
@@ -8645,6 +11083,7 @@ def api_scaffolding_generate(provider: str, service: str, output: str = "terrafo
 
 # ── Cross-tenant RBAC (Enterprise tier) ─────────────────────────────────────
 
+@app.get("/api/runtime/xt-rbac/grants")
 def api_xtrbac_list():
     _enforce_tier_feature("cross_tenant_rbac")
     from core import cross_tenant_rbac as _xt
@@ -8653,6 +11092,7 @@ def api_xtrbac_list():
             "grants": _xt.list_grants(STATE, _active_tenant_id())}
 
 
+@app.post("/api/runtime/xt-rbac/grants")
 async def api_xtrbac_create(request: Request):
     _enforce_tier_feature("cross_tenant_rbac")
     body = await request.json() if await request.body() else {}
@@ -8670,6 +11110,7 @@ async def api_xtrbac_create(request: Request):
         raise HTTPException(400, detail=str(e))
 
 
+@app.delete("/api/runtime/xt-rbac/grants/{grant_id}")
 def api_xtrbac_delete(grant_id: str):
     _enforce_tier_feature("cross_tenant_rbac")
     from core import cross_tenant_rbac as _xt
@@ -8682,12 +11123,14 @@ def api_xtrbac_delete(grant_id: str):
 
 # ── Helm chart + air-gapped install (Enterprise tier) ───────────────────────
 
+@app.get("/api/runtime/helm")
 def api_helm_metadata():
     _enforce_tier_feature("helm")
     from core import helm_chart as _hc
     return {"tier": _active_tier(), **_hc.chart_metadata()}
 
 
+@app.get("/api/runtime/helm/chart.tar.gz")
 def api_helm_chart():
     _enforce_tier_feature("helm")
     from core import helm_chart as _hc
@@ -8699,6 +11142,7 @@ def api_helm_chart():
     )
 
 
+@app.get("/api/runtime/helm/values.yaml")
 def api_helm_values():
     _enforce_tier_feature("helm")
     from core import helm_chart as _hc
@@ -8706,6 +11150,7 @@ def api_helm_values():
                     headers={"Content-Disposition": 'attachment; filename=values.yaml'})
 
 
+@app.get("/api/runtime/helm/airgap-bundle.tar.gz")
 def api_helm_airgap():
     _enforce_tier_feature("helm")
     from core import helm_chart as _hc
@@ -8717,6 +11162,7 @@ def api_helm_airgap():
     )
 
 
+@app.post("/api/runtime/budget/disable", include_in_schema=False)
 def api_runtime_budget_disable():
     """Testing toggle: bypass the host-clamp gate. Subsequent VM/EC2/Compute
     creates won't return 403 SimulatorBudgetExceeded. Real LXD/multipass limits
@@ -8727,6 +11173,7 @@ def api_runtime_budget_disable():
     return {"bypassed": True, "message": "Budget gate disabled. Re-enable via POST /api/runtime/budget/enable."}
 
 
+@app.post("/api/runtime/budget/enable", include_in_schema=False)
 def api_runtime_budget_enable():
     """Re-enable the host-clamp gate (undo /disable)."""
     global _BUDGET_BYPASSED
@@ -8734,6 +11181,7 @@ def api_runtime_budget_enable():
     return {"bypassed": False, "message": "Budget gate re-enabled."}
 
 
+@app.get("/api/instances/catalog")
 def api_instances_catalog(provider: str = "aws"):
     """Single source-of-truth catalog of instance types the simulator understands
     (same dict the bridge uses to map real EC2/Compute/Azure VMs into CloudSim
@@ -8751,6 +11199,7 @@ def api_instances_catalog(provider: str = "aws"):
     return {"provider": str(provider).lower(), "count": len(items), "instances": items}
 
 
+@app.get("/api/tenants")
 def api_list_tenants():
     ts = _tenants_state()
     out = []
@@ -8763,11 +11212,13 @@ def api_list_tenants():
             "default_tenant_id": DEFAULT_TENANT_ID}
 
 
+@app.get("/api/tenants/active")
 def api_active_tenant():
     tid = _active_tenant_id()
     return {"tenant_id": tid, "tenant": _tenant_dict(tid)}
 
 
+@app.post("/api/tenants")
 def api_create_tenant(payload: dict[str, Any]):
     spec = dict(payload or {})
     name = str(spec.get("name") or "").strip()
@@ -8814,6 +11265,7 @@ def api_create_tenant(payload: dict[str, Any]):
     return {"message": "Tenant created", "tenant": tenant}
 
 
+@app.post("/api/tenants/{tid}/switch")
 def api_switch_tenant(tid: str):
     ts = _tenants_state()
     if tid not in (ts.get("tenants") or {}):
@@ -8832,6 +11284,7 @@ def api_switch_tenant(tid: str):
             "tenant": ts["tenants"][tid]}
 
 
+@app.delete("/api/tenants/{tid}")
 def api_delete_tenant(tid: str):
     if tid == DEFAULT_TENANT_ID:
         raise HTTPException(status_code=400, detail="cannot delete the default tenant")
@@ -8849,6 +11302,7 @@ def api_delete_tenant(tid: str):
     return {"message": "Tenant deleted", "tenant_id": tid}
 
 
+@app.get("/api/azure/console/summary")
 def api_azure_console_summary():
     az = provider_azure_services
     type_to_key = {(c["namespace"] + "/" + c["type"]).lower(): c["key"] for c in az.RESOURCE_CATALOG}
@@ -9018,6 +11472,7 @@ def _attach_cloudsim_advanced(payload: dict) -> None:
     )
 
 
+@app.get("/api/cloudsim/current")
 def api_cloudsim_current():
     # cost_simulation gate: Free=False (denied); Student=totals; Developer=
     # per_resource; Enterprise=per_resource_and_chargeback. Free's 403 here
@@ -9040,6 +11495,7 @@ def api_cloudsim_current():
     return payload
 
 
+@app.get("/api/cloudsim/summary")
 def api_cloudsim_summary():
     level = _enforce_tier_feature("cost_simulation")
     _refresh_cloudsim_gcp_summary()
@@ -9058,6 +11514,7 @@ def api_cloudsim_summary():
     return payload
 
 
+@app.post("/api/cloudsim/reconcile")
 def api_cloudsim_reconcile():
     payload = PLATFORM.cloudsim_reconcile()
     _record_usage("cloudsim.reconcile", {"spaces": len(_spaces_state().get("spaces", {}))})
@@ -9065,6 +11522,7 @@ def api_cloudsim_reconcile():
     return payload
 
 
+@app.get("/api/cloudsim/events")
 def api_cloudsim_events():
     return PLATFORM.cloudsim_events()
 
@@ -9087,6 +11545,7 @@ def _redact_terraform_export_for_basic(export: dict) -> dict:
     return redacted
 
 
+@app.get("/api/terraform/export")
 def api_terraform_export():
     # All tiers can export — but Free's "basic" level returns skeleton only.
     level = _enforce_tier_feature("terraform_export")
@@ -9111,6 +11570,7 @@ def api_terraform_export():
     return export
 
 
+@app.post("/api/terraform/import")
 async def api_terraform_import(request: Request):
     # Terraform import is gated to `full_plus_import` (Enterprise only) —
     # everyone else can export but not re-import.
@@ -9212,6 +11672,7 @@ async def api_terraform_import(request: Request):
     }
 
 
+@app.get("/api/terraform/status")
 def api_terraform_status():
     space = PLATFORM.get_active_space()
     if not isinstance(space, dict) or not space:
@@ -9247,6 +11708,7 @@ def api_terraform_status():
     }
 
 
+@app.post("/api/terraform/plan")
 def api_terraform_plan():
     space = PLATFORM.get_active_space()
     if not isinstance(space, dict) or not space:
@@ -9301,6 +11763,7 @@ def api_terraform_plan():
     return record
 
 
+@app.post("/api/terraform/apply")
 async def api_terraform_apply(request: Request):
     payload = {}
     try:
@@ -9402,10 +11865,12 @@ async def api_terraform_apply(request: Request):
     return apply_record
 
 
+@app.get("/api/packs")
 def api_list_packs():
     return {"packs": _catalog(), "count": len(STATE["packs"])}
 
 
+@app.get("/api/providers/{provider}/packs")
 def api_list_provider_packs(provider: str):
     provider_key = normalize_provider_key(provider)
     packs = packs_for_provider(provider_key) if provider_key in PROVIDER_PACK_GROUPS else []
@@ -9416,6 +11881,7 @@ def api_list_provider_packs(provider: str):
     }
 
 
+@app.get("/api/providers/{provider}/matrix")
 def api_provider_matrix(provider: str):
     provider_key = normalize_provider_key(provider)
     if provider_key in {"aws", "gcp", "azure"}:
@@ -9450,66 +11916,82 @@ def api_provider_matrix(provider: str):
     }
 
 
+@app.get("/api/providers/{provider}/services")
 def api_provider_services(provider: str):
     return provider_services(provider)
 
 
+@app.get("/api/providers/{provider}/capabilities")
 def api_provider_capabilities(provider: str):
     return provider_capabilities(provider)
 
 
+@app.get("/api/providers/aws/cli")
 def api_provider_aws_cli():
     return aws_tool_response("cli")
 
 
+@app.get("/api/providers/aws/sdk/java")
 def api_provider_aws_sdk_java():
     return aws_tool_response("sdk/java")
 
 
+@app.get("/api/providers/aws/sdk/go")
 def api_provider_aws_sdk_go():
     return aws_tool_response("sdk/go")
 
 
+@app.post("/api/providers/aws/cli/resolve")
 def api_provider_aws_cli_resolve(payload: dict[str, Any]):
     return aws_cli_resolve(str(payload.get("command", "")))
 
 
+@app.get("/api/providers/aws/sdk/java/snippet")
 def api_provider_aws_sdk_java_snippet():
     return sdk_snippet("aws", "java")
 
 
+@app.get("/api/providers/aws/sdk/go/snippet")
 def api_provider_aws_sdk_go_snippet():
     return sdk_snippet("aws", "go")
 
 
+@app.get("/api/providers/gcp/gcloud")
 def api_provider_gcp_gcloud():
     return gcp_tool_response("gcloud")
 
 
+@app.get("/api/providers/gcp/gcutil")
 def api_provider_gcp_gcutil():
     return gcp_tool_response("gcutil")
 
 
+@app.get("/api/providers/gcp/sdk/java")
 def api_provider_gcp_sdk_java():
     return gcp_tool_response("sdk/java")
 
 
+@app.get("/api/providers/gcp/sdk/go")
 def api_provider_gcp_sdk_go():
     return gcp_tool_response("sdk/go")
 
 
+@app.post("/api/providers/gcp/gcloud/resolve")
 def api_provider_gcp_gcloud_resolve(payload: dict[str, Any]):
     return gcp_gcloud_resolve(payload)
 
 
+@app.post("/api/providers/gcp/gcutil/resolve")
 def api_provider_gcp_gcutil_resolve(payload: dict[str, Any]):
     return gcp_gcutil_resolve(payload)
 
 
+@app.get("/api/providers/gcp/sdk/java/snippet")
 def api_provider_gcp_sdk_java_snippet():
     return gcp_sdk_java_snippet()
 
 
+@app.get("/api/providers/gcp/sdk/go/snippet")
 def api_provider_gcp_sdk_go_snippet():
     return gcp_sdk_go_snippet()
 
@@ -9517,34 +11999,41 @@ def api_provider_gcp_sdk_go_snippet():
 # Azure tooling routes — pack-architecture parity with AWS+GCP (2026-06-01).
 # providers/azure.tool_response and core.tooling_simulators.az_cli_resolve
 # back the SPA's Tools tab + ``az`` command resolver.
+@app.get("/api/providers/azure/cli")
 def api_provider_azure_cli():
     from providers import azure_tool_response
     return azure_tool_response("cli")
 
 
+@app.get("/api/providers/azure/sdk/java")
 def api_provider_azure_sdk_java():
     from providers import azure_tool_response
     return azure_tool_response("sdk/java")
 
 
+@app.get("/api/providers/azure/sdk/go")
 def api_provider_azure_sdk_go():
     from providers import azure_tool_response
     return azure_tool_response("sdk/go")
 
 
+@app.post("/api/providers/azure/cli/resolve")
 def api_provider_azure_cli_resolve(payload: dict[str, Any]):
     from core.tooling_simulators import az_cli_resolve
     return az_cli_resolve(str(payload.get("command", "")))
 
 
+@app.get("/api/providers/azure/sdk/java/snippet")
 def api_provider_azure_sdk_java_snippet():
     return sdk_snippet("azure", "java")
 
 
+@app.get("/api/providers/azure/sdk/go/snippet")
 def api_provider_azure_sdk_go_snippet():
     return sdk_snippet("azure", "go")
 
 
+@app.get("/api/packs/{pack_id}/fragment")
 def api_pack_fragment(pack_id: str):
     try:
         fragment = fragment_for_pack(pack_id)
@@ -9558,10 +12047,12 @@ def api_ec2_amis():
     return {"amis": AMI_CATALOG, "count": len(AMI_CATALOG), "runtime": runtime, "host_os": _parent_os()}
 
 
+@app.get("/api/host/cpu")
 def api_host_cpu():
     return _sample_host_cpu_metrics()
 
 
+@app.get("/api/host/sizing")
 def api_host_sizing():
     return _host_sizing()
 
@@ -9671,12 +12162,14 @@ def api_ec2_runtime_multipass_bootstrap():
     return status
 
 
+@app.post("/api/packs/{pack_id}/activate")
 def api_activate_pack(pack_id: str):
     pack = _activate_pack(pack_id)
     _record_usage("pack.activate", {"pack_id": pack_id})
     return {"message": "Pack activated", "pack": pack}
 
 
+@app.post("/api/license/signup")
 def api_license_signup(req: LicenseSignupRequest):
     """Issue a signed license JWT for the chosen tier. Tier-specific defaults
     (credits, primary_cloud requirement) come from core/tier_policy.policy_for.
@@ -9789,6 +12282,7 @@ def api_license_signup(req: LicenseSignupRequest):
     return {"license": payload, "token": token}
 
 
+@app.get("/api/license/status")
 def api_license_status():
     """Return the active license + tenant tier/primary_cloud + computed
     days_until_expiry. The SPA reads this to render the account widget
@@ -9838,6 +12332,7 @@ def api_license_status():
     }
 
 
+@app.post("/api/license/switch-cloud")
 def api_license_switch_cloud(payload: dict[str, Any]):
     """Student tier: change the primary_cloud. Rate-limited to once per
     365 days; Developer/Enterprise users get a 400 telling them they
@@ -9889,6 +12384,7 @@ def api_license_switch_cloud(payload: dict[str, Any]):
     }
 
 
+@app.get("/api/runtime/tier", include_in_schema=False)
 def api_runtime_tier():
     """Surface the full per-tier policy table + the active license's tier.
 
@@ -9923,6 +12419,7 @@ def api_runtime_tier():
     }
 
 
+@app.post("/api/license/activate")
 def api_license_activate(payload: dict[str, Any]):
     token = payload.get("token", "")
     license_data = _verify_license(token)
@@ -11220,6 +13717,8 @@ def _ec2_query_state_change_response(root_name: str, changes: list[tuple[dict, s
     return _ec2_success_response(root_name, build)
 
 
+@app.api_route("/ec2", methods=["GET", "POST"], include_in_schema=False)
+@app.api_route("/api/ec2/aws", methods=["GET", "POST"], include_in_schema=False)
 async def api_ec2_query(request: Request):
     params = await _ec2_query_params(request)
     action = str(params.get("Action", "")).strip()
@@ -11808,6 +14307,7 @@ def _gcp_compute_console_exec(project: str, zone: str, instance_ref: str, req: G
     return {"message": "Console command executed", "instance_id": str(instance.get("instance_id") or instance_ref), **result}
 
 
+@app.websocket("/ws/ec2/instances/{instance_id}/console")
 async def ws_ec2_console(websocket: WebSocket, instance_id: str):
     instance = ec2_state["instances"].get(instance_id)
     if not instance:
@@ -11816,6 +14316,8 @@ async def ws_ec2_console(websocket: WebSocket, instance_id: str):
     await _instance_console_ws(websocket, instance, instance_id, "EC2", "Instance console is not active. Start the instance first.")
 
 
+@app.websocket("/ws/compute/v1/projects/{project}/zones/{zone}/instances/{instance}/console")
+@app.websocket("/ws/gcp/compute/v1/projects/{project}/zones/{zone}/instances/{instance}/console")
 async def ws_gcp_compute_console(websocket: WebSocket, project: str, zone: str, instance: str):
     instance = _gcp_compute_find_instance(project, zone, instance)
     if not instance:
@@ -11824,10 +14326,12 @@ async def ws_gcp_compute_console(websocket: WebSocket, project: str, zone: str, 
     await _instance_console_ws(websocket, instance, str(instance.get("instance_id", instance.get("name", ""))), "Compute Engine", "Compute Engine console is not active. Start the instance first.")
 
 
+@app.post("/api/gcp/compute/projects/{project}/zones/{zone}/instances/{instance}/console")
 def api_gcp_compute_console_exec(project: str, zone: str, instance: str, req: GCPComputeConsoleCommandRequest):
     return _gcp_compute_console_exec(_gcp_project_name(project), zone, instance, req)
 
 
+@app.websocket("/ws/runtime-console/{instance_id}")
 async def ws_runtime_console(websocket: WebSocket, instance_id: str):
     await ws_ec2_console(websocket, instance_id)
 
@@ -17809,6 +20313,8 @@ def _ddb_error_response(code: str, message: str, status: int = 400) -> Response:
     return _ddb_json_response({"__type": code, "message": message}, status=status)
 
 
+@app.api_route("/api/dynamodb/aws", methods=["POST"], include_in_schema=False)
+@app.api_route("/dynamodb", methods=["POST"], include_in_schema=False)
 async def api_dynamodb_aws(request: Request):
     # MVP P0: proxy to amazon/dynamodb-local for real DDB semantics (PartiQL,
     # secondary indexes, Streams, etc.). Fall back to the legacy in-memory
@@ -18343,10 +20849,12 @@ async def api_lambda_invoke_function_aws(function_name: str, request: Request):
     return Response(content=body_bytes, media_type=media_type, headers=headers)
 
 
+@app.get("/api/runtime/bundles")
 def api_runtime_bundles():
     return {"bundles": list(runtime_state["bundles"].values()), "count": len(runtime_state["bundles"])}
 
 
+@app.post("/api/deployments")
 def api_create_deployment(req: DeploymentRequest):
     deployment_id = _id("deploy")
     source_dir = Path(os.environ.get("CLOUDLEARN_DEPLOY_DIR", Path(__file__).with_name("deployments"))) / deployment_id
@@ -18376,6 +20884,7 @@ def api_create_deployment(req: DeploymentRequest):
     return deployment
 
 
+@app.post("/api/actions")
 def api_action_router(payload: ServiceActionRequest):
     service = payload.payload.get("service", "")
     action = payload.action.lower()
@@ -18385,9 +20894,20 @@ def api_action_router(payload: ServiceActionRequest):
         return provider_aws_iam.api_iam_create_user(IAMUserRequest(**payload.payload))
     raise HTTPException(400, detail="UnsupportedAction")
 
+# ── Serve React UI — explicit routes registered BEFORE /{bucket} ─────────────
+STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
+os.makedirs(STATIC_DIR, exist_ok=True)
+_UI_HTML = os.path.join(STATIC_DIR, "index.html")
+app.mount("/assets", StaticFiles(directory=STATIC_DIR), name="assets")
 
-# (Static files mount and serve_ui are now in the orchestrator preamble
-# and routes/console.py respectively.)
+
+@app.get("/ui", include_in_schema=False)
+@app.get("/ui/{path:path}", include_in_schema=False)
+@app.get("/product", include_in_schema=False)
+@app.get("/product/{path:path}", include_in_schema=False)
+async def serve_ui(path: str = "") -> Response:
+    with open(_UI_HTML, "rb") as f:
+        return Response(content=f.read(), media_type="text/html", headers={"Cache-Control": "no-store, max-age=0"})
 
 
 # ── AWS query-protocol root dispatch (real SDK / CLI entrypoint) ──────────────
@@ -18587,6 +21107,7 @@ _EC2_VPC_ACTIONS = {
 }
 
 
+@app.post("/")
 async def aws_query_root(request: Request) -> Response:
     """Root dispatch for real AWS SDK/CLI query + JSON protocol requests."""
     service = _aws_query_target_service(request)
@@ -18643,6 +21164,7 @@ async def aws_query_root(request: Request) -> Response:
 
 # ── S3 REST API — root level ─────────────────────────────────────────────────
 
+@app.get("/")
 async def s3_list_buckets(request: Request) -> Response:
     """GET / → ListBuckets (S3 wire) OR main SPA (browser).
 
@@ -18678,6 +21200,7 @@ async def s3_list_buckets(request: Request) -> Response:
 
 # ── S3 REST API — bucket level ───────────────────────────────────────────────
 
+@app.head("/{bucket}")
 async def s3_head_bucket(bucket: str, request: Request) -> Response:
     """HEAD /{bucket} → HeadBucket"""
     if not _bucket_exists(bucket):
@@ -18685,6 +21208,7 @@ async def s3_head_bucket(bucket: str, request: Request) -> Response:
     return _empty_response(200)
 
 
+@app.put("/{bucket}")
 async def s3_put_bucket(bucket: str, request: Request) -> Response:
     """PUT /{bucket}[?versioning|?tagging|?cors|?lifecycle|?acl] → Create/Configure Bucket"""
     params = dict(request.query_params)
@@ -18800,6 +21324,7 @@ async def s3_put_bucket(bucket: str, request: Request) -> Response:
     return _empty_response(200, {"Location": f"/{bucket}"})
 
 
+@app.get("/{bucket}")
 async def s3_get_bucket(bucket: str, request: Request) -> Response:
     """GET /{bucket}[?versioning|?tagging|?location|?list-type=2|...] → List/Get Bucket Config"""
     params = dict(request.query_params)
@@ -18962,6 +21487,7 @@ async def s3_get_bucket(bucket: str, request: Request) -> Response:
     return _list_objects_v1(bucket, params)
 
 
+@app.delete("/{bucket}")
 async def s3_delete_bucket(bucket: str, request: Request) -> Response:
     """DELETE /{bucket} → DeleteBucket"""
     params = dict(request.query_params)
@@ -18979,6 +21505,7 @@ async def s3_delete_bucket(bucket: str, request: Request) -> Response:
 
 # ── S3 REST API — object level ───────────────────────────────────────────────
 
+@app.head("/{bucket}/{key:path}")
 async def s3_head_object(bucket: str, key: str, request: Request) -> Response:
     """HEAD /{bucket}/{key} → HeadObject"""
     if not _bucket_exists(bucket):
@@ -19005,6 +21532,7 @@ async def s3_head_object(bucket: str, key: str, request: Request) -> Response:
     return _empty_response(200, headers)
 
 
+@app.put("/{bucket}/{key:path}")
 async def s3_put_object(bucket: str, key: str, request: Request) -> Response:
     """PUT /{bucket}/{key}[?tagging|?acl|?uploadId&partNumber] → PutObject/UploadPart/CopyObject/Tagging"""
     params = dict(request.query_params)
@@ -19109,6 +21637,7 @@ async def s3_put_object(bucket: str, key: str, request: Request) -> Response:
     return _empty_response(200, {"ETag": version["etag"], "x-amz-version-id": entry.get("current_version_id", version_id)})
 
 
+@app.get("/{bucket}/{key:path}")
 async def s3_get_object(bucket: str, key: str, request: Request) -> Response:
     """GET /{bucket}/{key}[?tagging|?acl|?uploadId] → GetObject/GetObjectTagging/ListParts"""
     params = dict(request.query_params)
@@ -19238,6 +21767,7 @@ async def s3_get_object(bucket: str, key: str, request: Request) -> Response:
     )
 
 
+@app.delete("/{bucket}/{key:path}")
 async def s3_delete_object(bucket: str, key: str, request: Request) -> Response:
     """DELETE /{bucket}/{key}[?tagging|?uploadId] → DeleteObject/AbortMultipartUpload/DeleteObjectTagging"""
     params = dict(request.query_params)
@@ -19281,6 +21811,7 @@ async def s3_delete_object(bucket: str, key: str, request: Request) -> Response:
     return _empty_response(204, {"x-amz-delete-marker": "true", "x-amz-version-id": version_id})
 
 
+@app.post("/{bucket}")
 async def s3_post_bucket(bucket: str, request: Request) -> Response:
     """POST /{bucket}[?delete] → DeleteObjects (batch) or CreateMultipartUpload"""
     params = dict(request.query_params)
@@ -19323,6 +21854,7 @@ async def s3_post_bucket(bucket: str, request: Request) -> Response:
     return _error_xml("MethodNotAllowed", "The specified method is not allowed against this resource.", f"/{bucket}", 405)
 
 
+@app.post("/{bucket}/{key:path}")
 async def s3_post_object(bucket: str, key: str, request: Request) -> Response:
     """POST /{bucket}/{key}?uploads → CreateMultipartUpload
        POST /{bucket}/{key}?uploadId=... → CompleteMultipartUpload"""

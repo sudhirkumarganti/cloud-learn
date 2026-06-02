@@ -21,7 +21,7 @@ from . import cedar_engine as ce
 
 def _active_space_id() -> str:
     try:
-        from server import PLATFORM
+        from core.app_context import PLATFORM
         spaces_state = PLATFORM.kernel.state.setdefault(
             "spaces", {"spaces": {}, "active_space_id": "", "settings": {}}
         )

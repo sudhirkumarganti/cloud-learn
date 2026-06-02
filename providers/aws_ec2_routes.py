@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from fastapi import Request
 
+from core.models import EC2InstanceRequest, EC2ConsoleInputRequest, EC2ConsoleCommandRequest
+
 
 def _server():
     import server as server_module
@@ -51,7 +53,7 @@ def register(app, h) -> None:
             payload = {}
         if not isinstance(payload, dict):
             payload = {}
-        model = _server().EC2InstanceRequest(**payload)
+        model = EC2InstanceRequest(**payload)
         return _server().api_ec2_create_instance(
             model,
             auto_start=auto_start,
@@ -87,7 +89,7 @@ def register(app, h) -> None:
             payload = {}
         if not isinstance(payload, dict):
             payload = {}
-        model = _server().EC2ConsoleInputRequest(**payload)
+        model = EC2ConsoleInputRequest(**payload)
         return _server().api_ec2_console_input(instance_id, model)
 
     @app.post("/api/ec2/instances/{instance_id}/console/exec")
@@ -99,5 +101,5 @@ def register(app, h) -> None:
             payload = {}
         if not isinstance(payload, dict):
             payload = {}
-        model = _server().EC2ConsoleCommandRequest(**payload)
+        model = EC2ConsoleCommandRequest(**payload)
         return _server().api_ec2_console_exec(instance_id, model)
