@@ -369,11 +369,32 @@ def _exp_iso(claims: dict) -> str:
 # ── Install ID generator (stable, per-machine) ──────────────────────────────
 
 def get_or_create_install_id(state: dict) -> str:
-    """Return the persistent install_id. Stored in STATE — survives restarts
-    but is local to this appliance. Used as a binding in JWT claims."""
-    import uuid
-    iid = (state.get("install_id") or "").strip()
-    if not iid:
-        iid = "cl-" + uuid.uuid4().hex[:12]
-        state["install_id"] = iid
-    return iid
+    """Hardware-bound install identifier. Deterministic per container+volume."""
+    existing = state.get("install_id")
+    if existing:
+        return str(existing)
+
+    import hashlib, socket, os
+    # Collect hardware-bound inputs
+    components = []
+    # 1. Container hostname (unique per container instance)
+    components.append(socket.gethostname())
+    # 2. Volume identity (inode of data directory)
+    try:
+        data_dir = os.environ.get("CLOUDLEARN_STATE_DIR", "/data")
+        stat = os.stat(data_dir)
+        components.append(f"vol:{stat.st_dev}:{stat.st_ino}")
+    except Exception:
+        components.append("vol:local")
+    # 3. MAC address of primary interface
+    try:
+        import uuid as _uuid
+        components.append(f"mac:{_uuid.getnode()}")
+    except Exception:
+        pass
+
+    # Derive deterministic ID
+    raw = "|".join(components).encode()
+    install_id = hashlib.sha256(raw).hexdigest()[:24]
+    state["install_id"] = install_id
+    return install_id

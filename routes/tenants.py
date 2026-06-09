@@ -6,7 +6,7 @@ import time
 import uuid
 from typing import Any
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from core import app_context as ctx
 
 
@@ -30,7 +30,9 @@ def register(app: FastAPI) -> None:
         return {"tenant_id": tid, "tenant": ctx._tenant_dict(tid)}
 
     @app.post("/api/tenants")
-    def api_create_tenant(payload: dict[str, Any]):
+    def api_create_tenant(payload: dict[str, Any], request: Request):
+        from core.admin_auth import require_admin_key
+        require_admin_key(request)
         spec = dict(payload or {})
         name = str(spec.get("name") or "").strip()
         if not name:
@@ -72,6 +74,14 @@ def register(app: FastAPI) -> None:
         }
         tenants[tid] = tenant
         ctx._persist_state()
+        try:
+            from core import security_audit
+            security_audit.append_event("tenant.created", {
+                "tenant_id": tid, "name": name,
+                "license_tier": tenant.get("license_tier", "free"),
+            })
+        except Exception:
+            pass
         return {"message": "Tenant created", "tenant": tenant}
 
     @app.post("/api/tenants/{tid}/switch")
@@ -91,7 +101,9 @@ def register(app: FastAPI) -> None:
                 "tenant": ts["tenants"][tid]}
 
     @app.delete("/api/tenants/{tid}")
-    def api_delete_tenant(tid: str):
+    def api_delete_tenant(tid: str, request: Request):
+        from core.admin_auth import require_admin_key
+        require_admin_key(request)
         if tid == ctx.DEFAULT_TENANT_ID:
             raise HTTPException(status_code=400, detail="cannot delete the default tenant")
         ts = ctx._tenants_state()
@@ -105,6 +117,13 @@ def register(app: FastAPI) -> None:
         if ts.get("active_tenant_id") == tid:
             ts["active_tenant_id"] = ctx.DEFAULT_TENANT_ID
         ctx._persist_state()
+        try:
+            from core import security_audit
+            security_audit.append_event("tenant.deleted", {
+                "tenant_id": tid,
+            }, request=request)
+        except Exception:
+            pass
         return {"message": "Tenant deleted", "tenant_id": tid}
 
 

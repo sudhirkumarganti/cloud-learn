@@ -353,6 +353,11 @@ def register(app: FastAPI) -> None:
 
     @app.post("/api/license/signup")
     def api_license_signup(req):
+        if ctx.appliance_mode_enabled():
+            raise HTTPException(status_code=403, detail={
+                "ok": False, "code": "appliance_mode",
+                "reason": "Dev-mode signup is disabled in appliance mode. Use /api/license/activate or /api/auth/start-activation.",
+            })
         import server
         return server.api_license_signup(req)
 
@@ -474,7 +479,9 @@ def register(app: FastAPI) -> None:
         }
 
     @app.post("/api/license/activate")
-    def api_license_activate(payload: dict[str, Any]):
+    def api_license_activate(payload: dict[str, Any], request: Request):
+        from core.admin_auth import require_admin_key
+        require_admin_key(request)
         import server
         token = payload.get("token", "")
         license_data = server._verify_license(token)
@@ -486,15 +493,23 @@ def register(app: FastAPI) -> None:
     # ── Budget toggles ────────────────────────────────────────────────────
 
     @app.post("/api/runtime/budget/disable", include_in_schema=False)
-    def api_runtime_budget_disable():
+    def api_runtime_budget_disable(request: Request):
         """Testing toggle: bypass the host-clamp gate."""
+        from core.admin_auth import require_admin_key
+        require_admin_key(request)
+        if ctx.appliance_mode_enabled():
+            raise HTTPException(status_code=403, detail="Budget bypass disabled in appliance mode")
         import server
         server._BUDGET_BYPASSED = True
         return {"bypassed": True, "message": "Budget gate disabled. Re-enable via POST /api/runtime/budget/enable."}
 
     @app.post("/api/runtime/budget/enable", include_in_schema=False)
-    def api_runtime_budget_enable():
+    def api_runtime_budget_enable(request: Request):
         """Re-enable the host-clamp gate (undo /disable)."""
+        from core.admin_auth import require_admin_key
+        require_admin_key(request)
+        if ctx.appliance_mode_enabled():
+            raise HTTPException(status_code=403, detail="Budget bypass disabled in appliance mode")
         import server
         server._BUDGET_BYPASSED = False
         return {"bypassed": False, "message": "Budget gate re-enabled."}

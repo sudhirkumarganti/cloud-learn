@@ -45,12 +45,41 @@ COPY --from=builder /opt/venv /opt/venv
 
 WORKDIR /app
 
+RUN addgroup --system cloudlearn && \
+    adduser --system --ingroup cloudlearn cloudlearn && \
+    mkdir -p /data && \
+    chown -R cloudlearn:cloudlearn /app /data
+
 # App source — copied AFTER venv so dependency-only changes don't bust the cache
 COPY core   /app/core
 COPY providers /app/providers
 COPY packs  /app/packs
+COPY routes /app/routes
 COPY static /app/static
+COPY scripts /app/scripts
 COPY server.py requirements.txt VERSION /app/
+COPY setup_cython.py /app/setup_cython.py
+
+# ── Code protection (Layer 3): multi-layer obfuscation + compilation ─────
+# STRIP_SOURCE=true  → full appliance hardening (obfuscate + Cython + .pyc + strip)
+# STRIP_SOURCE=false → dev mode (plain source, no protection)
+ARG STRIP_SOURCE=false
+RUN if [ "$STRIP_SOURCE" = "true" ]; then \
+    echo "=== Layer 3a: Obfuscating Python source ===" && \
+    python /app/scripts/obfuscate_build.py /app && \
+    echo "=== Layer 3b: Cython-compiling critical modules ===" && \
+    pip install cython && \
+    cd /app && python setup_cython.py build_ext --inplace && \
+    rm -f core/state_integrity.py core/tier_policy.py core/license_remote.py && \
+    echo "=== Layer 3c: Compiling all Python to bytecode ===" && \
+    python -m compileall -b -q /app/core /app/providers /app/routes /app/packs /app && \
+    echo "=== Layer 3d: Stripping all .py source files ===" && \
+    find /app -name '*.py' ! -name '__init__.py' -delete && \
+    rm -rf /app/scripts && \
+    echo "=== Layer 3e: Generating integrity manifest ===" && \
+    python -c "from core.integrity_check import generate_manifest, save_manifest; m=generate_manifest('/app'); save_manifest(m); print(f'Manifest: {m[\"file_count\"]} files')" && \
+    echo "=== Code protection complete ==="; \
+    fi
 
 # OCI image labels — surface in docker inspect + GH container registry UI
 LABEL org.opencontainers.image.title="CloudLearn Simulator" \
@@ -66,5 +95,7 @@ EXPOSE 9000
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
   CMD curl -fsS http://127.0.0.1:9000/healthz || exit 1
+
+USER cloudlearn
 
 CMD ["uvicorn", "server:app", "--host", "0.0.0.0", "--port", "9000"]

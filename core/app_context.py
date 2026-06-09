@@ -1049,9 +1049,30 @@ def count_active_space_resources(resource_type: str) -> int:
     return total
 
 
+_tier_cache: dict = {"tier": "", "verified_at": 0.0, "ttl": 60.0}
+
+
 def active_tier() -> str:
-    """Resolve the active tenant's tier (falls back to the deployment-level
-    STATE["license"]["tier"] then "free")."""
+    """Resolve active tier. In appliance mode, re-verifies cached JWT periodically."""
+    # Fast path: use cache if fresh
+    now = time.time()
+    if _tier_cache["tier"] and (now - _tier_cache["verified_at"]) < _tier_cache["ttl"]:
+        return _tier_cache["tier"]
+
+    # Check if we have a cached JWT to verify (appliance mode)
+    cached_jwt = STATE.get("license_jwt")
+    if cached_jwt and appliance_mode_enabled():
+        try:
+            from core import license_remote as _lr
+            claims = _lr.verify_license_jwt(cached_jwt, install_id=_lr.get_or_create_install_id(STATE))
+            tier = str(claims.get("tier", "free"))
+            _tier_cache.update({"tier": tier, "verified_at": now})
+            return tier
+        except Exception:
+            _tier_cache.update({"tier": "free", "verified_at": now})
+            return "free"
+
+    # Non-appliance mode: read from state (original behavior)
     try:
         tenant = tenant_dict(active_tenant_id()) or {}
     except Exception:

@@ -120,7 +120,8 @@ services:
       - cloudlearn-elasticmq
     environment:
       CLOUDLEARN_STATE_FILE: /data/cloudlearn_state.sqlite3
-      CLOUDLEARN_LICENSE_SECRET: cloudlearn-dev-secret
+      # PRODUCTION: override CLOUDLEARN_LICENSE_SECRET via env or .env file
+      CLOUDLEARN_LICENSE_SECRET: ${CLOUDLEARN_LICENSE_SECRET:-cloudlearn-dev-secret}
       # Identity-first license backend (CloudLearn Portal). Reachable from
       # inside the container. Override per environment:
       #   - Production:    https://portal.cloudlearn.io
@@ -160,6 +161,11 @@ services:
       - /var/lib/cloudlearn/deployments:/var/lib/cloudlearn/deployments
       - ./.cloudlearn-host.json:/config/cloudlearn-host.json:ro
       - ./.cloudlearn-appliance/host-sizing-report.json:/config/cloudlearn-host-sizing.json:ro
+    read_only: true
+    tmpfs:
+      - /tmp:size=100M
+    security_opt:
+      - no-new-privileges:true
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; print(urllib.request.urlopen('http://127.0.0.1:9000/healthz').read().decode())"]

@@ -21,6 +21,7 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Optional
 
 from core.pack_catalog import CORE_PACK_IDS
+from core import state_integrity
 
 
 def _now() -> str:
@@ -114,23 +115,43 @@ class SQLiteStateStore:
             )
             """
         )
+        conn.execute("INSERT OR IGNORE INTO metadata (key, value) VALUES ('state_hmac', '')")
         conn.commit()
 
     def _read_state_json(self, conn: sqlite3.Connection) -> dict | None:
         row = conn.execute("SELECT value FROM metadata WHERE key = 'state_json'").fetchone()
         if not row:
             return None
+        raw_json = row["value"]
         try:
-            payload = json.loads(row["value"])
+            payload = json.loads(raw_json)
         except Exception:
             return None
-        return _decode_state_value(payload) if isinstance(payload, dict) else None
+        if not isinstance(payload, dict):
+            return None
+        # Verify HMAC integrity
+        stored_hmac = conn.execute("SELECT value FROM metadata WHERE key = 'state_hmac'").fetchone()
+        signature = stored_hmac["value"] if stored_hmac else ""
+        if signature and not state_integrity.verify_state(raw_json.encode("utf-8"), signature):
+            import logging
+            logging.warning("STATE TAMPER DETECTED: HMAC signature mismatch. Resetting to default state.")
+            return None
+        # If no signature yet (first boot / upgrade), that's OK — we'll sign on next save
+        return _decode_state_value(payload)
 
     def _write_state_json(self, conn: sqlite3.Connection, state: dict) -> None:
+        state_bytes = json.dumps(_encode_state_value(state), sort_keys=True, default=_json_default)
         conn.execute(
             "INSERT INTO metadata(key, value) VALUES('state_json', ?) "
             "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            (json.dumps(_encode_state_value(state), sort_keys=True, default=_json_default),),
+            (state_bytes,),
+        )
+        # Compute and store HMAC signature
+        signature = state_integrity.sign_state(state_bytes.encode("utf-8"))
+        conn.execute(
+            "INSERT INTO metadata(key, value) VALUES('state_hmac', ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (signature,),
         )
         conn.commit()
 

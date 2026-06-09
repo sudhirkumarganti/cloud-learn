@@ -10118,6 +10118,16 @@ def _apply_license_jwt(token: str) -> dict:
     STATE["license_jwt"] = token
     STATE["license_claims"] = dict(claims)
     _persist_state()
+
+    # Security audit: log successful license activation
+    try:
+        from core import security_audit
+        security_audit.append_event("license.activated", {
+            "tier": tier, "jti": claims.get("jti"), "sub": claims.get("sub"),
+        })
+    except Exception:
+        pass
+
     return claims
 
 
@@ -10305,6 +10315,31 @@ async def api_auth_logout():
 # Background revocation poll — daemon thread polls /api/license/revocation
 # every 24h. On revoked-jti match → auto-downgrade to Free + record on STATE
 # so the SPA can show a banner.
+# ── Runtime integrity check (appliance mode only) ──────────────────
+try:
+    from core import integrity_check
+    integrity_check.verify_at_startup()
+    integrity_check.start_integrity_monitor()
+except Exception:
+    pass
+
+
+# ── Security audit endpoints (admin-key protected) ─────────────────
+@app.get("/api/security/audit-log")
+async def api_security_audit_log(request: Request, limit: int = 100, offset: int = 0):
+    from core import admin_auth, security_audit
+    admin_auth.require_admin_key(request)
+    events = security_audit.read_log(limit, offset)
+    return {"events": events, "count": len(events)}
+
+@app.get("/api/security/audit-verify")
+async def api_security_audit_verify(request: Request):
+    from core import admin_auth, security_audit
+    admin_auth.require_admin_key(request)
+    ok, broken_at, reason = security_audit.verify_chain()
+    return {"chain_valid": ok, "broken_at_id": broken_at, "reason": reason}
+
+
 @app.on_event("startup")
 def _start_license_background_tasks():
     """Spin up two daemon threads on appliance boot:
@@ -10423,6 +10458,11 @@ def api_license_signup(req: LicenseSignupRequest):
     Production users activate via POST /api/license/activate (paste JWT from
     cloudlearn-license-backend) or POST /api/auth/device/start (device flow).
     """
+    if _appliance_mode_enabled():
+        raise HTTPException(status_code=403, detail={
+            "ok": False, "code": "appliance_mode",
+            "reason": "Dev-mode signup is disabled in appliance mode. Use /api/license/activate or /api/auth/start-activation.",
+        })
     if os.environ.get("CLOUDLEARN_DEV_MODE", "").strip() not in ("1", "true", "yes"):
         raise HTTPException(status_code=403, detail={
             "ok": False, "code": "signup_disabled",

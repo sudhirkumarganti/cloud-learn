@@ -386,6 +386,14 @@ async def tenant_context_middleware(request, call_next):
     (ContextVar). Without the header, requests fall through to the globally
     active tenant. Cross-tenant access is then blocked by the state proxy."""
     tid = (request.headers.get("x-cloudlearn-tenant") or "").strip()
+    if tid:
+        from core.app_context import tenants_state as _tenants_state
+        known_tenants = _tenants_state().get("tenants", {})
+        if tid not in known_tenants:
+            return JSONResponse(status_code=403, content={
+                "error": {"ok": False, "code": "unknown_tenant",
+                          "reason": f"Tenant '{tid}' not found"}
+            })
     token = REQUEST_TENANT.set(tid) if tid else None
     try:
         response = await call_next(request)
@@ -680,10 +688,16 @@ def register_middleware(app) -> None:
     # 3. _DecompressRequestMiddleware (ASGI)
     app.add_middleware(_DecompressRequestMiddleware)
 
-    # 4. CORSMiddleware
+    # 4. CORSMiddleware — lock down origins in appliance mode
+    from core.app_context import appliance_mode_enabled
+    if appliance_mode_enabled():
+        origins = ["http://localhost:9000", "http://127.0.0.1:9000",
+                   "http://localhost:8080", "http://127.0.0.1:8080"]
+    else:
+        origins = ["*"]
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],
+        allow_origins=origins,
         allow_methods=["*"],
         allow_headers=["*"],
         expose_headers=["ETag", "x-amz-request-id", "x-amz-id-2", "Content-Range"],
